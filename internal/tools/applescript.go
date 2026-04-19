@@ -26,29 +26,42 @@ import (
 
 const (
 	osascriptMaxStderr = 4 * 1024
-	osascriptDefaultTimeout = 20 * time.Second
+	// Calendar.app cold-start takes 10-20 s the first time; Notes can
+	// be similar after a long sleep. 60 s is the reasonable ceiling
+	// for "any AppleScript call"; individual tools can pass a shorter
+	// context deadline to cap themselves tighter.
+	osascriptDefaultTimeout = 60 * time.Second
 )
 
 // RunAppleScript executes src via `osascript -` and returns stdout.
-// The context bound on a timeout bounds how long we'll wait; on
-// cancel, osascript is killed via CommandContext.
+// Inherits ctx's deadline if present; otherwise applies
+// osascriptDefaultTimeout. On cancel osascript is killed via
+// CommandContext.
 func RunAppleScript(ctx context.Context, src string) (string, error) {
 	if runtime.GOOS != "darwin" {
 		return "", fmt.Errorf("AppleScript is only available on macOS")
 	}
 
-	cctx, cancel := context.WithTimeout(ctx, osascriptDefaultTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(cctx, "osascript", "-")
+	// Honor an existing ctx deadline; only impose our default when
+	// none is set. Upstream callers often scope their own budget (the
+	// synth-side proxy passes a deadline through the WS), and an
+	// inner context.WithTimeout of our own would have been the
+	// shorter one and dropped the outer budget to 20 s silently.
+	effCtx := ctx
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		effCtx, cancel = context.WithTimeout(ctx, osascriptDefaultTimeout)
+		defer cancel()
+	}
+	cmd := exec.CommandContext(effCtx, "osascript", "-")
 	cmd.Stdin = strings.NewReader(src)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 
-	if cctx.Err() == context.DeadlineExceeded {
-		return "", fmt.Errorf("osascript timeout after %s", osascriptDefaultTimeout)
+	if effCtx.Err() == context.DeadlineExceeded {
+		return "", fmt.Errorf("osascript timeout")
 	}
 	if err != nil {
 		errMsg := strings.TrimSpace(stderr.String())
