@@ -1,0 +1,8 @@
+snth-companion
+*.exe
+*.dmg
+dist/
+.DS_Store
+*.log
+/tmp/
+coverage.out
