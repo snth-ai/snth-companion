@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"os/signal"
 	"runtime"
 	"syscall"
@@ -50,6 +49,10 @@ func main() {
 	tools.RegisterBash()
 	tools.RegisterFS()
 	tools.RegisterShortcut()
+	tools.RegisterCalendar()
+	tools.RegisterNotes()
+	tools.RegisterClipboard()
+	tools.RegisterNotify()
 
 	client := &daemon.Client{}
 
@@ -67,23 +70,36 @@ func main() {
 	client.Start()
 	log.Printf("UI at %s", uiURL)
 
-	if !*headless && runtime.GOOS == "darwin" {
-		// Nudge the user: open the UI in their default browser on first
-		// run. They'll use it to enter pair credentials.
-		go func() {
-			cmd := exec.Command("open", uiURL)
-			if err := cmd.Start(); err != nil {
-				log.Printf("open browser: %v (visit %s manually)", err, uiURL)
-			}
-		}()
-	} else {
+	if *headless || runtime.GOOS != "darwin" {
+		// Headless: no menubar, no auto-open. Just wait for a signal.
 		fmt.Fprintf(os.Stderr, "\nOpen %s in your browser.\n\n", uiURL)
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+		log.Printf("shutting down")
+		client.Stop()
+		return
 	}
 
-	// Wait for SIGINT/SIGTERM.
+	// GUI mode: systray.Run owns the main goroutine. A signal handler
+	// goroutine tears the menubar down cleanly on Ctrl-C so the lock
+	// file gets released.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
-	log.Printf("shutting down")
+	go func() {
+		<-sigCh
+		log.Printf("signal received, tearing down")
+		systrayQuitHook()
+	}()
+
+	daemon.RunMenubar(daemon.MenubarDeps{Client: client, UIURL: uiURL})
 	client.Stop()
+	log.Printf("shutdown complete")
+}
+
+// systrayQuitHook is a thin redirect to systray.Quit that lets main
+// avoid importing systray directly. Kept in a separate func so we can
+// stub it in tests.
+func systrayQuitHook() {
+	daemon.QuitMenubar()
 }
