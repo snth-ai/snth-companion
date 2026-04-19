@@ -48,6 +48,8 @@ func main() {
 	// Register all tools. They're already in the catalog before the WS
 	// client connects, so the hello frame advertises them correctly.
 	tools.RegisterBash()
+	tools.RegisterFS()
+	tools.RegisterShortcut()
 
 	client := &daemon.Client{}
 	client.Start()
