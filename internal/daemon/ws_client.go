@@ -232,21 +232,39 @@ func (c *Client) handleToolCall(frame Frame) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
+	start := time.Now()
 	resp := Frame{
 		Type:   FrameToolResult,
 		CallID: frame.CallID,
 	}
 	data, err := tools.Dispatch(ctx, frame.Tool, frame.Args)
+	duration := time.Since(start)
+
+	entry := AuditEntry{
+		StartedAt:   start,
+		DurationMs:  duration.Milliseconds(),
+		Tool:        frame.Tool,
+		ArgsSummary: summarizeJSON(frame.Args, 200),
+	}
 	if err != nil {
 		resp.Error = err.Error()
+		entry.Outcome = "error"
+		entry.Error = err.Error()
+		if err.Error() == "user denied" {
+			entry.Outcome = "denied"
+		}
 	} else {
 		raw, mErr := json.Marshal(data)
 		if mErr != nil {
 			resp.Error = fmt.Sprintf("marshal result: %s", mErr)
+			entry.Outcome = "error"
+			entry.Error = resp.Error
 		} else {
 			resp.Data = raw
+			entry.Outcome = "ok"
 		}
 	}
+	RecordAudit(entry)
 
 	c.mu.Lock()
 	ws := c.ws
@@ -258,6 +276,17 @@ func (c *Client) handleToolCall(frame Frame) {
 	if err := ws.WriteJSON(resp); err != nil {
 		log.Printf("[ws] write tool_result %s: %v", frame.CallID, err)
 	}
+}
+
+// summarizeJSON returns the raw JSON truncated to n runes (inclusive
+// of the ellipsis). Used for the audit log's args preview — we don't
+// want to store full 4 MiB file contents in an in-memory ring.
+func summarizeJSON(raw json.RawMessage, n int) string {
+	s := string(raw)
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-1] + "…"
 }
 
 // toWSURL converts an https://… synth URL to wss://…/path, or http→ws.

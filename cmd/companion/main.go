@@ -52,12 +52,19 @@ func main() {
 	tools.RegisterShortcut()
 
 	client := &daemon.Client{}
-	client.Start()
 
 	_, uiURL, err := daemon.StartUIServer(client)
 	if err != nil {
 		log.Fatalf("start ui server: %v", err)
 	}
+
+	release, err := daemon.AcquireLock(uiURL)
+	if err != nil {
+		log.Fatalf("lock: %v", err)
+	}
+	defer release()
+
+	client.Start()
 	log.Printf("UI at %s", uiURL)
 
 	if !*headless && runtime.GOOS == "darwin" {
