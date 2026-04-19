@@ -49,12 +49,19 @@ type Version struct {
 	WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
 }
 
-// Session caches per-target CDP handles. Callers get (target, cdp)
-// with Attach or AttachActive and use the cdp until an error; on
-// error they drop it, Session will open a fresh one next call.
+// Session caches per-target CDP handles and owns the extension
+// relay. AttachActive returns the best available transport in
+// priority order:
+//
+//  1. Live extension connection (via Relay, port 18792). Preferred
+//     because the user's real Chrome profile is used.
+//  2. Direct --remote-debugging-port=9222 attach. Fallback for when
+//     the user launched Chrome manually with the debug flag.
 type Session struct {
 	Host string // default "127.0.0.1"
-	Port int    // default DebuggerPort
+	Port int    // default DebuggerPort (9222)
+
+	Relay *RelayServer // non-nil → prefer extension over port
 
 	mu   sync.Mutex
 	cdps map[string]*CDP // targetID → connected cdp
@@ -66,6 +73,13 @@ func NewSession() *Session {
 		Port: DebuggerPort,
 		cdps: map[string]*CDP{},
 	}
+}
+
+// WithRelay attaches an already-started RelayServer so Conn-returning
+// methods can prefer it over the debug-port path.
+func (s *Session) WithRelay(r *RelayServer) *Session {
+	s.Relay = r
+	return s
 }
 
 // baseURL returns http://host:port (no trailing slash).
@@ -153,10 +167,21 @@ func (s *Session) Attach(ctx context.Context, t *Target) (*CDP, error) {
 	return c, nil
 }
 
-// AttachActive is the common combo: find the active page + attach.
-func (s *Session) AttachActive(ctx context.Context) (*Target, *CDP, error) {
+// AttachActive returns a ready-to-use Conn. Prefers the extension
+// relay when connected; falls back to direct debug-port CDP.
+// The Target is nil when we're talking through the relay (the
+// extension chose which tab when the user clicked its icon).
+func (s *Session) AttachActive(ctx context.Context) (*Target, Conn, error) {
+	if s.Relay != nil {
+		if client := s.Relay.Client(); client != nil {
+			return nil, client, nil
+		}
+	}
 	t, err := s.ActivePage(ctx)
 	if err != nil {
+		if s.Relay != nil {
+			return nil, nil, fmt.Errorf("%w — or click the SNTH Companion Relay extension icon in Chrome to attach a tab", err)
+		}
 		return nil, nil, err
 	}
 	c, err := s.Attach(ctx, t)

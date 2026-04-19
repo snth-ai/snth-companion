@@ -35,6 +35,15 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// Conn is the minimal surface our higher-level browser code needs. Both
+// *CDP (direct --remote-debugging-port attach) and *ExtensionClient
+// (via the relay/extension bridge) implement it, so snapshot.go and
+// actions.go take Conn, not a concrete *CDP.
+type Conn interface {
+	Send(ctx context.Context, method string, params any, result any) error
+	On(fn func(method string, params json.RawMessage))
+}
+
 // CDP is a single CDP WebSocket client attached to one target (tab or
 // browser endpoint). Safe for concurrent Send calls from many
 // goroutines. Not safe to reuse after Close — create a new CDP.

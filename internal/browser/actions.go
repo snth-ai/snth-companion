@@ -17,7 +17,7 @@ import (
 
 // Navigate tells the active page to go to url + waits for the load
 // event. Returns the final URL (after any redirects).
-func Navigate(ctx context.Context, c *CDP, url string) (string, error) {
+func Navigate(ctx context.Context, c Conn, url string) (string, error) {
 	var resp struct {
 		FrameID  string `json:"frameId"`
 		LoaderID string `json:"loaderId"`
@@ -36,10 +36,12 @@ func Navigate(ctx context.Context, c *CDP, url string) (string, error) {
 	// don't fire this reliably, so we also bail after 15 s and let
 	// snapshot reveal the state).
 	_ = WaitForLoad(ctx, c, 15*time.Second)
-	// After navigation the snapshot refs are stale; clear them.
+	// After navigation the FlatDomTree is stale; clear so the LLM
+	// calling click/type without a fresh snapshot gets a clean
+	// NO_TREE error instead of clicking on the old page's coords.
 	if err := enableRuntime(ctx, c); err == nil {
 		_ = c.Send(ctx, "Runtime.evaluate", map[string]any{
-			"expression":    "window._snth_refs = [];",
+			"expression":    "delete window.__snth_tree;",
 			"returnByValue": true,
 		}, nil)
 	}
@@ -49,7 +51,7 @@ func Navigate(ctx context.Context, c *CDP, url string) (string, error) {
 // WaitForLoad blocks until Page.loadEventFired or deadline. Errors
 // are swallowed — load events on SPAs are unreliable and snapshot
 // is authoritative.
-func WaitForLoad(ctx context.Context, c *CDP, timeout time.Duration) error {
+func WaitForLoad(ctx context.Context, c Conn, timeout time.Duration) error {
 	doneCh := make(chan struct{}, 1)
 	c.On(func(method string, params json.RawMessage) {
 		if method == "Page.loadEventFired" {
@@ -69,7 +71,7 @@ func WaitForLoad(ctx context.Context, c *CDP, timeout time.Duration) error {
 	}
 }
 
-func currentURL(ctx context.Context, c *CDP) string {
+func currentURL(ctx context.Context, c Conn) string {
 	var resp evalResult
 	_ = c.Send(ctx, "Runtime.evaluate", map[string]any{
 		"expression":    "location.href",
@@ -86,7 +88,7 @@ func currentURL(ctx context.Context, c *CDP) string {
 // centre, and dispatch a pair of mousedown/mouseup events via CDP
 // Input.dispatchMouseEvent (which cleanly triggers real onclick
 // handlers, unlike just calling .click()).
-func Click(ctx context.Context, c *CDP, ref int) error {
+func Click(ctx context.Context, c Conn, ref int) error {
 	x, y, err := refCentre(ctx, c, ref)
 	if err != nil {
 		return err
@@ -97,15 +99,21 @@ func Click(ctx context.Context, c *CDP, ref int) error {
 // Type focuses the element at `ref` and sends `text`. For inputs we
 // also set .value first so clearing is simple (caller passes the
 // desired final value; pass "" to clear).
-func Type(ctx context.Context, c *CDP, ref int, text string) error {
+func Type(ctx context.Context, c Conn, ref int, text string) error {
 	if err := focusRef(ctx, c, ref); err != nil {
 		return err
 	}
-	// Clear existing value if the element supports it.
+	// Clear existing value via window.__snth_tree lookup (v2 extractor).
 	_ = c.Send(ctx, "Runtime.evaluate", map[string]any{
 		"expression": fmt.Sprintf(`
 (() => {
-  const el = window._snth_refs[%d - 1];
+  const tree = window.__snth_tree;
+  if (!tree || !tree.map) return;
+  let el = null;
+  for (const id of Object.keys(tree.map)) {
+    const n = tree.map[id];
+    if (n && n.highlightIndex === %d) { el = n.ref; break; }
+  }
   if (!el) return;
   if ('value' in el) {
     el.value = '';
@@ -126,7 +134,7 @@ func Type(ctx context.Context, c *CDP, ref int, text string) error {
 
 // Press dispatches a named key press (Enter, Tab, Escape, ArrowDown,
 // etc). Used after Type when a form wants a submission.
-func Press(ctx context.Context, c *CDP, key string) error {
+func Press(ctx context.Context, c Conn, key string) error {
 	if err := c.Send(ctx, "Input.dispatchKeyEvent", map[string]any{
 		"type": "keyDown",
 		"key":  key,
@@ -141,7 +149,7 @@ func Press(ctx context.Context, c *CDP, key string) error {
 
 // Screenshot returns a PNG of the viewport as base64. format can be
 // "png" (default) or "jpeg".
-func Screenshot(ctx context.Context, c *CDP, format string) (string, string, error) {
+func Screenshot(ctx context.Context, c Conn, format string) (string, string, error) {
 	if format == "" {
 		format = "png"
 	}
@@ -168,7 +176,7 @@ func Screenshot(ctx context.Context, c *CDP, format string) (string, string, err
 // EvalJS runs an arbitrary expression in page context and returns
 // the stringified result. Power-user escape hatch; most synth flows
 // should use snapshot → click → type instead.
-func EvalJS(ctx context.Context, c *CDP, expr string) (string, error) {
+func EvalJS(ctx context.Context, c Conn, expr string) (string, error) {
 	if err := enableRuntime(ctx, c); err != nil {
 		return "", err
 	}
@@ -196,7 +204,7 @@ func EvalJS(ctx context.Context, c *CDP, expr string) (string, error) {
 
 // WaitForURL polls location.href against the given regex until it
 // matches or timeout. Returns the matching URL.
-func WaitForURL(ctx context.Context, c *CDP, pattern string, timeout time.Duration) (string, error) {
+func WaitForURL(ctx context.Context, c Conn, pattern string, timeout time.Duration) (string, error) {
 	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return "", fmt.Errorf("bad pattern: %w", err)
@@ -218,7 +226,7 @@ func WaitForURL(ctx context.Context, c *CDP, pattern string, timeout time.Durati
 
 // WaitForJS polls an arbitrary JS predicate. Predicate should return
 // truthy when the page is ready. Timeout bounded.
-func WaitForJS(ctx context.Context, c *CDP, predicate string, timeout time.Duration) error {
+func WaitForJS(ctx context.Context, c Conn, predicate string, timeout time.Duration) error {
 	if err := enableRuntime(ctx, c); err != nil {
 		return err
 	}
@@ -244,16 +252,31 @@ func WaitForJS(ctx context.Context, c *CDP, predicate string, timeout time.Durat
 
 // --- low-level helpers ------------------------------------------------------
 
-// refCentre resolves a snapshot ref to its element's viewport-centre
-// coordinates, scrolling into view if necessary.
-func refCentre(ctx context.Context, c *CDP, ref int) (x, y float64, err error) {
+// refCentre resolves a snapshot ref (highlightIndex) to its element's
+// viewport-centre coordinates, scrolling into view if necessary. We
+// look the element up via window.__snth_tree.map[<nodeId>], where
+// nodeId is the DOM_HASH_MAP id the page-agent extractor assigned.
+// Since page-agent uses WeakMap internally we store a back-reference
+// via dom_tree.js's `domRef` on each node.
+func refCentre(ctx context.Context, c Conn, ref int) (x, y float64, err error) {
 	if err := enableRuntime(ctx, c); err != nil {
 		return 0, 0, err
 	}
 	expr := fmt.Sprintf(`
 (() => {
-  const el = window._snth_refs[%d - 1];
-  if (!el) return null;
+  const tree = window.__snth_tree;
+  if (!tree || !tree.map) return "NO_TREE";
+  let el = null;
+  for (const id of Object.keys(tree.map)) {
+    const n = tree.map[id];
+    if (n && n.highlightIndex === %d) {
+      // dom_tree.js stores the live node under domRef when
+      // "direct dom ref" mode is enabled (see its @edit notes).
+      el = n.ref;
+      break;
+    }
+  }
+  if (!el) return "NOT_FOUND";
   el.scrollIntoView({block: 'center', inline: 'center'});
   const r = el.getBoundingClientRect();
   return JSON.stringify({x: r.left + r.width/2, y: r.top + r.height/2});
@@ -270,7 +293,13 @@ func refCentre(ctx context.Context, c *CDP, ref int) (x, y float64, err error) {
 	}
 	s, ok := resp.Result.Value.(string)
 	if !ok || s == "" {
-		return 0, 0, fmt.Errorf("ref %d not found — snapshot may be stale; re-snapshot", ref)
+		return 0, 0, fmt.Errorf("ref %d: empty response", ref)
+	}
+	switch s {
+	case "NO_TREE":
+		return 0, 0, fmt.Errorf("no DOM snapshot taken yet — call remote_browser_snapshot first")
+	case "NOT_FOUND":
+		return 0, 0, fmt.Errorf("ref %d not found in current snapshot — page may have changed, re-snapshot", ref)
 	}
 	var coord struct {
 		X float64 `json:"x"`
@@ -282,7 +311,7 @@ func refCentre(ctx context.Context, c *CDP, ref int) (x, y float64, err error) {
 	return coord.X, coord.Y, nil
 }
 
-func clickAt(ctx context.Context, c *CDP, x, y float64) error {
+func clickAt(ctx context.Context, c Conn, x, y float64) error {
 	for _, t := range []string{"mousePressed", "mouseReleased"} {
 		if err := c.Send(ctx, "Input.dispatchMouseEvent", map[string]any{
 			"type":       t,
@@ -297,13 +326,19 @@ func clickAt(ctx context.Context, c *CDP, x, y float64) error {
 	return nil
 }
 
-func focusRef(ctx context.Context, c *CDP, ref int) error {
+func focusRef(ctx context.Context, c Conn, ref int) error {
 	if err := enableRuntime(ctx, c); err != nil {
 		return err
 	}
 	expr := fmt.Sprintf(`
 (() => {
-  const el = window._snth_refs[%d - 1];
+  const tree = window.__snth_tree;
+  if (!tree || !tree.map) return "NO_TREE";
+  let el = null;
+  for (const id of Object.keys(tree.map)) {
+    const n = tree.map[id];
+    if (n && n.highlightIndex === %d) { el = n.ref; break; }
+  }
   if (!el) return "NOT_FOUND";
   el.focus();
   return "OK";

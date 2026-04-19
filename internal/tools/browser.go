@@ -28,9 +28,9 @@ import (
 // the agent is touching a real user session. Snapshot / screenshot /
 // tabs are safe (read-only).
 
-// sessionSingleton is lazy — the Session doesn't connect to Chrome
-// until the first tool call. If Chrome isn't running with the debug
-// port, we surface a friendly error pointing at the README.
+// sessionSingleton lazily binds the RelayServer + Session. We start
+// the relay on first use so a fresh companion can be quiet on 18792
+// until someone actually reaches for the browser tool.
 var (
 	sessionOnce sync.Once
 	sessionPtr  *browser.Session
@@ -38,7 +38,16 @@ var (
 
 func browserSession() *browser.Session {
 	sessionOnce.Do(func() {
-		sessionPtr = browser.NewSession()
+		relay := browser.NewRelayServer(0) // 0 → default 18792
+		if err := relay.Start(); err != nil {
+			// Non-fatal: the Session still works via direct
+			// --remote-debugging-port attach if the user launched
+			// Chrome that way.
+			// Log is emitted by relay itself; we just skip binding.
+			sessionPtr = browser.NewSession()
+			return
+		}
+		sessionPtr = browser.NewSession().WithRelay(relay)
 	})
 	return sessionPtr
 }
@@ -138,9 +147,11 @@ func browserHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 		return map[string]any{"final_url": final}, nil
 
 	case "click":
-		if a.Ref <= 0 {
-			return nil, fmt.Errorf("ref required for click (from snapshot.elements[i].ref)")
-		}
+		// ref 0 is valid (page-agent numbers from 0). The ref-resolver
+		// in actions.go returns NOT_FOUND if the snapshot doesn't
+		// have that index, so we rely on that for validation rather
+		// than a naive zero-check here.
+		_ = a.Ref
 		if err := browserApprove(ctx, fmt.Sprintf("Click browser element #%d", a.Ref)); err != nil {
 			return nil, err
 		}
@@ -154,9 +165,7 @@ func browserHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 		return map[string]any{"ok": true, "ref": a.Ref}, nil
 
 	case "type":
-		if a.Ref <= 0 {
-			return nil, fmt.Errorf("ref required for type")
-		}
+		_ = a.Ref // ref=0 valid; resolver validates
 		preview := a.Text
 		if len(preview) > 80 {
 			preview = preview[:80] + "…"

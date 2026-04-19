@@ -2,123 +2,71 @@ package browser
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 )
 
-// Snapshot returns a compact, LLM-friendly view of the active page:
-// a flat numbered list of interactive elements + short text blocks.
-// Each entry has a numeric `ref` the agent uses to click, type into,
-// or otherwise target the element — we then resolve `ref` back to a
-// DOM node via the per-ref script window._snth_refs array inside the
-// page.
+// snapshot.go — DOM → compact LLM-friendly representation.
 //
-// Why numbered refs over CSS selectors: CSS selectors are brittle
-// (break on every Tailwind rebuild), opaque to the LLM, and waste
-// tokens. A numbered tree matches OpenClaw / Playwright's best
-// practice — the agent says "click 7" and we resolve.
+// We use alibaba/page-agent's battle-tested DOM extractor (itself
+// forked from browser-use). The JS walks the DOM, detects
+// interactivity via ~40 heuristics (visibility + event handlers +
+// cursor style + ARIA + role + etc.), assigns stable highlightIndex
+// numbers, and returns a flat hash map. We receive that JSON, then
+// format it server-side (Go) so we can tune the output for our LLM
+// budget without re-running JS.
 //
-// The JS we inject is inlined as a const string — no embed.FS
-// needed for one page and it keeps snapshot.go self-contained.
+// Output has two halves:
+//   - `text`: the indented "[12]<button ...>Submit</button>" lines
+//     the LLM sees. Matches page-agent's format closely.
+//   - `selectors`: map[highlightIndex]metadata for click/type to
+//     resolve clicks via Runtime.evaluate(window.__snth_tree.map[id]).
 
-const snapshotJS = `
-(() => {
-  const refs = [];
-  const push = (el, entry) => {
-    refs.push(el);
-    entry.ref = refs.length;
-    return entry;
-  };
+//go:embed assets/dom_tree.js
+var domTreeJS string
 
-  const isVisible = (el) => {
-    if (!el) return false;
-    const rect = el.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return false;
-    const style = getComputedStyle(el);
-    if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') return false;
-    return true;
-  };
+//go:embed assets/wrapper.js
+var wrapperJS string
 
-  const label = (el) => {
-    const ariaLabel = el.getAttribute('aria-label');
-    if (ariaLabel) return ariaLabel.trim();
-    const title = el.getAttribute('title');
-    if (title) return title.trim();
-    const placeholder = el.getAttribute('placeholder');
-    if (placeholder) return placeholder.trim();
-    const value = el.value;
-    if (value && typeof value === 'string' && value.length < 120) return value.trim();
-    const text = (el.textContent || '').trim().replace(/\s+/g, ' ');
-    if (text && text.length < 160) return text;
-    if (text) return text.slice(0, 160) + '…';
-    return '';
-  };
-
-  const out = { title: document.title, url: location.href, elements: [] };
-  const sel = 'a, button, input:not([type=hidden]), textarea, select, [role=button], [role=link], [role=textbox], [role=checkbox], [role=combobox], [role=menuitem]';
-  for (const el of document.querySelectorAll(sel)) {
-    if (!isVisible(el)) continue;
-    const role = el.getAttribute('role') ||
-      (el.tagName === 'A' ? 'link'
-      : el.tagName === 'BUTTON' ? 'button'
-      : el.tagName === 'INPUT' ? ('input:' + (el.type || 'text'))
-      : el.tagName === 'TEXTAREA' ? 'textarea'
-      : el.tagName === 'SELECT' ? 'select'
-      : el.tagName.toLowerCase());
-    const entry = { role, name: label(el) };
-    if (el.href) entry.href = el.href;
-    if (el.value && typeof el.value === 'string' && el.value.length < 120) entry.value = el.value;
-    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
-      entry.placeholder = el.getAttribute('placeholder') || '';
-      entry.disabled = !!el.disabled;
-    }
-    out.elements.push(push(el, entry));
-  }
-
-  // Headings and prominent text — anchor the page so the LLM knows
-  // what it's looking at even if the interactive set is sparse.
-  for (const el of document.querySelectorAll('h1, h2, h3')) {
-    if (!isVisible(el)) continue;
-    const text = (el.textContent || '').trim().replace(/\s+/g, ' ');
-    if (!text) continue;
-    out.elements.push(push(el, { role: el.tagName.toLowerCase(), name: text.slice(0, 200) }));
-  }
-
-  window._snth_refs = refs;
-  return JSON.stringify(out);
-})();
-`
-
-// ElementRef is the numbered entry the LLM sees.
-type ElementRef struct {
-	Ref         int    `json:"ref"`
-	Role        string `json:"role"`
-	Name        string `json:"name"`
-	Href        string `json:"href,omitempty"`
-	Value       string `json:"value,omitempty"`
-	Placeholder string `json:"placeholder,omitempty"`
-	Disabled    bool   `json:"disabled,omitempty"`
-}
-
-// SnapshotResult is what we hand back to the tool.
+// SnapshotResult is what we hand back to the browser tool. The
+// companion sends it to the synth verbatim.
 type SnapshotResult struct {
-	Title    string       `json:"title"`
-	URL      string       `json:"url"`
-	Elements []ElementRef `json:"elements"`
+	Title     string                    `json:"title"`
+	URL       string                    `json:"url"`
+	Text      string                    `json:"text"`      // indented [idx]<tag...> lines
+	Selectors map[int]SelectorEntry     `json:"selectors"` // highlightIndex → metadata
 }
 
-// Snapshot runs snapshotJS on the attached target, parses the result,
-// and also stores the DOM-ref mapping on the page (window._snth_refs)
-// so subsequent action calls can resolve `ref → DOM node` without
-// re-scanning.
-func Snapshot(ctx context.Context, c *CDP) (*SnapshotResult, error) {
+// SelectorEntry is the per-ref metadata used by actions.go to
+// resolve clicks, typing, etc. We keep it small so snapshot size
+// stays bounded — raw DOM isn't included, just what we need to
+// dispatch events.
+type SelectorEntry struct {
+	Tag        string            `json:"tag"`
+	Attributes map[string]string `json:"attributes,omitempty"`
+	NodeID     string            `json:"node_id"`
+	Text       string            `json:"text,omitempty"`
+}
+
+// Snapshot runs the embedded JS, parses the FlatDomTree map, and
+// formats the text. Stashes window.__snth_tree on the page so
+// click/type can resolve refs in a second Runtime.evaluate.
+func Snapshot(ctx context.Context, c Conn) (*SnapshotResult, error) {
 	if err := enableRuntime(ctx, c); err != nil {
 		return nil, err
 	}
+
+	// The dom_tree.js was sed-converted from `export default (args =...)`
+	// to a naked arrow-function expression. We splice it in at the
+	// placeholder in wrapper.js and eval the combined source.
+	bundle := strings.Replace(wrapperJS, "__SNTH_DOM_TREE_FN__", "("+domTreeJS+")", 1)
+
 	var resp evalResult
 	err := c.Send(ctx, "Runtime.evaluate", map[string]any{
-		"expression":    snapshotJS,
+		"expression":    bundle,
 		"returnByValue": true,
 		"awaitPromise":  false,
 	}, &resp)
@@ -130,22 +78,232 @@ func Snapshot(ctx context.Context, c *CDP) (*SnapshotResult, error) {
 	}
 	raw, ok := resp.Result.Value.(string)
 	if !ok {
-		// It might be a JSON object already — try marshaling.
 		blob, err := json.Marshal(resp.Result.Value)
 		if err != nil {
 			return nil, fmt.Errorf("snapshot result: unexpected type %T", resp.Result.Value)
 		}
 		raw = string(blob)
 	}
-	var out SnapshotResult
-	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+
+	var tree flatTree
+	if err := json.Unmarshal([]byte(raw), &tree); err != nil {
 		return nil, fmt.Errorf("snapshot decode: %w (raw head: %s)", err, head(raw, 200))
 	}
-	return &out, nil
+	if tree.Err != "" {
+		return nil, fmt.Errorf("snapshot JS error: %s", tree.Err)
+	}
+
+	text, selectors := formatTree(&tree)
+	return &SnapshotResult{
+		Title:     tree.Title,
+		URL:       tree.URL,
+		Text:      text,
+		Selectors: selectors,
+	}, nil
 }
 
-// evalResult is the subset of Runtime.evaluate's response we care
-// about.
+// --- wire types ------------------------------------------------------------
+//
+// These mirror what dom_tree.js (via wrapper.js) puts on the wire. Every
+// field is optional; absent fields are zero-value. We keep the struct
+// permissive because upstream page-agent can add fields without breaking us.
+
+type flatTree struct {
+	RootID string                 `json:"rootId"`
+	Map    map[string]flatNode    `json:"map"`
+	Title  string                 `json:"title"`
+	URL    string                 `json:"url"`
+	Err    string                 `json:"error,omitempty"`
+}
+
+type flatNode struct {
+	// Common
+	Type string `json:"type"` // "TEXT_NODE" or element (blank = element for dom_tree.js)
+
+	// Element
+	TagName        string            `json:"tagName,omitempty"`
+	Attributes     map[string]string `json:"attributes,omitempty"`
+	Children       []string          `json:"children,omitempty"`
+	IsVisible      bool              `json:"isVisible,omitempty"`
+	IsInteractive  bool              `json:"isInteractive,omitempty"`
+	IsTopElement   bool              `json:"isTopElement,omitempty"`
+	IsNew          bool              `json:"isNew,omitempty"`
+	HighlightIndex *int              `json:"highlightIndex,omitempty"`
+	Extra          map[string]any    `json:"extra,omitempty"`
+
+	// Text
+	Text string `json:"text,omitempty"`
+}
+
+// --- formatter -------------------------------------------------------------
+
+// formatTree walks the flat map and builds:
+//   - indented [idx]<tag ...>text</tag> lines for every element with a
+//     highlightIndex, plus the text nodes that "anchor" them.
+//   - the selector map Go-side so actions can resolve ref → node_id.
+//
+// Lightweight port of page-agent's flatTreeToString — same shape,
+// simpler attr-cleanup rules. If we hit output-quality problems we can
+// bring back the duplicate-value elimination + semantic-tag emission.
+func formatTree(tree *flatTree) (string, map[int]SelectorEntry) {
+	if tree.RootID == "" || tree.Map == nil {
+		return "", nil
+	}
+	selectors := map[int]SelectorEntry{}
+	var lines []string
+
+	// Attributes we care about when printing. Intentionally short —
+	// every extra attr eats tokens.
+	allowAttrs := []string{
+		"type", "role", "name", "aria-label", "placeholder",
+		"value", "title", "alt", "href", "checked",
+		"aria-expanded", "aria-checked", "aria-haspopup",
+	}
+	allow := map[string]bool{}
+	for _, a := range allowAttrs {
+		allow[a] = true
+	}
+
+	var walk func(id string, depth int)
+	walk = func(id string, depth int) {
+		node, ok := tree.Map[id]
+		if !ok {
+			return
+		}
+		nextDepth := depth
+
+		if node.Type == "" || node.Type != "TEXT_NODE" {
+			// Element.
+			if node.HighlightIndex != nil {
+				idx := *node.HighlightIndex
+				prefix := "["
+				if node.IsNew {
+					prefix = "*["
+				}
+				textInside := collectText(tree, id)
+				attrsStr := ""
+				for _, a := range allowAttrs {
+					if v, ok := node.Attributes[a]; ok && v != "" {
+						if attrsStr != "" {
+							attrsStr += " "
+						}
+						attrsStr += fmt.Sprintf("%s=%s", a, capAttr(v, 24))
+					}
+				}
+				line := strings.Repeat("\t", depth) + prefix + fmt.Sprintf("%d]", idx) + "<" + node.TagName
+				if attrsStr != "" {
+					line += " " + attrsStr
+				}
+				if textInside != "" {
+					line += ">" + textInside + "</" + node.TagName + ">"
+				} else {
+					line += " />"
+				}
+				lines = append(lines, line)
+
+				selectors[idx] = SelectorEntry{
+					Tag:        node.TagName,
+					Attributes: filterAttrs(node.Attributes, allow),
+					NodeID:     id,
+					Text:       textInside,
+				}
+				nextDepth++
+			}
+			for _, cid := range node.Children {
+				walk(cid, nextDepth)
+			}
+		} else {
+			// Text node: only surface it if there's no highlighted
+			// ancestor (i.e. not already captured inside a [idx]).
+			if !hasHighlightedAncestor(tree, id) {
+				t := strings.TrimSpace(node.Text)
+				if t != "" {
+					lines = append(lines, strings.Repeat("\t", depth)+capAttr(t, 200))
+				}
+			}
+		}
+	}
+
+	walk(tree.RootID, 0)
+	return strings.Join(lines, "\n"), selectors
+}
+
+func collectText(tree *flatTree, id string) string {
+	var parts []string
+	var walk func(nid string, depth int)
+	walk = func(nid string, depth int) {
+		n, ok := tree.Map[nid]
+		if !ok {
+			return
+		}
+		if n.Type == "TEXT_NODE" && strings.TrimSpace(n.Text) != "" {
+			parts = append(parts, strings.TrimSpace(n.Text))
+			return
+		}
+		if n.Type == "" || n.Type != "TEXT_NODE" {
+			// Descend into children UNLESS the child is itself
+			// a highlighted interactive element (we don't want to
+			// slurp neighbour labels into our name).
+			for _, cid := range n.Children {
+				c, ok := tree.Map[cid]
+				if !ok {
+					continue
+				}
+				if c.Type != "TEXT_NODE" && c.HighlightIndex != nil && cid != id {
+					continue
+				}
+				walk(cid, depth+1)
+			}
+		}
+	}
+	walk(id, 0)
+	joined := strings.Join(parts, " ")
+	joined = strings.Join(strings.Fields(joined), " ")
+	return capAttr(joined, 120)
+}
+
+func hasHighlightedAncestor(tree *flatTree, id string) bool {
+	// Cheap parent-walk by scanning children lists. O(N²) worst case
+	// but N is small enough (< few thousand nodes) that it doesn't
+	// hurt in practice. A proper port would build a parent map once.
+	for parentID, node := range tree.Map {
+		for _, cid := range node.Children {
+			if cid == id {
+				if node.HighlightIndex != nil {
+					return true
+				}
+				return hasHighlightedAncestor(tree, parentID)
+			}
+		}
+	}
+	return false
+}
+
+func filterAttrs(in map[string]string, allow map[string]bool) map[string]string {
+	out := map[string]string{}
+	keys := make([]string, 0, len(in))
+	for k := range in {
+		if allow[k] {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		out[k] = in[k]
+	}
+	return out
+}
+
+func capAttr(s string, n int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-3] + "..."
+}
+
+// --- evaluation plumbing ---------------------------------------------------
+
 type evalResult struct {
 	Result struct {
 		Type        string      `json:"type"`
@@ -162,21 +320,15 @@ type evalResult struct {
 	} `json:"exceptionDetails,omitempty"`
 }
 
-var runtimeEnabled = map[string]bool{} // cdp.url → enabled
-var runtimeMu = make(chan struct{}, 1)
-
-// enableRuntime issues Runtime.enable once per CDP. Cheap to call
-// repeatedly, but we gate it to avoid wasted round-trips on hot path.
-func enableRuntime(ctx context.Context, c *CDP) error {
-	runtimeMu <- struct{}{}
-	defer func() { <-runtimeMu }()
-	if runtimeEnabled[c.url] {
-		return nil
-	}
+// enableRuntime enables the Runtime domain on the attached conn.
+// Idempotent per CDP docs — calling it repeatedly is cheap and
+// mandatory before Runtime.evaluate works on a fresh session.
+// Accepts Conn so it works with either the direct CDP or the
+// extension-relay transport.
+func enableRuntime(ctx context.Context, c Conn) error {
 	if err := c.Send(ctx, "Runtime.enable", nil, nil); err != nil {
 		return fmt.Errorf("Runtime.enable: %w", err)
 	}
-	runtimeEnabled[c.url] = true
 	return nil
 }
 
@@ -187,9 +339,6 @@ func head(s string, n int) string {
 	return s[:n-1] + "…"
 }
 
-// quoteJSString escapes a Go string for inclusion inside a JS source
-// literal. Used by actions that build one-off JS snippets referencing
-// user-supplied text (click-by-text, type value, etc.).
 func quoteJSString(s string) string {
 	var b strings.Builder
 	b.WriteByte('"')
