@@ -53,6 +53,9 @@ func main() {
 	tools.RegisterNotes()
 	tools.RegisterClipboard()
 	tools.RegisterNotify()
+	tools.RegisterReminders()
+	tools.RegisterContacts()
+	tools.RegisterMessages()
 
 	client := &daemon.Client{}
 
