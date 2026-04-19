@@ -14,11 +14,24 @@ import (
 	"github.com/snth-ai/snth-companion/internal/sandbox"
 )
 
-// BashArgs is the RPC arg shape for remote_bash.
+// BashArgs is the RPC arg shape for remote_bash. "cmd" is canonical;
+// "command" is accepted as an alias because LLMs habitually emit it
+// (matching Anthropic's built-in bash tool). Same for "dir" → "cwd".
 type BashArgs struct {
 	Cmd       string `json:"cmd"`
+	CmdAlias  string `json:"command,omitempty"`
 	Cwd       string `json:"cwd,omitempty"`
+	CwdAlias  string `json:"dir,omitempty"`
 	TimeoutMs int    `json:"timeout_ms,omitempty"`
+}
+
+func (a *BashArgs) normalize() {
+	if a.Cmd == "" && a.CmdAlias != "" {
+		a.Cmd = a.CmdAlias
+	}
+	if a.Cwd == "" && a.CwdAlias != "" {
+		a.Cwd = a.CwdAlias
+	}
 }
 
 // BashResult is what we return to the synth.
@@ -50,6 +63,7 @@ func bashHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return nil, fmt.Errorf("bad args: %w", err)
 	}
+	args.normalize()
 	args.Cmd = strings.TrimSpace(args.Cmd)
 	if args.Cmd == "" {
 		return nil, fmt.Errorf("cmd is required")

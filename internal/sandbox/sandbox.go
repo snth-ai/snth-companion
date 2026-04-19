@@ -20,7 +20,9 @@ import (
 
 // Resolve turns a possibly-relative path into an absolute, symlink-free
 // canonical form. When path is empty it returns cwd (useful for bash tool
-// with no explicit cwd).
+// with no explicit cwd). Leading `~` or `~/` is expanded to the user's
+// home directory — Go's filepath.Abs doesn't do this, but LLMs and humans
+// both habitually type tilde-paths.
 func Resolve(path string) (string, error) {
 	if path == "" {
 		wd, err := os.Getwd()
@@ -28,6 +30,17 @@ func Resolve(path string) (string, error) {
 			return "", err
 		}
 		return wd, nil
+	}
+	if path == "~" || (len(path) >= 2 && path[:2] == "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve ~: %w", err)
+		}
+		if path == "~" {
+			path = home
+		} else {
+			path = filepath.Join(home, path[2:])
+		}
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
