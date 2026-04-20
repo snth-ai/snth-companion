@@ -243,7 +243,20 @@ func (s *UIServer) handlePairPage(w http.ResponseWriter, r *http.Request) {
   <form method="POST" action="/unpair" style="margin-top:16px"><button class="danger" type="submit">Unpair</button></form>
 </div>
 <div class="card">
-  <h2>Re-pair with a different synth</h2>
+  <h2>Re-pair with a 6-digit code</h2>
+  <p style="color:#94a3b8;font-size:13px">
+    Send <code>/pair_companion</code> in Telegram to the synth you want to control. Paste the code you get back here.
+  </p>
+  <form method="POST" action="/pair/claim">
+    <label>Code</label>
+    <input name="code" placeholder="123456" pattern="[0-9 ]+" maxlength="10" required style="font-size:20px;letter-spacing:0.15em;text-align:center" />
+    <label>Hub URL</label>
+    <input name="hub_url" value="https://hub.snth.ai" required />
+    <div style="margin-top:16px"><button type="submit">Claim &amp; re-pair</button></div>
+  </form>
+</div>
+<div class="card">
+  <h2>Advanced: manual re-pair</h2>
   <form method="POST" action="/pair/save">
     <label>Synth URL</label>
     <input name="synth_url" required />
