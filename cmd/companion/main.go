@@ -57,6 +57,7 @@ func main() {
 	tools.RegisterContacts()
 	tools.RegisterMessages()
 	tools.RegisterBrowser()
+	tools.RegisterFlights()
 
 	client := &daemon.Client{}
 
