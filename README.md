@@ -7,7 +7,7 @@ WebSocket to the synth's backend.
 
 ## Status
 
-Phase 1 (MVP). 21 tools across 4 waves. Menubar app. Chrome extension
+Phase 1 (MVP). 22 tools across 5 waves. Menubar app. Chrome extension
 relay. `snth-companion` is the first public repo of the SNTH stack.
 
 ## Architecture
@@ -63,6 +63,7 @@ Synth (Hetzner) ─tool call─> Companion (user's Mac)
 | `remote_messages_send`      | 3 | always-prompt | iMessage / SMS via Messages.app. |
 | `remote_messages_recent`    | 3 | always-prompt | Direct `chat.db` SQLite query. Needs FDA. |
 | `remote_browser`            | 4 | prompt        | Composite Chrome driver (navigate/snapshot/click/type/press/wait/screenshot/tabs/version/eval). |
+| `remote_flight_search`      | 5 | safe          | Search IATA-to-IATA flights via the `letsfg` CLI on the paired Mac. 1-2 min per call; scrapes multiple OTAs in parallel. |
 
 ## Platforms
 
