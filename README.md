@@ -7,8 +7,9 @@ WebSocket to the synth's backend.
 
 ## Status
 
-Phase 1 (MVP). 22 tools across 5 waves. Menubar app. Chrome extension
-relay. `snth-companion` is the first public repo of the SNTH stack.
+Phase 1 (MVP). 23 tools across 6 waves. Menubar app. Chrome extension
+relay. TG pair flow. `snth-companion` is the first public repo of the
+SNTH stack.
 
 ## Architecture
 
@@ -33,10 +34,12 @@ Synth (Hetzner) ─tool call─> Companion (user's Mac)
   User can grant additional folder roots from the menubar UI.
   Out-of-sandbox operations require a native macOS approval prompt
   (via osascript).
-- **Pairing:** one companion = one synth. Set `SNTH_COMPANION_TOKEN`
-  env var on the synth, paste same token + synth URL into companion's
-  pair form at `http://127.0.0.1:<port>/`. A TG-mediated pair-code
-  flow via the hub is planned.
+- **Pairing (TG code):** send `/pair_companion` to your synth's
+  Telegram bot. It replies with a 6-digit code, 5-min TTL. Paste
+  the code into the companion's Pair tab — hub relays a fresh
+  token and the companion auto-configures synth URL + ID + token.
+  Legacy operator path (`SNTH_COMPANION_TOKEN` env + manual paste)
+  still works for dev.
 
 ## Tool catalogue
 
@@ -64,6 +67,7 @@ Synth (Hetzner) ─tool call─> Companion (user's Mac)
 | `remote_messages_recent`    | 3 | always-prompt | Direct `chat.db` SQLite query. Needs FDA. |
 | `remote_browser`            | 4 | prompt        | Composite Chrome driver (navigate/snapshot/click/type/press/wait/screenshot/tabs/version/eval). |
 | `remote_flight_search`      | 5 | safe          | Search IATA-to-IATA flights via the `letsfg` CLI on the paired Mac. 1-2 min per call; scrapes multiple OTAs in parallel. |
+| `remote_subagent`           | 6 | always-prompt | Delegate a concrete coding mission to `claude -p` or `codex exec` on the paired Mac. Blocks up to 60 min. Returns transcript + git diff stat. |
 
 ## Platforms
 
