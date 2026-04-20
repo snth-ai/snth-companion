@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -46,6 +48,7 @@ func (s *UIServer) routes() http.Handler {
 	mux.HandleFunc("/", s.handleStatus)
 	mux.HandleFunc("/pair", s.handlePairPage)
 	mux.HandleFunc("/pair/save", s.handlePairSave)
+	mux.HandleFunc("/pair/claim", s.handlePairClaim)
 	mux.HandleFunc("/unpair", s.handleUnpair)
 	mux.HandleFunc("/tools", s.handleTools)
 	mux.HandleFunc("/sandbox", s.handleSandboxPage)
@@ -200,10 +203,25 @@ func (s *UIServer) handlePairPage(w http.ResponseWriter, r *http.Request) {
 
 	form := `
 <div class="card">
-  <h2>Pair with a synth</h2>
+  <h2>Pair with a 6-digit code</h2>
   <p style="color:#94a3b8;font-size:13px">
-    For now this is a manual pair. Paste the synth's public URL, the <code>SNTH_COMPANION_TOKEN</code> set on its container, and the synth's ID (used as the folder name under <code>~/SNTH/</code>).
-    A TG-mediated pair-code flow is coming in a future release.
+    In Telegram, send <code>/pair_companion</code> to your synth's bot. It will
+    reply with a 6-digit code that expires in 5 minutes. Paste it here —
+    synth URL, token, and synth ID are fetched from the hub automatically.
+  </p>
+  <form method="POST" action="/pair/claim">
+    <label>Code</label>
+    <input name="code" placeholder="123456" pattern="[0-9 ]+" maxlength="10" required style="font-size:20px;letter-spacing:0.15em;text-align:center" />
+    <label>Hub URL</label>
+    <input name="hub_url" value="https://hub.snth.ai" required />
+    <div style="margin-top:16px"><button type="submit">Claim &amp; pair</button></div>
+  </form>
+</div>
+<div class="card">
+  <h2>Advanced: paste credentials manually</h2>
+  <p style="color:#94a3b8;font-size:13px">
+    For the operator flow (pre-pair-code) or when debugging. Paste
+    the synth's public URL, the bearer token, and the synth ID.
   </p>
   <form method="POST" action="/pair/save">
     <label>Synth URL</label>
@@ -270,6 +288,107 @@ func (s *UIServer) handlePairSave(w http.ResponseWriter, r *http.Request) {
 	s.Client.Stop()
 	s.Client.Start()
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// handlePairClaim takes a 6-digit code + hub URL and exchanges the
+// code for {synth_url, synth_id, companion_token} via the hub's
+// /api/companion/claim-pair. On success writes config + reconnects
+// the WS client. On failure shows the error in the pair page.
+func (s *UIServer) handlePairClaim(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", 405)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+
+	// Normalise: strip spaces / dashes.
+	raw := strings.TrimSpace(r.FormValue("code"))
+	var digits strings.Builder
+	for _, ch := range raw {
+		if ch >= '0' && ch <= '9' {
+			digits.WriteRune(ch)
+		}
+	}
+	code := digits.String()
+	if len(code) != 6 {
+		s.renderPairError(w, "Code must be exactly 6 digits (got "+fmt.Sprint(len(code))+").")
+		return
+	}
+
+	hubURL := strings.TrimRight(strings.TrimSpace(r.FormValue("hub_url")), "/")
+	if hubURL == "" {
+		hubURL = "https://hub.snth.ai"
+	}
+
+	payload, _ := json.Marshal(map[string]string{"code": code})
+	req, err := http.NewRequestWithContext(r.Context(), "POST",
+		hubURL+"/api/companion/claim-pair", bytes.NewReader(payload))
+	if err != nil {
+		s.renderPairError(w, "Build request: "+err.Error())
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		s.renderPairError(w, "Could not reach hub at "+hubURL+": "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == 404 {
+		s.renderPairError(w, "Code not found — either it expired, was already used, or you typed it wrong. Ask your synth for a fresh one with /pair_companion.")
+		return
+	}
+	if resp.StatusCode == 410 {
+		s.renderPairError(w, "Code expired. Codes are valid for 5 minutes — ask the synth for a fresh one.")
+		return
+	}
+	if resp.StatusCode/100 != 2 {
+		s.renderPairError(w, fmt.Sprintf("Hub returned %d: %s", resp.StatusCode, string(body)))
+		return
+	}
+
+	var hubResp struct {
+		SynthURL       string `json:"synth_url"`
+		SynthID        string `json:"synth_id"`
+		CompanionToken string `json:"companion_token"`
+	}
+	if err := json.Unmarshal(body, &hubResp); err != nil {
+		s.renderPairError(w, "Parse hub response: "+err.Error())
+		return
+	}
+
+	if err := config.Update(func(c *config.Config) {
+		c.PairedSynthURL = hubResp.SynthURL
+		c.PairedSynthID = hubResp.SynthID
+		c.CompanionToken = hubResp.CompanionToken
+		c.SandboxRoots = append(c.SandboxRoots[:0], c.SandboxRoots...)
+	}); err != nil {
+		s.renderPairError(w, "Save config: "+err.Error())
+		return
+	}
+	s.Client.Stop()
+	s.Client.Start()
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// renderPairError bounces the user back to /pair with a red banner.
+func (s *UIServer) renderPairError(w http.ResponseWriter, msg string) {
+	body := fmt.Sprintf(`
+<div class="card" style="border-color:#ef4444;background:#1c1917">
+  <h2 style="color:#ef4444">Pair failed</h2>
+  <p style="color:#fca5a5;font-size:13px">%s</p>
+  <p style="margin-top:12px"><a href="/pair">← Back to pair form</a></p>
+</div>`, htmlEscape(msg))
+	s.layout(w, "/pair", "Pair", body)
+}
+
+func htmlEscape(s string) string {
+	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;")
+	return r.Replace(s)
 }
 
 func (s *UIServer) handleUnpair(w http.ResponseWriter, r *http.Request) {
