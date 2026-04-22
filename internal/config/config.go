@@ -33,6 +33,11 @@ type Config struct {
 	// time. Sent on every WS connect as Authorization: Bearer <token>.
 	CompanionToken string `json:"companion_token,omitempty"`
 
+	// HubURL is the base URL of the hub that vended the pairing code
+	// (e.g. "https://hub.snth.ai"). Persisted from the pair-claim flow
+	// so UIs like Channels can deep-link into per-instance hub pages.
+	HubURL string `json:"hub_url,omitempty"`
+
 	// SandboxRoots are the absolute paths the companion will allow tools to
 	// touch without an approval prompt. The default root (~/SNTH/<slug>/)
 	// is injected by EnsureDefaults and always present.

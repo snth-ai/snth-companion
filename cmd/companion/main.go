@@ -29,10 +29,19 @@ import (
 func main() {
 	headless := flag.Bool("headless", false, "Don't auto-open the UI in the default browser")
 	printVersion := flag.Bool("version", false, "Print version and exit")
+	windowURL := flag.String("window", "", "Open a native WebView window at this URL and exit (internal; spawned by menubar)")
+	windowTitle := flag.String("window-title", "SNTH Companion", "Title for --window")
 	flag.Parse()
 
 	if *printVersion {
 		fmt.Println("snth-companion", daemon.Version)
+		return
+	}
+
+	// --window mode: child process spawned by the menubar. Owns its own
+	// NSApplication main thread and does nothing but host the WebView.
+	if *windowURL != "" {
+		daemon.RunWindow(*windowURL, *windowTitle)
 		return
 	}
 

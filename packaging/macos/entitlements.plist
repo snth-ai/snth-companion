@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Hardened Runtime: required by Apple notarization (Nov 2019+). -->
+
+  <!-- We shell out to osascript/pbcopy/pbpaste via os/exec. Allowing
+       unsigned child executables keeps that working without embedding
+       notarized copies in the bundle. -->
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+
+  <!-- Apple events: required to drive Calendar/Notes/Reminders/etc.
+       via osascript. The user still gets the TCC approval prompt on
+       first use of each target app — this entitlement just declares
+       we need the capability. -->
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
+
+  <!-- Network client: WebSocket to the paired synth, HTTP to hub,
+       OAuth to auth.openai.com. -->
+  <key>com.apple.security.network.client</key>
+  <true/>
+
+  <!-- No sandbox: we need to read/write files outside the app bundle
+       (user-selected sandbox roots). Hardened runtime without app
+       sandbox is a supported notarization configuration. -->
+</dict>
+</plist>

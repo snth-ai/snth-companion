@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
-	"syscall"
 
 	"github.com/snth-ai/snth-companion/internal/config"
 )
@@ -78,18 +76,5 @@ func AcquireLock(uiURL string) (func(), error) {
 	return releaser, nil
 }
 
-// isProcessAlive uses kill(pid, 0) on POSIX. Signal 0 doesn't actually
-// deliver; it just checks whether the process exists and whether we
-// have permission to send it signals.
-func isProcessAlive(pid int) bool {
-	if runtime.GOOS == "windows" {
-		// Not supported; treat as dead so lock doesn't wedge forever.
-		return false
-	}
-	if err := syscall.Kill(pid, 0); err != nil {
-		// ESRCH = no such process; EPERM = it's someone else's process
-		// (still alive, different user — err on the side of blocking).
-		return err != syscall.ESRCH
-	}
-	return true
-}
+// isProcessAlive is provided per-platform: kill(pid, 0) on POSIX,
+// best-effort on Windows. See lock_unix.go / lock_windows.go.

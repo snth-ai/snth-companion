@@ -54,9 +54,10 @@ func buildMenu(deps MenubarDeps) {
 	systray.AddSeparator()
 
 	// --- Primary actions ---
-	mOpen := systray.AddMenuItem("Open Control Panel…", "Open the companion UI in a browser")
+	mOpen := systray.AddMenuItem("Open Control Panel…", "Open the companion UI in a native window")
 	mPairUI := systray.AddMenuItem("Pair…", "Open the pair form")
 	mCopyURL := systray.AddMenuItem("Copy UI URL", "Copy the localhost UI URL to clipboard")
+	mOpenBrowser := systray.AddMenuItem("Open in Browser (debug)", "Open the companion UI in the default browser")
 
 	systray.AddSeparator()
 
@@ -79,13 +80,21 @@ func buildMenu(deps MenubarDeps) {
 		for {
 			select {
 			case <-mOpen.ClickedCh:
-				openURL(deps.UIURL + "/")
+				if err := openInWindow(deps.UIURL+"/", "SNTH Companion"); err != nil {
+					log.Printf("open window: %v — falling back to browser", err)
+					openURL(deps.UIURL + "/")
+				}
 			case <-mPairUI.ClickedCh:
-				openURL(deps.UIURL + "/pair")
+				if err := openInWindow(deps.UIURL+"/pair", "Pair Synth"); err != nil {
+					log.Printf("open window: %v — falling back to browser", err)
+					openURL(deps.UIURL + "/pair")
+				}
 			case <-mCopyURL.ClickedCh:
 				if err := copyToClipboard(deps.UIURL); err != nil {
 					log.Printf("clipboard: %v", err)
 				}
+			case <-mOpenBrowser.ClickedCh:
+				openURL(deps.UIURL + "/")
 			case <-mQuit.ClickedCh:
 				systray.Quit()
 				return
@@ -147,6 +156,22 @@ func prettyStatus(s string) string {
 	return s
 }
 
+// openInWindow spawns the companion binary in --window mode as a child
+// process. Each click creates a fresh window process; closing the
+// window ends only that process, leaving the menubar running. We use a
+// child process because systray and webview each need to own the main
+// thread on macOS (NSApplication singleton).
+func openInWindow(url, title string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(exe, "--window", url, "--window-title", title)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Start()
+}
+
 // openURL opens the given URL using the OS default browser.
 func openURL(url string) {
 	var cmd *exec.Cmd
@@ -187,6 +212,3 @@ func copyToClipboard(s string) error {
 	return cmd.Wait()
 }
 
-// suppressUnusedOS silences the "os imported but not used" complaint on
-// platforms where we don't use os directly. Keeps the file portable.
-var _ = os.Getenv

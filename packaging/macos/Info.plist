@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>
+  <string>SNTH Companion</string>
+  <key>CFBundleDisplayName</key>
+  <string>SNTH Companion</string>
+  <key>CFBundleIdentifier</key>
+  <string>ai.snth.companion</string>
+  <key>CFBundleExecutable</key>
+  <string>snth-companion</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon.icns</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>__VERSION__</string>
+  <key>CFBundleVersion</key>
+  <string>__VERSION__</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>11.0</string>
+  <key>LSUIElement</key>
+  <true/>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <key>NSHumanReadableCopyright</key>
+  <string>© 2026 SNTH. All rights reserved.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>SNTH Companion runs AppleScript on your behalf to read/write Calendar, Notes, Reminders, Contacts, and Messages when your paired synthetic requests it.</string>
+  <key>NSContactsUsageDescription</key>
+  <string>SNTH Companion reads Contacts when your paired synthetic requests it.</string>
+  <key>NSRemindersUsageDescription</key>
+  <string>SNTH Companion reads/writes Reminders when your paired synthetic requests it.</string>
+  <key>NSCalendarsUsageDescription</key>
+  <string>SNTH Companion reads/writes Calendar events when your paired synthetic requests it.</string>
+</dict>
+</plist>
