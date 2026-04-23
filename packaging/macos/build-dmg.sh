@@ -48,8 +48,16 @@ DMG_PATH="$OUT_DIR/SNTH-Companion-$VERSION.dmg"
 mkdir -p "$BUILD_DIR" "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 rm -f "$DMG_PATH"
 
+# --- build React SPA bundle (embedded via embed.FS at Go compile time) ---
+echo "[1a/7] building UI bundle…"
+cd "$REPO_ROOT/ui"
+if [[ ! -d node_modules ]]; then
+  npm ci
+fi
+npm run build
+
 # --- compile universal binary (arm64 + amd64) ---
-echo "[1/7] compiling Go binary (universal)…"
+echo "[1b/7] compiling Go binary (universal)…"
 cd "$REPO_ROOT"
 GOARCH=arm64 go build -trimpath -ldflags="-s -w" \
   -o "$BUILD_DIR/snth-companion.arm64" ./cmd/companion

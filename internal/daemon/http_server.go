@@ -13,6 +13,7 @@ import (
 
 	"github.com/snth-ai/snth-companion/internal/config"
 	"github.com/snth-ai/snth-companion/internal/tools"
+	"github.com/snth-ai/snth-companion/internal/ui"
 )
 
 // UIServer is the local HTTP endpoint bound on 127.0.0.1:<random>. It
@@ -58,6 +59,8 @@ func (s *UIServer) routes() http.Handler {
 	mux.HandleFunc("/login/codex/start", s.handleCodexLoginStart)
 	mux.HandleFunc("/login/codex/upload", s.handleCodexLoginUpload)
 	mux.HandleFunc("/login/codex/clear", s.handleCodexLoginClear)
+	mux.HandleFunc("/keys", s.handleKeysPage)
+	mux.HandleFunc("/keys/save", s.handleKeysSave)
 	mux.HandleFunc("/sandbox", s.handleSandboxPage)
 	mux.HandleFunc("/sandbox/add", s.handleSandboxAdd)
 	mux.HandleFunc("/sandbox/remove", s.handleSandboxRemove)
@@ -68,6 +71,17 @@ func (s *UIServer) routes() http.Handler {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	})
+	// Hub proxies (/api/hub/*) — inject companion bearer server-side
+	// so the SPA never sees the token. See hub_proxy.go.
+	s.registerHubProxies(mux)
+	// Companion-local JSON endpoints the SPA calls for state that
+	// doesn't need the hub (sandbox, pair, audit mirror, ...).
+	// See spa_api.go.
+	s.registerSPAAPIs(mux)
+	// React SPA — served at /ui/*. Legacy server-rendered pages
+	// stay at their old paths during the porting transition; the
+	// React router links back to them via Placeholder cards.
+	mux.Handle("/ui/", http.StripPrefix("/ui", ui.Handler()))
 	return localhostOnly(mux)
 }
 
@@ -135,7 +149,7 @@ func (s *UIServer) layout(w http.ResponseWriter, active, title, body string) {
 	fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><title>SNTH Companion — %s</title><style>%s</style></head>
 <body><div class="wrap">
 <header><h1>SNTH Companion</h1><span class="label mono">v%s</span></header>
-<nav>%s %s %s %s %s %s %s %s</nav>
+<nav>%s %s %s %s %s %s %s %s %s</nav>
 %s
 </div></body></html>`,
 		title, layoutCSS, Version,
@@ -143,6 +157,7 @@ func (s *UIServer) layout(w http.ResponseWriter, active, title, body string) {
 		nav("/pair", "Pair"),
 		nav("/channels", "Channels"),
 		nav("/login/codex", "Codex Login"),
+		nav("/keys", "API Keys"),
 		nav("/tools", "Tools"),
 		nav("/sandbox", "Sandbox"),
 		nav("/audit", "Audit"),

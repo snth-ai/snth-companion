@@ -76,25 +76,33 @@ func buildMenu(deps MenubarDeps) {
 	mQuit := systray.AddMenuItem("Quit", "Stop the companion")
 
 	// --- Click handlers ---
+	// URLs point at the React SPA (served at /ui/). HashRouter means
+	// in-page routes look like /ui/#/pair etc. — safe to paste into
+	// the WebView child window without worrying about server-side
+	// fallback routes. "Open in Browser (debug)" also goes to the
+	// new UI; the old server-rendered pages remain at their raw
+	// paths (/, /pair, /channels...) for legacy access.
+	spaURL := deps.UIURL + "/ui/"
+	pairURL := deps.UIURL + "/ui/#/pair"
 	go func() {
 		for {
 			select {
 			case <-mOpen.ClickedCh:
-				if err := openInWindow(deps.UIURL+"/", "SNTH Companion"); err != nil {
+				if err := openInWindow(spaURL, "SNTH Companion"); err != nil {
 					log.Printf("open window: %v — falling back to browser", err)
-					openURL(deps.UIURL + "/")
+					openURL(spaURL)
 				}
 			case <-mPairUI.ClickedCh:
-				if err := openInWindow(deps.UIURL+"/pair", "Pair Synth"); err != nil {
+				if err := openInWindow(pairURL, "Pair Synth"); err != nil {
 					log.Printf("open window: %v — falling back to browser", err)
-					openURL(deps.UIURL + "/pair")
+					openURL(pairURL)
 				}
 			case <-mCopyURL.ClickedCh:
-				if err := copyToClipboard(deps.UIURL); err != nil {
+				if err := copyToClipboard(spaURL); err != nil {
 					log.Printf("clipboard: %v", err)
 				}
 			case <-mOpenBrowser.ClickedCh:
-				openURL(deps.UIURL + "/")
+				openURL(spaURL)
 			case <-mQuit.ClickedCh:
 				systray.Quit()
 				return
