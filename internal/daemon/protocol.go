@@ -26,6 +26,14 @@ type Frame struct {
 	CompanionVersion string     `json:"companion_version,omitempty"`
 	Capabilities     []ToolDesc `json:"capabilities,omitempty"`
 
+	// Multi-companion identity fields (Phase 1, 2026-04-27).
+	// Synth-side companion_ws.go derives the pool slot from these so
+	// reconnects from the same Mac collapse onto the same slot while
+	// different Macs (Air + Mini) coexist.
+	CompanionRole     string   `json:"companion_role,omitempty"`      // "synth-host" | "user-device" | "shared"
+	CompanionTags     []string `json:"companion_tags,omitempty"`      // freeform user labels
+	CompanionDeviceID string   `json:"companion_device_id,omitempty"` // hostname / stable id
+
 	// Welcome (server → client)
 	SynthVersion string `json:"synth_version,omitempty"`
 	SynthID      string `json:"synth_id,omitempty"`

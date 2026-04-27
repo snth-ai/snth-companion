@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -152,16 +153,30 @@ func (c *Client) runOnce(synthURL, token string) error {
 		conn.Close()
 	}()
 
-	// Send hello with our capabilities.
+	// Send hello with our capabilities + multi-companion identity.
 	catalog := tools.Catalog()
 	caps := make([]ToolDesc, len(catalog))
 	for i, d := range catalog {
 		caps[i] = ToolDesc{Name: d.Name, Description: d.Description, DangerLevel: d.DangerLevel}
 	}
+	cfg := config.Get()
+	role := ""
+	tags := []string(nil)
+	deviceID := ""
+	if cfg != nil {
+		role = string(cfg.CompanionRole)
+		tags = append(tags, cfg.CompanionTags...)
+	}
+	if h, err := os.Hostname(); err == nil {
+		deviceID = h
+	}
 	if err := conn.WriteJSON(Frame{
-		Type:             FrameHello,
-		CompanionVersion: Version,
-		Capabilities:     caps,
+		Type:              FrameHello,
+		CompanionVersion:  Version,
+		Capabilities:      caps,
+		CompanionRole:     role,
+		CompanionTags:     tags,
+		CompanionDeviceID: deviceID,
 	}); err != nil {
 		return fmt.Errorf("send hello: %w", err)
 	}

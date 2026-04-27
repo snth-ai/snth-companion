@@ -101,10 +101,13 @@ func (s *UIServer) apiPairClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := config.Update(func(c *config.Config) {
-		c.PairedSynthURL = hubResp.SynthURL
-		c.PairedSynthID = hubResp.SynthID
-		c.CompanionToken = hubResp.CompanionToken
-		c.HubURL = hubURL
+		c.AddOrUpdatePair(config.SynthPair{
+			ID:     hubResp.SynthID,
+			URL:    hubResp.SynthURL,
+			Token:  hubResp.CompanionToken,
+			HubURL: hubURL,
+			Role:   config.SynthRolePrimary,
+		})
 		c.SandboxRoots = append(c.SandboxRoots[:0], c.SandboxRoots...)
 	}); err != nil {
 		writeJSONErr(w, 500, "save config: "+err.Error())
@@ -143,9 +146,12 @@ func (s *UIServer) apiPairSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := config.Update(func(c *config.Config) {
-		c.PairedSynthURL = req.SynthURL
-		c.CompanionToken = req.Token
-		c.PairedSynthID = req.SynthID
+		c.AddOrUpdatePair(config.SynthPair{
+			ID:    req.SynthID,
+			URL:   req.SynthURL,
+			Token: req.Token,
+			Role:  config.SynthRolePrimary,
+		})
 		c.SandboxRoots = append(c.SandboxRoots[:0], c.SandboxRoots...)
 	}); err != nil {
 		writeJSONErr(w, 500, "save config: "+err.Error())
@@ -161,10 +167,21 @@ func (s *UIServer) apiUnpair(w http.ResponseWriter, r *http.Request) {
 		writeJSONErr(w, 405, "POST only")
 		return
 	}
+	// Optional body to remove a specific synth by id; empty = remove
+	// the active pair (matches the legacy single-pair UX).
+	var req struct {
+		ID string `json:"id"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req) // body is optional; ignore decode errors
 	if err := config.Update(func(c *config.Config) {
-		c.PairedSynthURL = ""
-		c.CompanionToken = ""
-		c.PairedSynthID = ""
+		id := strings.TrimSpace(req.ID)
+		if id == "" {
+			id = c.ActiveSynthID
+		}
+		if id == "" {
+			return
+		}
+		c.RemovePair(id)
 	}); err != nil {
 		writeJSONErr(w, 500, "save config: "+err.Error())
 		return
