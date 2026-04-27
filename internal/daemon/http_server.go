@@ -78,6 +78,9 @@ func (s *UIServer) routes() http.Handler {
 	// doesn't need the hub (sandbox, pair, audit mirror, ...).
 	// See spa_api.go.
 	s.registerSPAAPIs(mux)
+	// Privacy Center endpoints (per-tool trust state, master toggle,
+	// path scopes, kill-switch, audit feed). See trust_api.go.
+	s.registerTrustAPIs(mux)
 	// React SPA — served at /ui/*. Legacy server-rendered pages
 	// stay at their old paths during the porting transition; the
 	// React router links back to them via Placeholder cards.

@@ -6,6 +6,7 @@ import { ChannelsPage } from "@/pages/Channels"
 import { KeysPage } from "@/pages/Keys"
 import { CodexLoginPage } from "@/pages/CodexLogin"
 import { ToolsPage } from "@/pages/Tools"
+import { PrivacyPage } from "@/pages/Privacy"
 import { SandboxPage } from "@/pages/Sandbox"
 import { LogsPage } from "@/pages/Logs"
 import { Toaster } from "@/components/ui/sonner"
@@ -26,6 +27,7 @@ export default function App() {
             <Route path="keys" element={<KeysPage />} />
             <Route path="login/codex" element={<CodexLoginPage />} />
             <Route path="tools" element={<ToolsPage />} />
+            <Route path="privacy" element={<PrivacyPage />} />
             <Route path="sandbox" element={<SandboxPage />} />
             <Route path="logs" element={<LogsPage />} />
           </Route>

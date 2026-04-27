@@ -170,7 +170,7 @@ func notesCreateHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 		}
 		summary += "\n    body preview: " + preview
 	}
-	ok, err := approval.Request(ctx, approval.Request_{Summary: summary, Danger: "prompt"})
+	ok, err := approval.Request(ctx, approval.Request_{Tool: "notes_create", Summary: summary, Danger: "prompt"})
 	if err != nil {
 		return nil, fmt.Errorf("approval: %w", err)
 	}
@@ -222,7 +222,7 @@ func notesReadHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 	} else {
 		summary += " id " + a.ID
 	}
-	ok, err := approval.Request(ctx, approval.Request_{Summary: summary, Danger: "prompt"})
+	ok, err := approval.Request(ctx, approval.Request_{Tool: "notes_read", Summary: summary, Danger: "prompt"})
 	if err != nil {
 		return nil, fmt.Errorf("approval: %w", err)
 	}

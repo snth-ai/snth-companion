@@ -94,6 +94,7 @@ func bashHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 			danger = "always-prompt"
 		}
 		ok, err := approval.Request(ctx, approval.Request_{
+			Tool:    "remote_bash",
 			Summary: summary,
 			Danger:  danger,
 		})

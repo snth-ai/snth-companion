@@ -195,3 +195,52 @@ export const uploadProviderKey = (
 
 export const fetchRemoteLogs = (lines = 200) =>
   getJSON<LogsResponse>(`/api/hub/logs-remote?lines=${lines}`)
+
+// --- Privacy / trust center ----------------------------------------
+
+export type ToolMode = "prompt" | "trusted" | "denied"
+
+export type TrustToolDef = {
+  id: string
+  label: string
+  danger: "safe" | "prompt" | "always-prompt"
+  always_prompt?: boolean
+  current_mode: ToolMode
+  description: string
+}
+
+export type TrustState = {
+  master: boolean
+  master_expires?: string | null
+  tools?: Record<string, ToolMode>
+  allowed_write_roots?: string[]
+  updated_at: string
+}
+
+export type TrustResponse = { state: TrustState; tools: TrustToolDef[] }
+
+export type TrustAuditEntry = AuditEntry & {
+  decision?: "approved" | "denied"
+  source?: string
+}
+
+export const fetchTrust = () => getJSON<TrustResponse>("/api/trust")
+
+export const setTrustMaster = (on: boolean, expires?: string) =>
+  postJSON("/api/trust/master", { on, expires: expires ?? "" })
+
+export const setTrustTool = (tool: string, mode: ToolMode) =>
+  postJSON("/api/trust/tool", { tool, mode })
+
+export const trustRevokeAll = () => postJSON("/api/trust/revoke-all", {})
+
+export const trustPathAdd = (path: string) =>
+  postJSON("/api/trust/path", { op: "add", path })
+
+export const trustPathRemove = (path: string) =>
+  postJSON("/api/trust/path", { op: "remove", path })
+
+export const fetchTrustAudit = () =>
+  getJSON<{ entries: TrustAuditEntry[] }>("/api/trust/audit").then(
+    (d) => d.entries ?? [],
+  )

@@ -115,7 +115,7 @@ func subagentHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 		a.Agent, a.Cwd, strings.ReplaceAll(preview, "\n", "\n    "),
 		int(subagentDefaultTimeout/time.Minute),
 	)
-	ok, err := approval.Request(ctx, approval.Request_{Summary: summary, Danger: "always-prompt"})
+	ok, err := approval.Request(ctx, approval.Request_{Tool: "subagent", Summary: summary, Danger: "always-prompt"})
 	if err != nil {
 		return nil, fmt.Errorf("approval: %w", err)
 	}

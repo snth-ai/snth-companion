@@ -240,7 +240,7 @@ func calendarCreateHandler(ctx context.Context, raw json.RawMessage) (any, error
 	if a.Calendar != "" {
 		summary += "\n    in calendar: " + a.Calendar
 	}
-	ok, err := approval.Request(ctx, approval.Request_{Summary: summary, Danger: "prompt"})
+	ok, err := approval.Request(ctx, approval.Request_{Tool: "calendar_create", Summary: summary, Danger: "prompt"})
 	if err != nil {
 		return nil, fmt.Errorf("approval: %w", err)
 	}

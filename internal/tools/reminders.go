@@ -197,7 +197,7 @@ func remindersCreateHandler(ctx context.Context, raw json.RawMessage) (any, erro
 	if a.List != "" {
 		summary += "\n    list: " + a.List
 	}
-	ok, err := approval.Request(ctx, approval.Request_{Summary: summary, Danger: "prompt"})
+	ok, err := approval.Request(ctx, approval.Request_{Tool: "reminders_create", Summary: summary, Danger: "prompt"})
 	if err != nil {
 		return nil, fmt.Errorf("approval: %w", err)
 	}
@@ -268,6 +268,7 @@ func remindersCompleteHandler(ctx context.Context, raw json.RawMessage) (any, er
 	}
 
 	ok, err := approval.Request(ctx, approval.Request_{
+		Tool:    "reminders_complete",
 		Summary: "Mark reminder " + a.ID + " as completed",
 		Danger:  "prompt",
 	})

@@ -21,9 +21,11 @@ import (
 	"runtime"
 	"syscall"
 
+	"github.com/snth-ai/snth-companion/internal/approval"
 	"github.com/snth-ai/snth-companion/internal/config"
 	"github.com/snth-ai/snth-companion/internal/daemon"
 	"github.com/snth-ai/snth-companion/internal/tools"
+	"github.com/snth-ai/snth-companion/internal/trust"
 )
 
 func main() {
@@ -52,6 +54,18 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 	log.Printf("config at %s", config.Path())
+
+	// Trust store + approval audit hook (Privacy Center, v0.5+).
+	// Trust state lives at ~/Library/Application Support/SNTH Companion/trust.json.
+	// approval.Request consults it before popping the osascript dialog.
+	trustStore, err := trust.NewStore("")
+	if err != nil {
+		log.Fatalf("trust: %v", err)
+	}
+	approval.SetTrustStore(trustStore)
+	approval.SetAuditHook(daemon.RecordAuditApproval)
+	daemon.SetTrustStore(trustStore)
+	log.Printf("trust state at %s", trustStore.Path())
 
 	// Register all tools. They're already in the catalog before the WS
 	// client connects, so the hello frame advertises them correctly.

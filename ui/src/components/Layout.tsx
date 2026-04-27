@@ -3,6 +3,7 @@ import {
   Activity,
   KeyRound,
   Link as LinkIcon,
+  Lock,
   LogIn,
   MessageSquare,
   ScrollText,
@@ -18,6 +19,7 @@ const navItems = [
   { to: "/keys", label: "API Keys", icon: KeyRound },
   { to: "/login/codex", label: "Codex Login", icon: LogIn },
   { to: "/tools", label: "Tools", icon: Wrench },
+  { to: "/privacy", label: "Privacy", icon: Lock },
   { to: "/sandbox", label: "Sandbox", icon: Shield },
   { to: "/logs", label: "Logs", icon: ScrollText },
 ]

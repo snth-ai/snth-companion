@@ -249,7 +249,7 @@ func browserHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 // always-prompt variant — browser actions touch the user's real
 // session so we default to always prompting.
 func browserApprove(ctx context.Context, summary string) error {
-	ok, err := approval.Request(ctx, approval.Request_{Summary: summary, Danger: "always-prompt"})
+	ok, err := approval.Request(ctx, approval.Request_{Tool: "remote_browser", Summary: summary, Danger: "always-prompt"})
 	if err != nil {
 		return fmt.Errorf("approval: %w", err)
 	}

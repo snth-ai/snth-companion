@@ -81,7 +81,7 @@ func shortcutHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 		if a.Input != "" {
 			summary += "\nwith input:\n    " + truncate(a.Input, 120)
 		}
-		ok, err := approval.Request(ctx, approval.Request_{Summary: summary, Danger: "prompt"})
+		ok, err := approval.Request(ctx, approval.Request_{Tool: "shortcut_run", Summary: summary, Danger: "prompt"})
 		if err != nil {
 			return nil, fmt.Errorf("approval: %w", err)
 		}

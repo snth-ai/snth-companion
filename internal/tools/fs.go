@@ -272,7 +272,16 @@ func resolveAndCheck(ctx context.Context, path, action string, write bool) (stri
 	if write {
 		summary = fmt.Sprintf("%s OUTSIDE SANDBOX (writable):\n    %s", action, resolved)
 	}
-	ok, err := approval.Request(ctx, approval.Request_{Summary: summary, Danger: danger})
+	tool := "remote_fs_read"
+	if write {
+		tool = "remote_fs_write"
+	}
+	ok, err := approval.Request(ctx, approval.Request_{
+		Tool:    tool,
+		Summary: summary,
+		Danger:  danger,
+		Path:    resolved,
+	})
 	if err != nil {
 		return "", fmt.Errorf("approval: %w", err)
 	}

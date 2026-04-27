@@ -75,7 +75,7 @@ func messagesSendHandler(ctx context.Context, raw json.RawMessage) (any, error) 
 		preview = preview[:180] + "…"
 	}
 	summary := fmt.Sprintf("Send iMessage to %s:\n    %s", a.To, preview)
-	ok, err := approval.Request(ctx, approval.Request_{Summary: summary, Danger: "always-prompt"})
+	ok, err := approval.Request(ctx, approval.Request_{Tool: "messages_send", Summary: summary, Danger: "always-prompt"})
 	if err != nil {
 		return nil, fmt.Errorf("approval: %w", err)
 	}
@@ -138,7 +138,7 @@ func messagesRecentHandler(ctx context.Context, raw json.RawMessage) (any, error
 	if a.Chat != "" {
 		summary += " (chat: " + a.Chat + ")"
 	}
-	ok, err := approval.Request(ctx, approval.Request_{Summary: summary, Danger: "always-prompt"})
+	ok, err := approval.Request(ctx, approval.Request_{Tool: "messages_recent", Summary: summary, Danger: "always-prompt"})
 	if err != nil {
 		return nil, fmt.Errorf("approval: %w", err)
 	}

@@ -63,6 +63,7 @@ const clipboardMaxRead = 512 * 1024
 
 func clipboardReadHandler(ctx context.Context, _ json.RawMessage) (any, error) {
 	ok, err := approval.Request(ctx, approval.Request_{
+		Tool:    "clipboard_read",
 		Summary: "Read the clipboard contents",
 		Danger:  "prompt",
 	})
@@ -106,6 +107,7 @@ func clipboardWriteHandler(ctx context.Context, raw json.RawMessage) (any, error
 		preview = preview[:120] + "…"
 	}
 	ok, err := approval.Request(ctx, approval.Request_{
+		Tool:    "clipboard_write",
 		Summary: "Write to clipboard:\n    " + strings.ReplaceAll(preview, "\n", " "),
 		Danger:  "prompt",
 	})
