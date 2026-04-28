@@ -82,6 +82,7 @@ func main() {
 	tools.RegisterBrowser()
 	tools.RegisterFlights()
 	tools.RegisterSubagent()
+	tools.RegisterYtDlp()
 
 	client := &daemon.Client{}
 
