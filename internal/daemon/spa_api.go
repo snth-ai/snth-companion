@@ -32,6 +32,11 @@ func (s *UIServer) registerSPAAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/codex-login/upload", s.apiCodexLoginUpload)
 	mux.HandleFunc("/api/codex-login/clear", s.apiCodexLoginClear)
 	mux.HandleFunc("/api/tools", s.apiTools)
+	// Multi-synth (Phase 1, role-based)
+	mux.HandleFunc("/api/synths", s.apiSynths)
+	mux.HandleFunc("/api/synths/active", s.apiSynthsActive)
+	mux.HandleFunc("/api/synths/update", s.apiSynthsUpdate)
+	mux.HandleFunc("/api/companion-config", s.apiCompanionConfig)
 }
 
 // --- Pair -----------------------------------------------------------
@@ -354,4 +359,183 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// --- Multi-synth (Phase 1) ------------------------------------------
+
+// apiSynths returns the full pair list + which one is active. Pair
+// list is sorted in creation order — same order config.Synths stores.
+func (s *UIServer) apiSynths(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSONErr(w, 405, "GET only")
+		return
+	}
+	cfg := config.Get()
+	if cfg == nil {
+		writeJSON(w, 200, map[string]any{"synths": []any{}, "active_synth_id": ""})
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"synths":          cfg.Synths,
+		"active_synth_id": cfg.ActiveSynthID,
+	})
+}
+
+// apiSynthsActive switches the currently active pair by id. Restarts
+// the WS client so it reconnects to the new pair's URL — same pattern
+// as /api/pair/claim.
+func (s *UIServer) apiSynthsActive(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONErr(w, 405, "POST only")
+		return
+	}
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONErr(w, 400, "bad json: "+err.Error())
+		return
+	}
+	id := strings.TrimSpace(req.ID)
+	if id == "" {
+		writeJSONErr(w, 400, "id required")
+		return
+	}
+	var setErr error
+	if err := config.Update(func(c *config.Config) {
+		setErr = c.SetActive(id)
+	}); err != nil {
+		writeJSONErr(w, 500, "save config: "+err.Error())
+		return
+	}
+	if setErr != nil {
+		writeJSONErr(w, 404, setErr.Error())
+		return
+	}
+	s.Client.Stop()
+	s.Client.Start()
+	writeJSON(w, 200, map[string]any{"ok": true, "active_synth_id": id})
+}
+
+// apiSynthsUpdate edits an existing pair's mutable fields (label, role,
+// tags). Connection coordinates (URL/token/synth_id) are immutable —
+// re-pair to change those.
+func (s *UIServer) apiSynthsUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONErr(w, 405, "POST only")
+		return
+	}
+	var req struct {
+		ID    string   `json:"id"`
+		Label *string  `json:"label,omitempty"`
+		Role  *string  `json:"role,omitempty"`
+		Tags  []string `json:"tags,omitempty"`
+		// HasTags distinguishes "tags omitted (don't touch)" from
+		// "tags = empty array (clear all)". JSON omitempty alone
+		// can't express this for slices.
+		HasTags bool `json:"has_tags"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONErr(w, 400, "bad json: "+err.Error())
+		return
+	}
+	id := strings.TrimSpace(req.ID)
+	if id == "" {
+		writeJSONErr(w, 400, "id required")
+		return
+	}
+	var found bool
+	if err := config.Update(func(c *config.Config) {
+		for i := range c.Synths {
+			if c.Synths[i].ID != id {
+				continue
+			}
+			found = true
+			if req.Label != nil {
+				c.Synths[i].Label = strings.TrimSpace(*req.Label)
+			}
+			if req.Role != nil {
+				role := config.SynthRole(strings.TrimSpace(*req.Role))
+				switch role {
+				case config.SynthRolePrimary, config.SynthRoleSecondary, config.SynthRoleTest:
+					c.Synths[i].Role = role
+				}
+			}
+			if req.HasTags {
+				clean := make([]string, 0, len(req.Tags))
+				for _, t := range req.Tags {
+					t = strings.TrimSpace(t)
+					if t != "" {
+						clean = append(clean, t)
+					}
+				}
+				c.Synths[i].Tags = clean
+			}
+		}
+	}); err != nil {
+		writeJSONErr(w, 500, "save config: "+err.Error())
+		return
+	}
+	if !found {
+		writeJSONErr(w, 404, "synth not in paired list")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// apiCompanionConfig — GET returns this companion's role + tags;
+// POST replaces them. Tags are freeform strings the user supplies
+// to identify what THIS Mac/Linux box is for (e.g. "file-storage",
+// "home-nas"). Synth-side rules can react to these.
+func (s *UIServer) apiCompanionConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		cfg := config.Get()
+		role := ""
+		tags := []string{}
+		if cfg != nil {
+			role = string(cfg.CompanionRole)
+			tags = append(tags, cfg.CompanionTags...)
+		}
+		writeJSON(w, 200, map[string]any{"role": role, "tags": tags})
+	case http.MethodPost:
+		var req struct {
+			Role    *string  `json:"role,omitempty"`
+			Tags    []string `json:"tags,omitempty"`
+			HasTags bool     `json:"has_tags"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONErr(w, 400, "bad json: "+err.Error())
+			return
+		}
+		if err := config.Update(func(c *config.Config) {
+			if req.Role != nil {
+				role := config.CompanionRole(strings.TrimSpace(*req.Role))
+				switch role {
+				case config.RoleSynthHost, config.RoleUserDevice, config.RoleShared:
+					c.CompanionRole = role
+				}
+			}
+			if req.HasTags {
+				clean := make([]string, 0, len(req.Tags))
+				for _, t := range req.Tags {
+					t = strings.TrimSpace(t)
+					if t != "" {
+						clean = append(clean, t)
+					}
+				}
+				c.CompanionTags = clean
+			}
+		}); err != nil {
+			writeJSONErr(w, 500, "save config: "+err.Error())
+			return
+		}
+		// Trigger a reconnect so the synth-side hello frame picks up
+		// the new role/tags. Cheap — same Stop/Start used elsewhere.
+		s.Client.Stop()
+		s.Client.Start()
+		writeJSON(w, 200, map[string]any{"ok": true})
+	default:
+		writeJSONErr(w, 405, "GET or POST only")
+	}
 }

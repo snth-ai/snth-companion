@@ -8,13 +8,16 @@ import {
   MessageSquare,
   ScrollText,
   Shield,
+  Users,
   Wrench,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { SynthSwitcher } from "@/components/SynthSwitcher"
 
 const navItems = [
   { to: "/", label: "Status", icon: Activity },
   { to: "/pair", label: "Pair", icon: LinkIcon },
+  { to: "/synths", label: "Synths", icon: Users },
   { to: "/channels", label: "Channels", icon: MessageSquare },
   { to: "/keys", label: "API Keys", icon: KeyRound },
   { to: "/login/codex", label: "Codex Login", icon: LogIn },
@@ -36,6 +39,9 @@ export function Layout() {
             <div className="text-xs text-muted-foreground mt-1">
               local sidecar
             </div>
+          </div>
+          <div className="px-3 pb-3 border-b border-border">
+            <SynthSwitcher />
           </div>
           <nav className="px-2 py-2 space-y-0.5">
             {navItems.map((item) => (

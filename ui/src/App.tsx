@@ -2,6 +2,7 @@ import { HashRouter, Route, Routes } from "react-router-dom"
 import { Layout } from "@/components/Layout"
 import { StatusPage } from "@/pages/Status"
 import { PairPage } from "@/pages/Pair"
+import { SynthsPage } from "@/pages/Synths"
 import { ChannelsPage } from "@/pages/Channels"
 import { KeysPage } from "@/pages/Keys"
 import { CodexLoginPage } from "@/pages/CodexLogin"
@@ -23,6 +24,7 @@ export default function App() {
           <Route element={<Layout />}>
             <Route index element={<StatusPage />} />
             <Route path="pair" element={<PairPage />} />
+            <Route path="synths" element={<SynthsPage />} />
             <Route path="channels" element={<ChannelsPage />} />
             <Route path="keys" element={<KeysPage />} />
             <Route path="login/codex" element={<CodexLoginPage />} />

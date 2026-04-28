@@ -137,6 +137,67 @@ export const savePair = (
 
 export const unpair = () => postJSON("/api/unpair", {})
 
+// --- multi-synth (Phase 1) ------------------------------------------
+
+export type SynthPair = {
+  id: string
+  url: string
+  token?: string
+  hub_url?: string
+  label?: string
+  role: "primary" | "secondary" | "test"
+  tags?: string[]
+  created_at: string
+  last_seen_at?: string
+}
+
+export type SynthsResponse = {
+  synths: SynthPair[]
+  active_synth_id: string
+}
+
+export const fetchSynths = () => getJSON<SynthsResponse>("/api/synths")
+
+export const setActiveSynth = (id: string) =>
+  postJSON<{ ok: boolean; active_synth_id: string }>("/api/synths/active", { id })
+
+export const updateSynth = (
+  id: string,
+  patch: { label?: string; role?: string; tags?: string[] },
+) => {
+  const body: Record<string, unknown> = { id }
+  if (patch.label !== undefined) body.label = patch.label
+  if (patch.role !== undefined) body.role = patch.role
+  if (patch.tags !== undefined) {
+    body.tags = patch.tags
+    body.has_tags = true
+  }
+  return postJSON("/api/synths/update", body)
+}
+
+export const removeSynth = (id: string) => postJSON("/api/unpair", { id })
+
+export type CompanionConfig = {
+  role: "synth-host" | "user-device" | "shared" | ""
+  tags: string[]
+}
+
+export const fetchCompanionConfig = () =>
+  getJSON<CompanionConfig>("/api/companion-config")
+
+export const updateCompanionConfig = (patch: {
+  role?: string
+  tags?: string[]
+}) => {
+  const body: Record<string, unknown> = {}
+  if (patch.role !== undefined) body.role = patch.role
+  if (patch.tags !== undefined) {
+    body.tags = patch.tags
+    body.has_tags = true
+  }
+  return postJSON("/api/companion-config", body)
+}
+
 // --- sandbox ---------------------------------------------------------
 
 export const fetchSandbox = () =>
