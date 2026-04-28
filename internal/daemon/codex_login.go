@@ -272,11 +272,20 @@ func uploadCodexToHub() {
 	}
 
 	cfg := config.Get()
-	if cfg == nil || cfg.CompanionToken == "" || cfg.HubURL == "" {
+	if cfg == nil || cfg.CompanionToken == "" {
 		codexLogin.mu.Lock()
-		codexLogin.uploadErr = "companion not paired — no hub URL or token in config"
+		codexLogin.uploadErr = "companion not paired — no companion token in config"
 		codexLogin.mu.Unlock()
 		return
+	}
+	// Fall back to the prod hub when HubURL is empty in legacy configs
+	// (paired pre-Wave-7.1 / pre-Wave-9 multi-pair refactor — those
+	// configs never persisted hub_url at the top level). The
+	// pair-claim endpoint sets it now, but existing pairs may not
+	// have it populated.
+	hubURL := cfg.HubURL
+	if hubURL == "" {
+		hubURL = "https://hub.snth.ai"
 	}
 
 	payload, _ := json.Marshal(map[string]any{
@@ -285,7 +294,7 @@ func uploadCodexToHub() {
 		"expires_at_unix_ms": result.ExpiresAt,
 		"account_id":         result.AccountID,
 	})
-	url := strings.TrimRight(cfg.HubURL, "/") + "/api/my/codex-creds"
+	url := strings.TrimRight(hubURL, "/") + "/api/my/codex-creds"
 
 	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
 	if err != nil {
