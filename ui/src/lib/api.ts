@@ -305,3 +305,32 @@ export const fetchTrustAudit = () =>
   getJSON<{ entries: TrustAuditEntry[] }>("/api/trust/audit").then(
     (d) => d.entries ?? [],
   )
+
+// --- synth tools (per-instance config — proxied to hub /api/my/tools)
+
+export type SynthToolEntry = {
+  name: string
+  description: string
+  base_description: string
+  parameters: unknown
+  source: string // builtin | skill | remote
+  scope: string // synth | companion
+  disabled: boolean
+  disabled_global: boolean
+  active_variant: string
+  updated_at: string
+}
+
+export type SynthToolsResponse = {
+  synth_id: string
+  tools: SynthToolEntry[]
+}
+
+export const fetchSynthTools = () =>
+  getJSON<SynthToolsResponse>("/api/hub/synth-tools")
+
+export const toggleSynthTool = (tool: string, disabled: boolean) =>
+  postJSON<{ status: string; tool: string; disabled: boolean }>(
+    "/api/hub/synth-tools/toggle",
+    { tool, disabled },
+  )

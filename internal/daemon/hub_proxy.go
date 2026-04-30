@@ -42,6 +42,8 @@ func (s *UIServer) registerHubProxies(mux *http.ServeMux) {
 	proxy("/api/hub/provider-key", "/api/my/provider-key")
 	proxy("/api/hub/codex-creds", "/api/my/codex-creds")
 	proxy("/api/hub/logs-remote", "/api/my/logs")
+	proxy("/api/hub/synth-tools", "/api/my/tools")
+	proxy("/api/hub/synth-tools/toggle", "/api/my/tools/toggle")
 }
 
 // proxyToHub forwards r to $HUB_URL+hubPath with companion token
