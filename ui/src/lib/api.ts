@@ -395,3 +395,103 @@ export const miniAppAsk = (slug: string, prompt: string, format?: string) =>
     prompt,
     format: format ?? "text",
   })
+
+// --- browse APIs (Wave 9 — companion browses bound synth's data)
+
+export type WikiPageLite = {
+  id: string
+  title: string
+  type: string
+  namespace: string
+  snippet?: string
+  updated_at: string
+  bytes: number
+}
+
+export type WikiPageDetail = {
+  id: string
+  title: string
+  type: string
+  namespace: string
+  content_md: string
+  created_at: string
+  updated_at: string
+}
+
+const synthGet = <T = unknown>(path: string): Promise<T> =>
+  synthFetch<T>(path, "GET").then((r) => {
+    if (!r.ok) throw new Error(`synth HTTP ${r.status}`)
+    return r.body
+  })
+
+export const fetchWikiList = (
+  type?: string,
+  ns?: string,
+  limit = 200,
+): Promise<{ pages: WikiPageLite[] }> => {
+  const qs = new URLSearchParams()
+  if (type) qs.set("type", type)
+  if (ns) qs.set("ns", ns)
+  qs.set("limit", String(limit))
+  return synthGet(`/api/wiki/list?${qs}`)
+}
+
+export const fetchWikiPage = (id: string): Promise<WikiPageDetail> =>
+  synthGet(`/api/wiki/get?id=${encodeURIComponent(id)}`)
+
+export type MemoryEntry = {
+  id: string
+  text: string
+  category: string
+  scope: string
+  importance: number
+  created_at: string
+}
+
+export const fetchMemoryList = (
+  scope?: string,
+  category?: string,
+  limit = 500,
+): Promise<{ memories: MemoryEntry[]; total: number }> => {
+  const qs = new URLSearchParams()
+  if (scope) qs.set("scope", scope)
+  if (category) qs.set("category", category)
+  qs.set("limit", String(limit))
+  return synthGet(`/api/memory/list?${qs}`)
+}
+
+export type DreamPage = {
+  id: string
+  title: string
+  type: string
+  namespace?: string
+  updated_at?: string
+  snippet?: string
+}
+
+export const fetchDreamList = (): Promise<{ dreams: DreamPage[]; themes: DreamPage[] }> =>
+  synthGet(`/api/dream/list`)
+
+export const fetchDream = (id: string): Promise<{ id: string; title: string; content_md: string; updated_at?: string }> =>
+  synthGet(`/api/dream/get?id=${encodeURIComponent(id)}`)
+
+export type MediaItem = {
+  name: string
+  path: string
+  is_dir: boolean
+  size: number
+  mod_time: string
+  mime?: string
+}
+
+export const fetchMediaList = (dir?: string): Promise<{ items: MediaItem[]; dir: string }> => {
+  const qs = new URLSearchParams()
+  if (dir) qs.set("dir", dir)
+  return synthGet(`/api/media/list?${qs}`)
+}
+
+// Direct file URL — companion's Library page renders <img>/<video>
+// pointing here. The hub /api/my/synth-fetch path is too JSON-shaped
+// for binary streams; we serve raw via a dedicated proxy.
+export const mediaFileURL = (path: string) =>
+  `/api/hub/synth-fetch-raw?path=${encodeURIComponent("/api/media/file?path=" + path)}`

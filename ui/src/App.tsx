@@ -12,6 +12,10 @@ import { PrivacyPage } from "@/pages/Privacy"
 import { SandboxPage } from "@/pages/Sandbox"
 import { LogsPage } from "@/pages/Logs"
 import { AppsPage } from "@/pages/Apps"
+import { KnowledgePage } from "@/pages/Knowledge"
+import { RememberedPage } from "@/pages/Remembered"
+import { DreamsPage } from "@/pages/Dreams"
+import { LibraryPage } from "@/pages/Library"
 import { Toaster } from "@/components/ui/sonner"
 
 // HashRouter (not BrowserRouter) so in-page navigation never triggers
@@ -36,6 +40,10 @@ export default function App() {
             <Route path="sandbox" element={<SandboxPage />} />
             <Route path="logs" element={<LogsPage />} />
             <Route path="apps" element={<AppsPage />} />
+            <Route path="knowledge" element={<KnowledgePage />} />
+            <Route path="remembered" element={<RememberedPage />} />
+            <Route path="dreams" element={<DreamsPage />} />
+            <Route path="library" element={<LibraryPage />} />
           </Route>
         </Routes>
       </HashRouter>

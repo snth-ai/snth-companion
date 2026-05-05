@@ -50,6 +50,7 @@ func (s *UIServer) registerHubProxies(mux *http.ServeMux) {
 	proxy("/api/hub/mini-apps", "/api/my/mini-apps")
 	proxy("/api/hub/mini-apps/ask", "/api/my/mini-apps/ask")
 	proxy("/api/hub/synth-fetch", "/api/my/synth-fetch")
+	proxy("/api/hub/synth-fetch-raw", "/api/my/synth-fetch-raw")
 	// /api/hub/mini-app/<slug>[/<path>] is registered separately
 	// because path-prefix proxy semantics differ — see
 	// registerHubProxyPrefix below.
