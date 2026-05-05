@@ -11,6 +11,7 @@ import { SynthToolsPage } from "@/pages/SynthTools"
 import { PrivacyPage } from "@/pages/Privacy"
 import { SandboxPage } from "@/pages/Sandbox"
 import { LogsPage } from "@/pages/Logs"
+import { AppsPage } from "@/pages/Apps"
 import { Toaster } from "@/components/ui/sonner"
 
 // HashRouter (not BrowserRouter) so in-page navigation never triggers
@@ -34,6 +35,7 @@ export default function App() {
             <Route path="privacy" element={<PrivacyPage />} />
             <Route path="sandbox" element={<SandboxPage />} />
             <Route path="logs" element={<LogsPage />} />
+            <Route path="apps" element={<AppsPage />} />
           </Route>
         </Routes>
       </HashRouter>

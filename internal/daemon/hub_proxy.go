@@ -44,6 +44,27 @@ func (s *UIServer) registerHubProxies(mux *http.ServeMux) {
 	proxy("/api/hub/logs-remote", "/api/my/logs")
 	proxy("/api/hub/synth-tools", "/api/my/tools")
 	proxy("/api/hub/synth-tools/toggle", "/api/my/tools/toggle")
+	// Mini-apps surface (Wave 9, v0.4.39+ companion). The bound synth
+	// serves the actual content; hub bridges, companion sandboxes the
+	// iframe + handles the $mini postMessage bridge in the UI shell.
+	proxy("/api/hub/mini-apps", "/api/my/mini-apps")
+	proxy("/api/hub/mini-apps/ask", "/api/my/mini-apps/ask")
+	proxy("/api/hub/synth-fetch", "/api/my/synth-fetch")
+	// /api/hub/mini-app/<slug>[/<path>] is registered separately
+	// because path-prefix proxy semantics differ — see
+	// registerHubProxyPrefix below.
+	s.registerHubProxyPrefix(mux, "/api/hub/mini-app/", "/api/my/mini-app/")
+}
+
+// registerHubProxyPrefix wires a directory-style proxy that preserves
+// the path tail (everything after `prefix` is appended to `hubPrefix`).
+// Used by mini-app asset serving where the iframe references nested
+// paths like /api/hub/mini-app/<slug>/foo.png.
+func (s *UIServer) registerHubProxyPrefix(mux *http.ServeMux, prefix, hubPrefix string) {
+	mux.HandleFunc(prefix, func(w http.ResponseWriter, r *http.Request) {
+		tail := strings.TrimPrefix(r.URL.Path, prefix)
+		s.proxyToHub(w, r, hubPrefix+tail)
+	})
 }
 
 // proxyToHub forwards r to $HUB_URL+hubPath with companion token

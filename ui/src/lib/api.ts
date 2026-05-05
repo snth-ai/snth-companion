@@ -334,3 +334,64 @@ export const toggleSynthTool = (tool: string, disabled: boolean) =>
     "/api/hub/synth-tools/toggle",
     { tool, disabled },
   )
+
+// --- mini-apps (Wave 9 — synth-authored apps proxied through the hub)
+
+export type MiniAppManifest = {
+  slug: string
+  name: string
+  icon?: string
+  tint?: string
+  description?: string
+  author?: string
+  created_at?: string
+  updated_at?: string
+}
+
+export type MiniAppListEntry = {
+  manifest: MiniAppManifest
+  view_html?: string
+  manifest_error?: string
+}
+
+export type MiniAppsResponse = {
+  apps: MiniAppListEntry[]
+  dir?: string
+}
+
+export const fetchMiniApps = () =>
+  getJSON<MiniAppsResponse>("/api/hub/mini-apps")
+
+export const miniAppRunURL = (slug: string) =>
+  `/api/hub/mini-app/${encodeURIComponent(slug)}?t=${Date.now()}`
+
+export type SynthFetchResponse<T = unknown> = {
+  status: number
+  ok: boolean
+  body: T
+}
+
+export const synthFetch = <T = unknown>(
+  path: string,
+  method: string = "GET",
+  body?: unknown,
+) =>
+  postJSON<SynthFetchResponse<T>>("/api/hub/synth-fetch", {
+    path,
+    method,
+    body,
+  })
+
+export type MiniAppAskResponse = {
+  text: string
+  tokens?: number
+  format?: string
+  error?: string
+}
+
+export const miniAppAsk = (slug: string, prompt: string, format?: string) =>
+  postJSON<MiniAppAskResponse>("/api/hub/mini-apps/ask", {
+    slug,
+    prompt,
+    format: format ?? "text",
+  })

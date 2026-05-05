@@ -2,6 +2,7 @@ import { NavLink, Outlet } from "react-router-dom"
 import {
   Activity,
   KeyRound,
+  LayoutGrid,
   Link as LinkIcon,
   Lock,
   LogIn,
@@ -17,6 +18,7 @@ import { SynthSwitcher } from "@/components/SynthSwitcher"
 
 const navItems = [
   { to: "/", label: "Status", icon: Activity },
+  { to: "/apps", label: "Apps", icon: LayoutGrid },
   { to: "/pair", label: "Pair", icon: LinkIcon },
   { to: "/synths", label: "Synths", icon: Users },
   { to: "/channels", label: "Channels", icon: MessageSquare },
