@@ -1,25 +1,33 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import ForceGraph2D from "react-force-graph-2d"
 import { useNavigate } from "react-router-dom"
-import { Card, CardContent } from "@/components/ui/card"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
-import { Sparkles } from "lucide-react"
+import { Badge } from "@/components/ui/badge"
+import { Sparkles, X, ExternalLink, Pencil } from "lucide-react"
 import {
   fetchAllEdges,
   fetchProjects,
   fetchWikiList,
+  fetchWikiPage,
   seedSimilarEdges,
   type Project,
+  type WikiPageDetail,
   type WikiPageLite,
 } from "@/lib/api"
 import { toast } from "sonner"
 
-// Graph — force-directed network of wiki pages + edges. Nodes coloured
-// by project (or grey if unassigned). Click a node → jump to that page
-// in /knowledge. Edges come from /api/wiki/edges in one round-trip
-// (v0.4.45+). Pre-v0.4.45 versions did per-page fan-out and took ~15 s
-// on Mia before any edge rendered — the bulk endpoint is ~150 ms.
+// Graph — full-bleed force-directed network of wiki pages + edges.
+// Layout strategy:
+//   - Canvas fills the entire main area (escapes Layout's max-w-5xl
+//     wrapper via `fixed inset-0 left-60`).
+//   - Translucent glass-tile in the top-left corner holds the title,
+//     project filter, seed-similar button, and stats (so the screen
+//     reads as one unified visual).
+//   - Click a node → animated slide-in panel from the right showing
+//     the page detail (no router navigation; stays on /graph).
 
 type GraphNode = {
   id: string
@@ -67,6 +75,11 @@ export function GraphPage() {
   const [loadingEdges, setLoadingEdges] = useState(false)
   const [filterProj, setFilterProj] = useState<string>("__all__")
   const [seeding, setSeeding] = useState(false)
+  const [selectedID, setSelectedID] = useState<string | null>(null)
+  const [selectedDetail, setSelectedDetail] = useState<WikiPageDetail | null>(
+    null,
+  )
+  const [detailLoading, setDetailLoading] = useState(false)
   const navigate = useNavigate()
   const containerRef = useRef<HTMLDivElement | null>(null)
   const [size, setSize] = useState({ w: 800, h: 600 })
@@ -87,12 +100,12 @@ export function GraphPage() {
     })()
   }, [])
 
-  // Resize observer for the canvas container.
+  // Resize observer on the full-bleed container — canvas tracks it 1:1.
   useEffect(() => {
     if (!containerRef.current) return
     const el = containerRef.current
     const ro = new ResizeObserver(() => {
-      setSize({ w: el.clientWidth, h: Math.max(500, window.innerHeight - 220) })
+      setSize({ w: el.clientWidth, h: el.clientHeight })
     })
     ro.observe(el)
     return () => ro.disconnect()
@@ -124,11 +137,41 @@ export function GraphPage() {
     }
   }, [pages])
 
+  // Lazy detail fetch when a node is clicked.
+  useEffect(() => {
+    if (!selectedID) {
+      setSelectedDetail(null)
+      return
+    }
+    let cancelled = false
+    setDetailLoading(true)
+    setSelectedDetail(null)
+    void (async () => {
+      try {
+        const d = await fetchWikiPage(selectedID)
+        if (!cancelled) setSelectedDetail(d)
+      } catch (e) {
+        if (!cancelled)
+          toast.error(String((e as Error).message ?? e))
+      } finally {
+        if (!cancelled) setDetailLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [selectedID])
+
+  // Esc closes the panel.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSelectedID(null)
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [])
+
   const { nodes, links } = useMemo(() => {
-    // react-force-graph-2d mutates link.source/target into node-object refs
-    // after the first simulation tick. Normalize back to string IDs every
-    // memo run, and emit FRESH link objects so the next mutation only damages
-    // disposable copies — never our edges state.
     const idOf = (v: unknown): string =>
       typeof v === "string" ? v : ((v as { id?: string })?.id ?? "")
 
@@ -165,108 +208,259 @@ export function GraphPage() {
     return { nodes: ns, links: ls }
   }, [pages, projects, edges, filterProj])
 
+  const projectOf = (pid?: string | null) =>
+    pid ? projects.find((p) => p.id === pid) : undefined
+
   return (
-    <div className="space-y-3">
-      <div className="flex items-end justify-between gap-3 flex-wrap">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Graph</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            Force-directed view of pages + their links. Click a node to open
-            the page. Bigger nodes = more inbound links.
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <select
-            value={filterProj}
-            onChange={(e) => setFilterProj(e.target.value)}
-            className="text-sm bg-card border border-border rounded px-2 py-1"
-          >
-            <option value="__all__">all pages</option>
-            <option value="__none__">unassigned</option>
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-          <span className="text-xs text-muted-foreground">
-            {nodes.length} nodes · {links.length} edges
-            {loadingEdges && " · loading edges…"}
-          </span>
-          <Button
-            size="sm"
-            variant="secondary"
-            disabled={seeding}
-            onClick={async () => {
-              if (
-                !confirm(
-                  "Seed edges from vector similarity?\n\nFor every page, top-3 similar pages above 0.85 cosine become a `related` edge. Idempotent (re-running just nudges existing strengths).",
-                )
-              )
-                return
-              setSeeding(true)
-              try {
-                const r = await seedSimilarEdges(0.85, 3)
-                toast.success(
-                  `seeded ${r.edges_added} new edges (total ${r.edges_total} across ${r.scanned} pages)`,
-                )
-                // Force a refetch of pages so the edges fan-out reruns.
-                const pg = await fetchWikiList({ limit: 1000 })
-                setPages([...(pg.pages ?? [])])
-              } catch (e) {
-                toast.error(String((e as Error).message ?? e))
-              } finally {
-                setSeeding(false)
-              }
+    // fixed inset-0 left-60 = full-bleed of main area (sidebar is w-60 = 240px)
+    <div className="fixed inset-0 left-60 bg-background overflow-hidden">
+      {/* full-bleed canvas wrapper — ResizeObserver feeds canvas dimensions */}
+      <div ref={containerRef} className="absolute inset-0">
+        {nodes.length > 0 ? (
+          <ForceGraph2D
+            graphData={{ nodes, links }}
+            width={size.w}
+            height={size.h}
+            backgroundColor="hsl(var(--background))"
+            nodeColor={(n) => (n as GraphNode).color || "#475569"}
+            nodeVal={(n) => Math.min(20, (n as GraphNode).val ?? 1) * 4}
+            nodeLabel={(n) => (n as GraphNode).name}
+            linkColor={() => "rgba(148, 163, 184, 0.25)"}
+            linkWidth={1}
+            cooldownTicks={120}
+            onNodeClick={(n) => setSelectedID((n as GraphNode).id)}
+            onBackgroundClick={() => setSelectedID(null)}
+            nodeCanvasObjectMode={() => "after"}
+            nodeCanvasObject={(n, ctx, scale) => {
+              const node = n as GraphNode & { x?: number; y?: number }
+              if (scale < 1.5 || !node.x || !node.y) return
+              ctx.font = `${10 / scale}px sans-serif`
+              ctx.fillStyle = "#cbd5e1"
+              ctx.textAlign = "center"
+              ctx.textBaseline = "top"
+              ctx.fillText(node.name, node.x, node.y + 5)
             }}
-          >
-            <Sparkles className="h-4 w-4 mr-1" />
-            {seeding ? "seeding…" : "seed similar"}
-          </Button>
-        </div>
+          />
+        ) : (
+          <div className="absolute inset-0 grid place-items-center text-sm text-muted-foreground italic">
+            no pages to visualize
+          </div>
+        )}
       </div>
 
-      {err && (
-        <Alert variant="destructive">
-          <AlertTitle>Error</AlertTitle>
-          <AlertDescription>{err}</AlertDescription>
-        </Alert>
-      )}
+      {/* Glass-tile overlay — title + filter + seed + stats */}
+      <div className="absolute top-4 left-4 max-w-md pointer-events-auto">
+        <div className="bg-card/70 backdrop-blur-md border border-border/50 rounded-lg shadow-2xl p-4 space-y-3">
+          <div>
+            <h1 className="text-xl font-semibold tracking-tight">Graph</h1>
+            <p className="text-xs text-muted-foreground mt-1">
+              Force-directed view of pages + their links. Click a node to
+              preview it on the right. Bigger nodes = more inbound links.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <select
+              value={filterProj}
+              onChange={(e) => setFilterProj(e.target.value)}
+              className="text-xs bg-background/80 border border-border rounded px-2 py-1.5"
+            >
+              <option value="__all__">all pages</option>
+              <option value="__none__">unassigned</option>
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={seeding}
+              className="bg-background/80"
+              onClick={async () => {
+                if (
+                  !confirm(
+                    "Seed edges from vector similarity?\n\nFor every page, top-3 similar pages above 0.85 cosine become a `related` edge. Idempotent (re-running just nudges existing strengths).",
+                  )
+                )
+                  return
+                setSeeding(true)
+                try {
+                  const r = await seedSimilarEdges(0.85, 3)
+                  toast.success(
+                    `seeded ${r.edges_added} new edges (total ${r.edges_total} across ${r.scanned} pages)`,
+                  )
+                  const pg = await fetchWikiList({ limit: 1000 })
+                  setPages([...(pg.pages ?? [])])
+                } catch (e) {
+                  toast.error(String((e as Error).message ?? e))
+                } finally {
+                  setSeeding(false)
+                }
+              }}
+            >
+              <Sparkles className="h-3.5 w-3.5 mr-1" />
+              {seeding ? "seeding…" : "seed similar"}
+            </Button>
+          </div>
+          <div className="text-[11px] text-muted-foreground tabular-nums">
+            {nodes.length} nodes · {links.length} edges
+            {loadingEdges && " · loading edges…"}
+          </div>
+        </div>
 
-      <Card>
-        <CardContent className="p-0" ref={containerRef as never}>
-          {nodes.length === 0 ? (
-            <div className="p-10 text-center text-sm text-muted-foreground italic">
-              no pages to visualize
+        {err && (
+          <Alert variant="destructive" className="mt-3 backdrop-blur-md bg-destructive/80">
+            <AlertTitle>Error</AlertTitle>
+            <AlertDescription>{err}</AlertDescription>
+          </Alert>
+        )}
+      </div>
+
+      {/* Slide-in side panel — animated from the right */}
+      <aside
+        className={
+          "absolute right-0 top-0 bottom-0 w-[440px] bg-card/95 backdrop-blur-md border-l border-border shadow-2xl transition-transform duration-300 ease-out " +
+          (selectedID ? "translate-x-0" : "translate-x-full")
+        }
+        aria-hidden={!selectedID}
+      >
+        {selectedID && (
+          <div className="h-full flex flex-col">
+            <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
+              <button
+                onClick={() => setSelectedID(null)}
+                className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
+                aria-label="close"
+              >
+                <X className="h-4 w-4" />
+              </button>
+              <span className="text-xs text-muted-foreground font-mono truncate flex-1">
+                {selectedID}
+              </span>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() =>
+                  navigate(`/knowledge?id=${encodeURIComponent(selectedID)}`)
+                }
+                title="Open in Knowledge for editing"
+              >
+                <Pencil className="h-3.5 w-3.5 mr-1" /> edit
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() =>
+                  navigate(`/knowledge?id=${encodeURIComponent(selectedID)}`)
+                }
+                title="Open in Knowledge"
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+              </Button>
             </div>
-          ) : (
-            <ForceGraph2D
-              graphData={{ nodes, links }}
-              width={size.w}
-              height={size.h}
-              nodeColor={(n) => (n as GraphNode).color || "#475569"}
-              nodeVal={(n) => Math.min(20, (n as GraphNode).val ?? 1) * 4}
-              nodeLabel={(n) => (n as GraphNode).name}
-              linkColor={() => "rgba(148, 163, 184, 0.3)"}
-              linkWidth={1}
-              cooldownTicks={120}
-              onNodeClick={(n) => {
-                navigate(`/knowledge?id=${encodeURIComponent((n as GraphNode).id)}`)
-              }}
-              nodeCanvasObjectMode={() => "after"}
-              nodeCanvasObject={(n, ctx, scale) => {
-                const node = n as GraphNode & { x?: number; y?: number }
-                if (scale < 1.5 || !node.x || !node.y) return
-                ctx.font = `${10 / scale}px sans-serif`
-                ctx.fillStyle = "#cbd5e1"
-                ctx.textAlign = "center"
-                ctx.textBaseline = "top"
-                ctx.fillText(node.name, node.x, node.y + 5)
-              }}
-            />
-          )}
-        </CardContent>
-      </Card>
+
+            <div className="flex-1 overflow-auto px-5 py-4 space-y-3">
+              {detailLoading ? (
+                <div className="text-sm italic text-muted-foreground">
+                  loading…
+                </div>
+              ) : selectedDetail ? (
+                <>
+                  <div>
+                    <div className="flex items-center gap-2 flex-wrap mb-1">
+                      <Badge
+                        variant="secondary"
+                        className="text-[10px] uppercase tracking-wider"
+                      >
+                        {selectedDetail.type}
+                      </Badge>
+                      {selectedDetail.namespace !== "personal" && (
+                        <Badge variant="outline" className="text-[10px]">
+                          {selectedDetail.namespace}
+                        </Badge>
+                      )}
+                      {projectOf(selectedDetail.project_id) && (
+                        <Badge
+                          className="text-[10px]"
+                          style={{
+                            backgroundColor:
+                              projectOf(selectedDetail.project_id)?.color +
+                              "30",
+                            color: projectOf(selectedDetail.project_id)
+                              ?.color,
+                            borderColor: projectOf(selectedDetail.project_id)
+                              ?.color,
+                          }}
+                        >
+                          {projectOf(selectedDetail.project_id)?.name}
+                        </Badge>
+                      )}
+                    </div>
+                    <h2 className="text-lg font-semibold leading-tight">
+                      {selectedDetail.title || selectedDetail.id}
+                    </h2>
+                  </div>
+
+                  <article className="prose prose-invert prose-sm max-w-none">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      {selectedDetail.content || "_(empty)_"}
+                    </ReactMarkdown>
+                  </article>
+
+                  {(selectedDetail.links_out?.length ||
+                    selectedDetail.links_in?.length) && (
+                    <div className="border-t border-border pt-3 space-y-3">
+                      {(selectedDetail.links_out?.length ?? 0) > 0 && (
+                        <div>
+                          <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
+                            links out ({selectedDetail.links_out!.length})
+                          </div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {selectedDetail.links_out!.map((l) => (
+                              <button
+                                key={l.page_id + (l.relation ?? "")}
+                                onClick={() => setSelectedID(l.page_id)}
+                                className="text-xs px-2 py-1 rounded bg-muted/50 hover:bg-muted text-foreground transition"
+                                title={l.relation}
+                              >
+                                {l.page_title || l.page_id}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {(selectedDetail.links_in?.length ?? 0) > 0 && (
+                        <div>
+                          <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
+                            referenced by ({selectedDetail.links_in!.length})
+                          </div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {selectedDetail.links_in!.map((l) => (
+                              <button
+                                key={l.page_id + (l.relation ?? "")}
+                                onClick={() => setSelectedID(l.page_id)}
+                                className="text-xs px-2 py-1 rounded bg-muted/50 hover:bg-muted text-foreground transition"
+                                title={l.relation}
+                              >
+                                {l.page_title || l.page_id}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="text-sm italic text-muted-foreground">
+                  no detail
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </aside>
     </div>
   )
 }
