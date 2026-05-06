@@ -418,8 +418,8 @@ export type WikiPageDetail = {
   content: string
   created_at: string
   updated_at: string
-  links_out?: Array<{ page_id: string; title?: string; relation?: string }>
-  links_in?: Array<{ page_id: string; title?: string; relation?: string }>
+  links_out?: Array<{ page_id: string; page_title?: string; relation?: string; strength?: number }>
+  links_in?: Array<{ page_id: string; page_title?: string; relation?: string; strength?: number }>
 }
 
 const synthGet = <T = unknown>(path: string): Promise<T> =>
@@ -545,6 +545,23 @@ export type SeedSimilarResponse = {
   threshold: number
   top_k: number
 }
+
+export type WikiEdge = {
+  id: number
+  source_id: string
+  target_id: string
+  relation: string
+  strength: number
+  min_strength?: number
+  context?: string | null
+  created_at: string
+}
+
+// One round-trip for ALL edges. Replaces the per-page fan-out the Graph
+// view used to do (~470 calls × ~250 ms = ~15 s on Mia). Synth-side
+// endpoint added in v0.4.45.
+export const fetchAllEdges = (): Promise<{ edges: WikiEdge[] }> =>
+  synthGet(`/api/wiki/edges`)
 
 export const seedSimilarEdges = (
   threshold = 0.85,

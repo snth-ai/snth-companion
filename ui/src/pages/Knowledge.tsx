@@ -632,7 +632,7 @@ function ConnectionsPanel({
           label="links out"
           items={(detail.links_out ?? []).map((l) => ({
             id: l.page_id,
-            title: l.title || l.page_id,
+            title: l.page_title || l.page_id,
             relation: l.relation,
           }))}
           onJump={onJump}
@@ -645,7 +645,7 @@ function ConnectionsPanel({
           label="referenced by"
           items={(detail.links_in ?? []).map((l) => ({
             id: l.page_id,
-            title: l.title || l.page_id,
+            title: l.page_title || l.page_id,
             relation: l.relation,
           }))}
           onJump={onJump}

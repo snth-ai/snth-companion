@@ -6,21 +6,20 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Sparkles } from "lucide-react"
 import {
+  fetchAllEdges,
   fetchProjects,
   fetchWikiList,
-  fetchWikiPage,
   seedSimilarEdges,
   type Project,
-  type WikiPageDetail,
   type WikiPageLite,
 } from "@/lib/api"
 import { toast } from "sonner"
 
 // Graph — force-directed network of wiki pages + edges. Nodes coloured
 // by project (or grey if unassigned). Click a node → jump to that page
-// in /knowledge. Edges are pulled lazily from /api/wiki/get for each
-// page (we don't have a bulk-edges endpoint yet — overlapping fetches
-// are batched in concurrent groups of 8 to keep it from saturating).
+// in /knowledge. Edges come from /api/wiki/edges in one round-trip
+// (v0.4.45+). Pre-v0.4.45 versions did per-page fan-out and took ~15 s
+// on Mia before any edge rendered — the bulk endpoint is ~150 ms.
 
 type GraphNode = {
   id: string
@@ -99,35 +98,25 @@ export function GraphPage() {
     return () => ro.disconnect()
   }, [])
 
-  // Lazy edge fan-out — fetch each page's links, dedupe.
+  // Bulk edge fetch — one round-trip via /api/wiki/edges (v0.4.45+).
   useEffect(() => {
     if (pages.length === 0) return
     let cancelled = false
     setLoadingEdges(true)
     void (async () => {
-      const edgeSet = new Set<string>()
-      const out: GraphLink[] = []
-      const batchSize = 8
-      for (let i = 0; i < pages.length && !cancelled; i += batchSize) {
-        const slice = pages.slice(i, i + batchSize)
-        const details = await Promise.all(
-          slice.map((p) =>
-            fetchWikiPage(p.id).catch(() => null as WikiPageDetail | null),
-          ),
-        )
-        for (const d of details) {
-          if (!d) continue
-          for (const e of d.links_out ?? []) {
-            const key = d.id + "→" + e.page_id + "/" + (e.relation ?? "")
-            if (edgeSet.has(key)) continue
-            edgeSet.add(key)
-            out.push({ source: d.id, target: e.page_id, relation: e.relation })
-          }
-        }
-      }
-      if (!cancelled) {
+      try {
+        const r = await fetchAllEdges()
+        if (cancelled) return
+        const out: GraphLink[] = (r.edges ?? []).map((e) => ({
+          source: e.source_id,
+          target: e.target_id,
+          relation: e.relation,
+        }))
         setEdges(out)
-        setLoadingEdges(false)
+      } catch (e) {
+        setErr(String((e as Error).message ?? e))
+      } finally {
+        if (!cancelled) setLoadingEdges(false)
       }
     })()
     return () => {
@@ -136,6 +125,13 @@ export function GraphPage() {
   }, [pages])
 
   const { nodes, links } = useMemo(() => {
+    // react-force-graph-2d mutates link.source/target into node-object refs
+    // after the first simulation tick. Normalize back to string IDs every
+    // memo run, and emit FRESH link objects so the next mutation only damages
+    // disposable copies — never our edges state.
+    const idOf = (v: unknown): string =>
+      typeof v === "string" ? v : ((v as { id?: string })?.id ?? "")
+
     const filteredPages =
       filterProj === "__all__"
         ? pages
@@ -151,18 +147,21 @@ export function GraphPage() {
       color: nodeColor(p, projects),
       val: 1,
     }))
-    // Bump val by in-degree for visual weight.
     const inDeg = new Map<string, number>()
     for (const e of edges) {
-      if (idSet.has(e.target as string))
-        inDeg.set(e.target as string, (inDeg.get(e.target as string) ?? 0) + 1)
+      const tgt = idOf(e.target)
+      if (idSet.has(tgt)) inDeg.set(tgt, (inDeg.get(tgt) ?? 0) + 1)
     }
     for (const n of ns) {
       n.val = 1 + (inDeg.get(n.id) ?? 0)
     }
-    const ls = edges.filter(
-      (e) => idSet.has(e.source as string) && idSet.has(e.target as string),
-    )
+    const ls: GraphLink[] = []
+    for (const e of edges) {
+      const src = idOf(e.source)
+      const tgt = idOf(e.target)
+      if (!idSet.has(src) || !idSet.has(tgt)) continue
+      ls.push({ source: src, target: tgt, relation: e.relation })
+    }
     return { nodes: ns, links: ls }
   }, [pages, projects, edges, filterProj])
 
