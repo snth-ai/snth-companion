@@ -403,6 +403,7 @@ export type WikiPageLite = {
   title: string
   type: string
   namespace: string
+  project_id?: string | null
   snippet?: string
   updated_at: string
   bytes: number
@@ -413,6 +414,7 @@ export type WikiPageDetail = {
   title: string
   type: string
   namespace: string
+  project_id?: string | null
   content: string
   created_at: string
   updated_at: string
@@ -427,14 +429,18 @@ const synthGet = <T = unknown>(path: string): Promise<T> =>
   })
 
 export const fetchWikiList = (
-  type?: string,
-  ns?: string,
-  limit = 200,
+  opts: {
+    type?: string
+    ns?: string
+    project_id?: string
+    limit?: number
+  } = {},
 ): Promise<{ pages: WikiPageLite[] }> => {
   const qs = new URLSearchParams()
-  if (type) qs.set("type", type)
-  if (ns) qs.set("ns", ns)
-  qs.set("limit", String(limit))
+  if (opts.type) qs.set("type", opts.type)
+  if (opts.ns) qs.set("ns", opts.ns)
+  if (opts.project_id) qs.set("project_id", opts.project_id)
+  qs.set("limit", String(opts.limit ?? 500))
   return synthGet(`/api/wiki/list?${qs}`)
 }
 
@@ -443,6 +449,93 @@ export const fetchWikiPage = (id: string): Promise<WikiPageDetail> =>
 
 export const deleteWikiPage = (id: string) =>
   synthFetch(`/api/wiki/delete?id=${encodeURIComponent(id)}`, "POST")
+
+// --- v0.4.42: write + connections + projects --------------------------
+
+export type WikiUpsertInput = {
+  page_id: string
+  title: string
+  content: string
+  type: string
+  namespace: string
+}
+
+export const upsertWikiPage = (
+  in_: WikiUpsertInput,
+  projectID?: string,
+): Promise<WikiPageDetail> => {
+  const qs = projectID ? `?project_id=${encodeURIComponent(projectID)}` : ""
+  return synthFetch<WikiPageDetail>(`/api/wiki/upsert${qs}`, "POST", in_).then((r) => {
+    if (!r.ok) throw new Error(`synth HTTP ${r.status}`)
+    return r.body
+  })
+}
+
+export type WikiSimilar = {
+  page_id: string
+  title: string
+  type: string
+  namespace: string
+  score: number
+}
+
+export const fetchWikiSimilar = (
+  id: string,
+  limit = 5,
+): Promise<{ similar: WikiSimilar[] }> =>
+  synthGet(
+    `/api/wiki/similar?id=${encodeURIComponent(id)}&limit=${limit}`,
+  )
+
+export const linkWikiPages = (
+  source: string,
+  target: string,
+  relation = "related",
+) => {
+  const qs = new URLSearchParams({ source, target, relation })
+  return synthFetch(`/api/wiki/link?${qs}`, "POST")
+}
+
+export const unlinkWikiPages = (
+  source: string,
+  target: string,
+  relation?: string,
+) => {
+  const qs = new URLSearchParams({ source, target })
+  if (relation) qs.set("relation", relation)
+  return synthFetch(`/api/wiki/unlink?${qs}`, "POST")
+}
+
+export const assignWikiProject = (id: string, projectID: string) => {
+  const qs = new URLSearchParams({ id, project_id: projectID })
+  return synthFetch(`/api/wiki/assign-project?${qs}`, "POST")
+}
+
+export type Project = {
+  id: string
+  slug: string
+  name: string
+  description: string
+  status: string
+  color: string
+  created_at: string
+  updated_at: string
+  page_count: number
+}
+
+export const fetchProjects = (): Promise<{ projects: Project[] }> =>
+  synthGet(`/api/projects/list`)
+
+export const upsertProject = (
+  p: Partial<Project> & { slug: string; name: string },
+): Promise<Project> =>
+  synthFetch<Project>(`/api/projects/upsert`, "POST", p).then((r) => {
+    if (!r.ok) throw new Error(`synth HTTP ${r.status}`)
+    return r.body
+  })
+
+export const deleteProject = (id: string) =>
+  synthFetch(`/api/projects/delete?id=${encodeURIComponent(id)}`, "POST")
 
 export type MemoryEntry = {
   id: string
