@@ -44,19 +44,22 @@ type GraphLink = {
   relation?: string
 }
 
+// Tailwind-400 family — bright, distinct hues that pop on the deep
+// dark vignette. Earlier palette mixed 500/600 shades and merged into a
+// single haze on Mia's 470-node graph.
 const TYPE_COLORS: Record<string, string> = {
-  daily: "#94a3b8",
-  dream: "#a855f7",
-  theme: "#f97316",
-  decision: "#22c55e",
-  reflection: "#06b6d4",
-  concept: "#3b82f6",
-  project: "#facc15",
-  module: "#84cc16",
-  entity: "#ec4899",
-  source: "#64748b",
-  meta: "#cbd5e1",
-  summary: "#10b981",
+  daily: "#94a3b8",      // slate-400
+  dream: "#c084fc",      // purple-400
+  theme: "#fb923c",      // orange-400
+  decision: "#4ade80",   // green-400
+  reflection: "#22d3ee", // cyan-400
+  concept: "#60a5fa",    // blue-400
+  project: "#facc15",    // yellow-400
+  module: "#a3e635",     // lime-400
+  entity: "#f472b6",     // pink-400
+  source: "#94a3b8",     // slate-400
+  meta: "#cbd5e1",       // slate-300
+  summary: "#34d399",    // emerald-400
 }
 
 function nodeColor(p: WikiPageLite, projects: Project[]): string {
@@ -64,7 +67,16 @@ function nodeColor(p: WikiPageLite, projects: Project[]): string {
     const proj = projects.find((pr) => pr.id === p.project_id)
     if (proj?.color) return proj.color
   }
-  return TYPE_COLORS[p.type] ?? "#475569"
+  return TYPE_COLORS[p.type] ?? "#64748b"
+}
+
+// Convert 6-char hex to rgba string with given alpha. No 3-char shortcut.
+function hexA(hex: string, a: number): string {
+  const h = hex.replace("#", "")
+  const r = parseInt(h.slice(0, 2), 16)
+  const g = parseInt(h.slice(2, 4), 16)
+  const b = parseInt(h.slice(4, 6), 16)
+  return `rgba(${r},${g},${b},${a})`
 }
 
 export function GraphPage() {
@@ -82,6 +94,7 @@ export function GraphPage() {
   const [detailLoading, setDetailLoading] = useState(false)
   const navigate = useNavigate()
   const containerRef = useRef<HTMLDivElement | null>(null)
+  const fgRef = useRef<{ refresh?: () => void } | null>(null)
   const [size, setSize] = useState({ w: 800, h: 600 })
 
   // Initial load.
@@ -171,6 +184,37 @@ export function GraphPage() {
     return () => window.removeEventListener("keydown", onKey)
   }, [])
 
+  // Pulse loop — keeps the canvas redrawing at 60 fps while a node is
+  // selected. Without this, ForceGraph stops painting once the simulation
+  // settles, so our time-based pulse colors freeze. Time read inside the
+  // canvas callbacks is the actual driver; we just need the refresh
+  // ticker to fire.
+  useEffect(() => {
+    if (!selectedID) return
+    let raf = 0
+    const tick = () => {
+      fgRef.current?.refresh?.()
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [selectedID])
+
+  // Connected node IDs — 1-hop neighbours of selectedID.
+  const connectedIDs = useMemo(() => {
+    const s = new Set<string>()
+    if (!selectedID) return s
+    const idOf = (v: unknown) =>
+      typeof v === "string" ? v : ((v as { id?: string })?.id ?? "")
+    for (const e of edges) {
+      const src = idOf(e.source)
+      const tgt = idOf(e.target)
+      if (src === selectedID) s.add(tgt)
+      if (tgt === selectedID) s.add(src)
+    }
+    return s
+  }, [selectedID, edges])
+
   const { nodes, links } = useMemo(() => {
     const idOf = (v: unknown): string =>
       typeof v === "string" ? v : ((v as { id?: string })?.id ?? "")
@@ -213,33 +257,147 @@ export function GraphPage() {
 
   return (
     // fixed inset-0 left-60 = full-bleed of main area (sidebar is w-60 = 240px)
-    <div className="fixed inset-0 left-60 bg-background overflow-hidden">
+    // Subtle radial vignette pushes focus toward the centre of the network.
+    <div
+      className="fixed inset-0 left-60 overflow-hidden"
+      style={{
+        background:
+          "radial-gradient(ellipse at center, hsl(220 30% 8%) 0%, hsl(220 35% 4%) 80%)",
+      }}
+    >
       {/* full-bleed canvas wrapper — ResizeObserver feeds canvas dimensions */}
       <div ref={containerRef} className="absolute inset-0">
         {nodes.length > 0 ? (
           <ForceGraph2D
+            ref={fgRef as never}
             graphData={{ nodes, links }}
             width={size.w}
             height={size.h}
-            backgroundColor="hsl(var(--background))"
-            nodeColor={(n) => (n as GraphNode).color || "#475569"}
-            nodeVal={(n) => Math.min(20, (n as GraphNode).val ?? 1) * 4}
+            backgroundColor="rgba(0,0,0,0)"
             nodeLabel={(n) => (n as GraphNode).name}
-            linkColor={() => "rgba(148, 163, 184, 0.25)"}
-            linkWidth={1}
+            linkColor={(l) => {
+              const idOf = (v: unknown) =>
+                typeof v === "string"
+                  ? v
+                  : ((v as { id?: string })?.id ?? "")
+              const src = idOf((l as GraphLink).source)
+              const tgt = idOf((l as GraphLink).target)
+              const isConnected =
+                selectedID && (src === selectedID || tgt === selectedID)
+              if (!isConnected) {
+                return "rgba(148, 163, 184, 0.12)"
+              }
+              // Pulsing cyan-ish glow for the selected node's edges.
+              const phase = 0.5 + 0.5 * Math.sin(Date.now() / 380)
+              const a = 0.35 + 0.5 * phase
+              return `rgba(125, 211, 252, ${a})` // sky-300
+            }}
+            linkWidth={(l) => {
+              const idOf = (v: unknown) =>
+                typeof v === "string"
+                  ? v
+                  : ((v as { id?: string })?.id ?? "")
+              const src = idOf((l as GraphLink).source)
+              const tgt = idOf((l as GraphLink).target)
+              const isConnected =
+                selectedID && (src === selectedID || tgt === selectedID)
+              if (!isConnected) return 0.6
+              const phase = 0.5 + 0.5 * Math.sin(Date.now() / 380)
+              return 1.5 + 1.5 * phase
+            }}
+            linkDirectionalParticles={(l) => {
+              const idOf = (v: unknown) =>
+                typeof v === "string"
+                  ? v
+                  : ((v as { id?: string })?.id ?? "")
+              const src = idOf((l as GraphLink).source)
+              const tgt = idOf((l as GraphLink).target)
+              return selectedID && (src === selectedID || tgt === selectedID)
+                ? 2
+                : 0
+            }}
+            linkDirectionalParticleSpeed={0.006}
+            linkDirectionalParticleColor={() => "rgba(186, 230, 253, 0.9)"}
             cooldownTicks={120}
             onNodeClick={(n) => setSelectedID((n as GraphNode).id)}
             onBackgroundClick={() => setSelectedID(null)}
-            nodeCanvasObjectMode={() => "after"}
+            nodeCanvasObjectMode={(n) => {
+              const isFocus =
+                (n as GraphNode).id === selectedID ||
+                connectedIDs.has((n as GraphNode).id)
+              return isFocus ? "replace" : "after"
+            }}
             nodeCanvasObject={(n, ctx, scale) => {
               const node = n as GraphNode & { x?: number; y?: number }
-              if (scale < 1.5 || !node.x || !node.y) return
+              if (!node.x || !node.y) return
+              const isSelected = node.id === selectedID
+              const isConnected = connectedIDs.has(node.id)
+              const color = node.color || "#64748b"
+              // Match ForceGraph's default radius formula: sqrt(val * 4) when
+              // the lib draws the circle; we replicate so our halo aligns.
+              const baseR = Math.sqrt(Math.min(20, node.val ?? 1) * 4)
+
+              if (isSelected || isConnected) {
+                // Halo via radial gradient — bigger + brighter for the
+                // selected node, smaller for 1-hop neighbours.
+                const phase = 0.5 + 0.5 * Math.sin(Date.now() / 600)
+                const haloMul = isSelected ? 4.5 + phase * 1.5 : 2.6
+                const haloR = baseR * haloMul
+                const grad = ctx.createRadialGradient(
+                  node.x,
+                  node.y,
+                  baseR,
+                  node.x,
+                  node.y,
+                  haloR,
+                )
+                grad.addColorStop(
+                  0,
+                  hexA(color, isSelected ? 0.55 : 0.3),
+                )
+                grad.addColorStop(1, hexA(color, 0))
+                ctx.fillStyle = grad
+                ctx.beginPath()
+                ctx.arc(node.x, node.y, haloR, 0, Math.PI * 2)
+                ctx.fill()
+
+                // Solid node fill on top of the halo.
+                const r = baseR * (isSelected ? 1.35 : 1)
+                ctx.fillStyle = color
+                ctx.beginPath()
+                ctx.arc(node.x, node.y, r, 0, Math.PI * 2)
+                ctx.fill()
+
+                // Crisp outline — bright white for selected, soft for connected.
+                ctx.strokeStyle = isSelected
+                  ? "rgba(255,255,255,0.95)"
+                  : "rgba(255,255,255,0.45)"
+                ctx.lineWidth = (isSelected ? 1.8 : 1.0) / scale
+                ctx.stroke()
+
+                // Always-visible label for focus nodes (selected always,
+                // connected only at decent zoom).
+                if (isSelected || scale > 0.9) {
+                  ctx.font = `${(isSelected ? 12 : 10) / scale}px sans-serif`
+                  ctx.fillStyle = isSelected ? "#fff" : "#cbd5e1"
+                  ctx.textAlign = "center"
+                  ctx.textBaseline = "top"
+                  ctx.fillText(node.name, node.x, node.y + r + 4 / scale)
+                }
+                return
+              }
+
+              // After-mode for the 99% case — lib has already drawn the
+              // circle, we just paint the label at higher zoom levels.
+              if (scale < 1.5) return
               ctx.font = `${10 / scale}px sans-serif`
               ctx.fillStyle = "#cbd5e1"
               ctx.textAlign = "center"
               ctx.textBaseline = "top"
               ctx.fillText(node.name, node.x, node.y + 5)
             }}
+            nodeColor={(n) => (n as GraphNode).color || "#64748b"}
+            nodeVal={(n) => Math.min(20, (n as GraphNode).val ?? 1) * 4}
           />
         ) : (
           <div className="absolute inset-0 grid place-items-center text-sm text-muted-foreground italic">
