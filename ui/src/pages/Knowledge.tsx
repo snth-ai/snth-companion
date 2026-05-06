@@ -8,12 +8,16 @@ import {
 import { Input } from "@/components/ui/input"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Trash2 } from "lucide-react"
 import {
+  deleteWikiPage,
   fetchWikiList,
   fetchWikiPage,
   type WikiPageDetail,
   type WikiPageLite,
 } from "@/lib/api"
+import { toast } from "sonner"
 
 // Knowledge — read-only browser for the bound synth's wiki pages.
 // Two-pane: list on the left, full content on the right when a page
@@ -143,7 +147,30 @@ export function KnowledgePage() {
             <CardTitle className="flex items-center gap-2 flex-wrap">
               {detail ? detail.title || detail.id : "Pick a page"}
               {detail && <Badge variant="secondary">{detail.type}</Badge>}
-              {detail?.namespace && <Badge variant="outline">{detail.namespace}</Badge>}
+              {detail?.namespace && (
+                <Badge variant="outline">{detail.namespace}</Badge>
+              )}
+              {detail && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="ml-auto text-red-400 hover:text-red-300"
+                  onClick={async () => {
+                    if (!confirm(`Delete "${detail.title || detail.id}"?`)) return
+                    try {
+                      await deleteWikiPage(detail.id)
+                      toast.success("page deleted")
+                      setSelected(null)
+                      const d = await fetchWikiList(undefined, undefined, 500)
+                      setPages(d.pages ?? [])
+                    } catch (e) {
+                      toast.error(String((e as Error).message ?? e))
+                    }
+                  }}
+                >
+                  <Trash2 className="h-4 w-4 mr-1" /> Delete
+                </Button>
+              )}
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -160,8 +187,36 @@ export function KnowledgePage() {
                 <div className="text-xs text-muted-foreground font-mono">
                   id: {detail.id} · updated {detail.updated_at}
                 </div>
+                {detail.links_out && detail.links_out.length > 0 && (
+                  <div className="text-xs text-muted-foreground">
+                    links out:{" "}
+                    {detail.links_out.map((l) => (
+                      <button
+                        key={l.page_id}
+                        onClick={() => setSelected(l.page_id)}
+                        className="underline text-primary hover:text-primary/80 mr-2"
+                      >
+                        {l.title || l.page_id}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {detail.links_in && detail.links_in.length > 0 && (
+                  <div className="text-xs text-muted-foreground">
+                    referenced by:{" "}
+                    {detail.links_in.map((l) => (
+                      <button
+                        key={l.page_id}
+                        onClick={() => setSelected(l.page_id)}
+                        className="underline text-primary hover:text-primary/80 mr-2"
+                      >
+                        {l.title || l.page_id}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <pre className="whitespace-pre-wrap text-sm font-sans leading-relaxed bg-muted/30 rounded-md p-4 max-h-[70vh] overflow-y-auto">
-                  {detail.content_md}
+                  {detail.content}
                 </pre>
               </div>
             )}

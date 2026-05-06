@@ -413,9 +413,11 @@ export type WikiPageDetail = {
   title: string
   type: string
   namespace: string
-  content_md: string
+  content: string
   created_at: string
   updated_at: string
+  links_out?: Array<{ page_id: string; title?: string; relation?: string }>
+  links_in?: Array<{ page_id: string; title?: string; relation?: string }>
 }
 
 const synthGet = <T = unknown>(path: string): Promise<T> =>
@@ -439,6 +441,9 @@ export const fetchWikiList = (
 export const fetchWikiPage = (id: string): Promise<WikiPageDetail> =>
   synthGet(`/api/wiki/get?id=${encodeURIComponent(id)}`)
 
+export const deleteWikiPage = (id: string) =>
+  synthFetch(`/api/wiki/delete?id=${encodeURIComponent(id)}`, "POST")
+
 export type MemoryEntry = {
   id: string
   text: string
@@ -448,17 +453,33 @@ export type MemoryEntry = {
   created_at: string
 }
 
+export type MemoryListResponse = {
+  memories: MemoryEntry[]
+  total: number
+  filtered_total: number
+  offset: number
+  limit: number
+  categories: Record<string, number>
+}
+
 export const fetchMemoryList = (
-  scope?: string,
-  category?: string,
-  limit = 500,
-): Promise<{ memories: MemoryEntry[]; total: number }> => {
+  opts: {
+    scope?: string
+    category?: string
+    limit?: number
+    offset?: number
+  } = {},
+): Promise<MemoryListResponse> => {
   const qs = new URLSearchParams()
-  if (scope) qs.set("scope", scope)
-  if (category) qs.set("category", category)
-  qs.set("limit", String(limit))
+  if (opts.scope) qs.set("scope", opts.scope)
+  if (opts.category) qs.set("category", opts.category)
+  qs.set("limit", String(opts.limit ?? 200))
+  qs.set("offset", String(opts.offset ?? 0))
   return synthGet(`/api/memory/list?${qs}`)
 }
+
+export const deleteMemory = (id: string) =>
+  synthFetch(`/api/memory/delete?id=${encodeURIComponent(id)}`, "POST")
 
 export type DreamPage = {
   id: string
@@ -469,10 +490,18 @@ export type DreamPage = {
   snippet?: string
 }
 
-export const fetchDreamList = (): Promise<{ dreams: DreamPage[]; themes: DreamPage[] }> =>
-  synthGet(`/api/dream/list`)
+// Dream-feed endpoint returns a flat `pages` array filtered by
+// type/namespace query params. We fan out two queries — one for diary
+// narratives, one for theme extracts — to populate the two columns.
+export const fetchDreamDiaries = (): Promise<{ pages: DreamPage[] }> =>
+  synthGet(`/api/dream/list?type=dream&namespace=dreams&limit=60`)
 
-export const fetchDream = (id: string): Promise<{ id: string; title: string; content_md: string; updated_at?: string }> =>
+export const fetchDreamThemes = (): Promise<{ pages: DreamPage[] }> =>
+  synthGet(`/api/dream/list?type=theme&namespace=themes&limit=100`)
+
+export const fetchDream = (
+  id: string,
+): Promise<{ id: string; title: string; content: string; updated_at?: string }> =>
   synthGet(`/api/dream/get?id=${encodeURIComponent(id)}`)
 
 export type MediaItem = {
@@ -494,4 +523,4 @@ export const fetchMediaList = (dir?: string): Promise<{ items: MediaItem[]; dir:
 // pointing here. The hub /api/my/synth-fetch path is too JSON-shaped
 // for binary streams; we serve raw via a dedicated proxy.
 export const mediaFileURL = (path: string) =>
-  `/api/hub/synth-fetch-raw?path=${encodeURIComponent("/api/media/file?path=" + path)}`
+  `/api/hub/synth-fetch-raw?path=${encodeURIComponent("/api/media/stream?path=" + path)}`

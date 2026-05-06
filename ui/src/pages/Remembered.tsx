@@ -2,8 +2,13 @@ import { useEffect, useMemo, useState } from "react"
 import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
-import { fetchMemoryList, type MemoryEntry } from "@/lib/api"
+import { Trash2 } from "lucide-react"
+import { deleteMemory, fetchMemoryList, type MemoryEntry } from "@/lib/api"
+import { toast } from "sonner"
+
+const PAGE_SIZE = 100
 
 // Remembered — flat browser of the synth's memory log (LanceDB or
 // SQLite fallback). One row per entry, newest first, filterable by
@@ -24,34 +29,59 @@ export function RememberedPage() {
   const [err, setErr] = useState<string | null>(null)
   const [filter, setFilter] = useState("")
   const [category, setCategory] = useState<string>("")
+  const [offset, setOffset] = useState(0)
+  const [total, setTotal] = useState(0)
+  const [filteredTotal, setFilteredTotal] = useState(0)
+  const [counts, setCounts] = useState<Record<string, number>>({})
+  const [busy, setBusy] = useState(false)
+
+  const load = async () => {
+    setBusy(true)
+    try {
+      const d = await fetchMemoryList({
+        category: category || undefined,
+        offset,
+        limit: PAGE_SIZE,
+      })
+      setItems(d.memories ?? [])
+      setTotal(d.total)
+      setFilteredTotal(d.filtered_total)
+      setCounts(d.categories ?? {})
+      setErr(null)
+    } catch (e) {
+      setErr(String((e as Error).message ?? e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Reset offset when category changes; reload on offset/category change.
+  useEffect(() => {
+    setOffset(0)
+  }, [category])
 
   useEffect(() => {
-    void (async () => {
-      try {
-        const d = await fetchMemoryList(undefined, undefined, 1000)
-        setItems(d.memories ?? [])
-      } catch (e) {
-        setErr(String((e as Error).message ?? e))
-      }
-    })()
-  }, [])
+    void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [offset, category])
 
   const visible = useMemo(() => {
     if (!items) return []
-    let out = items
-    if (category) out = out.filter((m) => m.category === category)
     const q = filter.trim().toLowerCase()
-    if (q) out = out.filter((m) => m.text.toLowerCase().includes(q))
-    return out
-  }, [items, filter, category])
+    if (!q) return items
+    return items.filter((m) => m.text.toLowerCase().includes(q))
+  }, [items, filter])
 
-  const counts = useMemo(() => {
-    const m = new Map<string, number>()
-    for (const it of items ?? []) {
-      m.set(it.category, (m.get(it.category) ?? 0) + 1)
+  const handleDelete = async (id: string) => {
+    if (!confirm("Delete this memory?")) return
+    try {
+      await deleteMemory(id)
+      toast.success("memory deleted")
+      void load()
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
     }
-    return m
-  }, [items])
+  }
 
   return (
     <div className="space-y-4">
@@ -86,9 +116,9 @@ export function RememberedPage() {
             (category === "" ? "bg-primary/15 text-foreground" : "text-muted-foreground hover:bg-muted")
           }
         >
-          all ({items?.length ?? 0})
+          all ({total})
         </button>
-        {[...counts.entries()].map(([cat, n]) => (
+        {Object.entries(counts).map(([cat, n]) => (
           <button
             key={cat}
             onClick={() => setCategory(cat)}
@@ -102,6 +132,30 @@ export function RememberedPage() {
             {categoryLabels[cat] ?? cat} ({n})
           </button>
         ))}
+        <div className="ml-auto text-xs text-muted-foreground">
+          showing {Math.min(offset + 1, filteredTotal)}–
+          {Math.min(offset + (items?.length ?? 0), filteredTotal)} of{" "}
+          {filteredTotal}
+          {category && filteredTotal !== total && (
+            <span className="text-muted-foreground/60"> (in category)</span>
+          )}
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={busy || offset === 0}
+          onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+        >
+          ←
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={busy || offset + PAGE_SIZE >= filteredTotal}
+          onClick={() => setOffset(offset + PAGE_SIZE)}
+        >
+          →
+        </Button>
       </div>
 
       <div className="space-y-2 max-h-[70vh] overflow-y-auto">
@@ -128,6 +182,14 @@ export function RememberedPage() {
                 <span className="font-mono">{m.created_at}</span>
                 <span>·</span>
                 <span>imp {Math.round(m.importance * 10) / 10}</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="ml-auto h-6 px-2 text-red-400 hover:text-red-300"
+                  onClick={() => handleDelete(m.id)}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
               </div>
               <div className="text-sm text-foreground whitespace-pre-wrap">
                 {m.text}

@@ -7,7 +7,7 @@ import {
 } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
-import { fetchDream, fetchDreamList, type DreamPage } from "@/lib/api"
+import { fetchDream, fetchDreamDiaries, fetchDreamThemes, type DreamPage } from "@/lib/api"
 
 // Dreams — read-only feed of the synth's dreaming output (REM theme
 // extraction + Diary narratives, both written by the dreaming
@@ -25,9 +25,12 @@ export function DreamsPage() {
   useEffect(() => {
     void (async () => {
       try {
-        const d = await fetchDreamList()
-        setDreams(d.dreams ?? [])
-        setThemes(d.themes ?? [])
+        const [diaries, themes] = await Promise.all([
+          fetchDreamDiaries(),
+          fetchDreamThemes(),
+        ])
+        setDreams(diaries.pages ?? [])
+        setThemes(themes.pages ?? [])
       } catch (e) {
         setErr(String((e as Error).message ?? e))
       }
@@ -41,7 +44,7 @@ export function DreamsPage() {
     }
     setLoadingDetail(true)
     void fetchDream(selected.id)
-      .then((d) => setContent(d.content_md ?? ""))
+      .then((d) => setContent(d.content ?? ""))
       .catch((e) => setErr(String(e.message ?? e)))
       .finally(() => setLoadingDetail(false))
   }, [selected])
