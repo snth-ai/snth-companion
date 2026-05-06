@@ -459,12 +459,12 @@ export function KnowledgePage() {
                   </div>
 
                   {editing ? (
-                    <textarea
+                    <WikiEditor
                       value={editBuf.content}
-                      onChange={(e) =>
-                        setEditBuf((s) => ({ ...s, content: e.target.value }))
+                      pages={pages}
+                      onChange={(v) =>
+                        setEditBuf((s) => ({ ...s, content: v }))
                       }
-                      className="w-full h-[60vh] bg-muted/30 rounded-md p-4 font-mono text-sm leading-relaxed border border-border"
                     />
                   ) : (
                     <MarkdownView
@@ -753,6 +753,143 @@ function ConnectionsRow({
           </div>
         ))}
       </div>
+    </div>
+  )
+}
+
+// WikiEditor — textarea with `[[…` typeahead. When the user types
+// `[[` (or text inside an unclosed `[[`), we surface a dropdown of
+// matching pages by title. Tab / click closes with `]]` appended.
+//
+// Implementation: track caret position, find last `[[` before caret
+// without a closing `]]` in between. Filter pages by the substring
+// after `[[`. Keyboard nav (↑↓ + Enter) handled inside.
+function WikiEditor({
+  value,
+  pages,
+  onChange,
+}: {
+  value: string
+  pages: WikiPageLite[]
+  onChange: (v: string) => void
+}) {
+  const ref = useRef<HTMLTextAreaElement | null>(null)
+  const [suggest, setSuggest] = useState<{
+    open: boolean
+    query: string
+    start: number // caret position of "[[" inside value
+    sel: number
+  }>({ open: false, query: "", start: 0, sel: 0 })
+
+  const computeSuggest = (text: string, caret: number) => {
+    // Walk backward from caret; close on `]]` or whitespace gap.
+    const head = text.slice(0, caret)
+    const m = /\[\[([^\]\n]*)$/.exec(head)
+    if (!m) {
+      setSuggest((s) => ({ ...s, open: false }))
+      return
+    }
+    setSuggest({ open: true, query: m[1], start: m.index, sel: 0 })
+  }
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (!suggest.open) return
+    if (e.key === "Escape") {
+      e.preventDefault()
+      setSuggest((s) => ({ ...s, open: false }))
+      return
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault()
+      setSuggest((s) => ({
+        ...s,
+        sel: Math.min(filtered.length - 1, s.sel + 1),
+      }))
+      return
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault()
+      setSuggest((s) => ({ ...s, sel: Math.max(0, s.sel - 1) }))
+      return
+    }
+    if ((e.key === "Enter" || e.key === "Tab") && filtered.length > 0) {
+      e.preventDefault()
+      pick(filtered[suggest.sel])
+    }
+  }
+
+  const filtered = useMemo(() => {
+    if (!suggest.open) return []
+    const q = suggest.query.toLowerCase()
+    const all = pages.filter(
+      (p) =>
+        p.title.toLowerCase().includes(q) ||
+        p.id.toLowerCase().includes(q),
+    )
+    return all.slice(0, 8)
+  }, [pages, suggest])
+
+  const pick = (page: WikiPageLite) => {
+    if (!ref.current) return
+    const ta = ref.current
+    const before = value.slice(0, suggest.start)
+    const after = value.slice(ta.selectionStart)
+    const insertion = `[[${page.title || page.id}]]`
+    const next = before + insertion + after
+    onChange(next)
+    setSuggest((s) => ({ ...s, open: false }))
+    // Restore caret after the inserted token.
+    setTimeout(() => {
+      const pos = before.length + insertion.length
+      ta.selectionStart = ta.selectionEnd = pos
+      ta.focus()
+    }, 0)
+  }
+
+  return (
+    <div className="relative">
+      <textarea
+        ref={ref}
+        value={value}
+        onChange={(e) => {
+          onChange(e.target.value)
+          computeSuggest(e.target.value, e.target.selectionStart)
+        }}
+        onKeyDown={onKeyDown}
+        onClick={(e) =>
+          computeSuggest(value, e.currentTarget.selectionStart)
+        }
+        className="w-full h-[60vh] bg-muted/30 rounded-md p-4 font-mono text-sm leading-relaxed border border-border"
+      />
+      {suggest.open && filtered.length > 0 && (
+        <div className="absolute left-4 top-12 z-10 w-72 max-h-72 overflow-y-auto rounded-md border border-border bg-popover shadow-lg">
+          <div className="px-3 py-1.5 text-xs text-muted-foreground border-b border-border">
+            insert wikilink — ↑↓ + Enter
+          </div>
+          {filtered.map((p, i) => (
+            <button
+              key={p.id}
+              onMouseDown={(e) => {
+                e.preventDefault()
+                pick(p)
+              }}
+              className={
+                "block w-full text-left px-3 py-1.5 text-sm transition-colors " +
+                (i === suggest.sel
+                  ? "bg-primary/15 text-foreground"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground")
+              }
+            >
+              <div className="font-medium text-foreground line-clamp-1">
+                {p.title || p.id}
+              </div>
+              <div className="text-xs text-muted-foreground/70 font-mono">
+                {p.id}
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

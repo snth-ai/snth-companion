@@ -537,6 +537,32 @@ export const upsertProject = (
 export const deleteProject = (id: string) =>
   synthFetch(`/api/projects/delete?id=${encodeURIComponent(id)}`, "POST")
 
+export type SeedSimilarResponse = {
+  ok: boolean
+  scanned: number
+  edges_added: number
+  edges_total: number
+  threshold: number
+  top_k: number
+}
+
+export const seedSimilarEdges = (
+  threshold = 0.85,
+  topK = 3,
+): Promise<SeedSimilarResponse> => {
+  const qs = new URLSearchParams({
+    threshold: String(threshold),
+    top_k: String(topK),
+  })
+  return synthFetch<SeedSimilarResponse>(
+    `/api/wiki/seed-similar?${qs}`,
+    "POST",
+  ).then((r) => {
+    if (!r.ok) throw new Error(`synth HTTP ${r.status}`)
+    return r.body
+  })
+}
+
 export type MemoryEntry = {
   id: string
   text: string

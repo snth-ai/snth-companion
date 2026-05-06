@@ -3,14 +3,18 @@ import ForceGraph2D from "react-force-graph-2d"
 import { useNavigate } from "react-router-dom"
 import { Card, CardContent } from "@/components/ui/card"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Button } from "@/components/ui/button"
+import { Sparkles } from "lucide-react"
 import {
   fetchProjects,
   fetchWikiList,
   fetchWikiPage,
+  seedSimilarEdges,
   type Project,
   type WikiPageDetail,
   type WikiPageLite,
 } from "@/lib/api"
+import { toast } from "sonner"
 
 // Graph — force-directed network of wiki pages + edges. Nodes coloured
 // by project (or grey if unassigned). Click a node → jump to that page
@@ -63,6 +67,7 @@ export function GraphPage() {
   const [err, setErr] = useState<string | null>(null)
   const [loadingEdges, setLoadingEdges] = useState(false)
   const [filterProj, setFilterProj] = useState<string>("__all__")
+  const [seeding, setSeeding] = useState(false)
   const navigate = useNavigate()
   const containerRef = useRef<HTMLDivElement | null>(null)
   const [size, setSize] = useState({ w: 800, h: 600 })
@@ -189,6 +194,36 @@ export function GraphPage() {
             {nodes.length} nodes · {links.length} edges
             {loadingEdges && " · loading edges…"}
           </span>
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={seeding}
+            onClick={async () => {
+              if (
+                !confirm(
+                  "Seed edges from vector similarity?\n\nFor every page, top-3 similar pages above 0.85 cosine become a `related` edge. Idempotent (re-running just nudges existing strengths).",
+                )
+              )
+                return
+              setSeeding(true)
+              try {
+                const r = await seedSimilarEdges(0.85, 3)
+                toast.success(
+                  `seeded ${r.edges_added} new edges (total ${r.edges_total} across ${r.scanned} pages)`,
+                )
+                // Force a refetch of pages so the edges fan-out reruns.
+                const pg = await fetchWikiList({ limit: 1000 })
+                setPages([...(pg.pages ?? [])])
+              } catch (e) {
+                toast.error(String((e as Error).message ?? e))
+              } finally {
+                setSeeding(false)
+              }
+            }}
+          >
+            <Sparkles className="h-4 w-4 mr-1" />
+            {seeding ? "seeding…" : "seed similar"}
+          </Button>
         </div>
       </div>
 
