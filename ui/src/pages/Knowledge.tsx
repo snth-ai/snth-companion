@@ -8,9 +8,17 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import {
   Trash2,
   Plus,
@@ -96,6 +104,12 @@ export function KnowledgePage() {
   const [editing, setEditing] = useState(false)
   const [editBuf, setEditBuf] = useState({ title: "", content: "" })
   const [err, setErr] = useState<string | null>(null)
+  // Create-dialog state. WebKit WebView on macOS silently drops native
+  // window.prompt() calls (blocks main thread + ugly UX), so we use a
+  // shadcn Dialog instead.
+  const [createKind, setCreateKind] = useState<"project" | "page" | null>(null)
+  const [createForm, setCreateForm] = useState({ slug: "", name: "" })
+  const [creating, setCreating] = useState(false)
   const navigate = useNavigate()
 
   const loadProjects = async () => {
@@ -188,43 +202,57 @@ export function KnowledgePage() {
     }
   }
 
-  const handleNewPage = async () => {
-    const slug = prompt(
-      "new page slug (e.g. 'project/snth-platform'):",
-      "page-" + Math.random().toString(36).slice(2, 8),
-    )
-    if (!slug) return
-    try {
-      const updated = await upsertWikiPage(
-        {
-          page_id: slug,
-          title: slug,
-          content: "# " + slug + "\n\n",
-          type: "concept",
-          namespace: "personal",
-        },
-        activeProject !== ALL_PROJECTS && activeProject !== NO_PROJECT
-          ? activeProject
-          : undefined,
-      )
-      void loadPages()
-      setSelectedID(updated.id)
-      setEditing(true)
-    } catch (e) {
-      toast.error(String((e as Error).message ?? e))
-    }
+  const openNewPage = () => {
+    setCreateKind("page")
+    setCreateForm({
+      slug: "page-" + Math.random().toString(36).slice(2, 8),
+      name: "",
+    })
   }
 
-  const handleNewProject = async () => {
-    const slug = prompt("new project slug (a-z, numbers, hyphens):")
-    if (!slug) return
-    const name = prompt("display name:", slug) || slug
+  const openNewProject = () => {
+    setCreateKind("project")
+    setCreateForm({ slug: "", name: "" })
+  }
+
+  const submitCreate = async () => {
+    const slug = createForm.slug.trim()
+    if (!slug) {
+      toast.error("slug is required")
+      return
+    }
+    setCreating(true)
     try {
-      const p = await upsertProject({ slug, name })
-      await loadProjects()
-      setActiveProject(p.id)
+      if (createKind === "project") {
+        const name = createForm.name.trim() || slug
+        const p = await upsertProject({ slug, name })
+        await loadProjects()
+        setActiveProject(p.id)
+        toast.success(`project "${p.name}" created`)
+      } else if (createKind === "page") {
+        const title = createForm.name.trim() || slug
+        const updated = await upsertWikiPage(
+          {
+            page_id: slug,
+            title,
+            content: "# " + title + "\n\n",
+            type: "concept",
+            namespace: "personal",
+          },
+          activeProject !== ALL_PROJECTS && activeProject !== NO_PROJECT
+            ? activeProject
+            : undefined,
+        )
+        void loadPages()
+        setSelectedID(updated.id)
+        setEditing(true)
+        toast.success(`page "${title}" created`)
+      }
+      setCreateKind(null)
     } catch (e) {
       toast.error(String((e as Error).message ?? e))
+    } finally {
+      setCreating(false)
     }
   }
 
@@ -256,10 +284,10 @@ export function KnowledgePage() {
           <Button size="sm" variant="secondary" onClick={() => navigate("/graph")}>
             <Network className="h-4 w-4 mr-1" /> Graph
           </Button>
-          <Button size="sm" variant="outline" onClick={handleNewProject}>
+          <Button size="sm" variant="outline" onClick={openNewProject}>
             <FolderPlus className="h-4 w-4 mr-1" /> Project
           </Button>
-          <Button size="sm" onClick={handleNewPage}>
+          <Button size="sm" onClick={openNewPage}>
             <Plus className="h-4 w-4 mr-1" /> Page
           </Button>
         </div>
@@ -492,6 +520,88 @@ export function KnowledgePage() {
           )}
         </div>
       </div>
+
+      <Dialog
+        open={createKind !== null}
+        onOpenChange={(o) => !o && setCreateKind(null)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {createKind === "project" ? "New project" : "New page"}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <Label htmlFor="create-slug">
+                {createKind === "project" ? "Slug" : "Page ID / slug"}
+              </Label>
+              <Input
+                id="create-slug"
+                autoFocus
+                placeholder={
+                  createKind === "project"
+                    ? "snth-platform"
+                    : "decisions/heartbeat-budget"
+                }
+                value={createForm.slug}
+                onChange={(e) =>
+                  setCreateForm((f) => ({ ...f, slug: e.target.value }))
+                }
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault()
+                    void submitCreate()
+                  }
+                }}
+              />
+              <p className="text-xs text-muted-foreground">
+                {createKind === "project"
+                  ? "lowercase, numbers, hyphens. Used as the project's stable id."
+                  : "stable identifier — folder-style nesting works (e.g. decisions/x)."}
+              </p>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="create-name">
+                {createKind === "project" ? "Display name" : "Title"}
+              </Label>
+              <Input
+                id="create-name"
+                placeholder={
+                  createKind === "project"
+                    ? "SNTH Platform"
+                    : "Heartbeat token budget"
+                }
+                value={createForm.name}
+                onChange={(e) =>
+                  setCreateForm((f) => ({ ...f, name: e.target.value }))
+                }
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault()
+                    void submitCreate()
+                  }
+                }}
+              />
+              <p className="text-xs text-muted-foreground">
+                Optional — defaults to the slug.
+              </p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setCreateKind(null)}
+              disabled={creating}
+            >
+              Cancel
+            </Button>
+            <Button onClick={submitCreate} disabled={creating}>
+              {creating ? "creating…" : "Create"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
