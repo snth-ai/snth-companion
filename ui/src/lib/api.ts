@@ -660,3 +660,90 @@ export const fetchMediaList = (dir?: string): Promise<{ items: MediaItem[]; dir:
 // for binary streams; we serve raw via a dedicated proxy.
 export const mediaFileURL = (path: string) =>
   `/api/hub/synth-fetch-raw?path=${encodeURIComponent("/api/media/stream?path=" + path)}`
+
+// --- traces (Diagnostics tab — v0.4.31+ synth-side, companion v? UI) ---
+
+export type ToolCallTrace = {
+  name: string
+  duration_ms: number
+  ok: boolean
+  error?: string
+}
+
+export type TraceRow = {
+  id: number
+  trace_id: string
+  kind: string
+  session_id: string
+  started_at: string
+  ended_at: string
+  duration_ms: number
+  input_bytes: number
+  output_bytes: number
+  memory_recall_ms: number
+  memory_recall_bytes: number
+  memory_recall_count: number
+  memory_loop_ms: number
+  memory_loop_bytes: number
+  memory_loop_entities: number
+  wiki_ms: number
+  wiki_bytes: number
+  wiki_pages: number
+  compact_ms: number
+  llm_calls: number
+  llm_prompt_tokens: number
+  llm_cached_tokens: number
+  llm_output_tokens: number
+  llm_cost_usd: number
+  outcome: string
+  outcome_reason: string
+  reply_preview: string
+  error_text: string
+  rss_bytes: number
+  tool_calls: ToolCallTrace[]
+  extra?: Record<string, unknown>
+}
+
+export type TracesListResponse = {
+  from: string
+  to: string
+  count: number
+  traces: TraceRow[]
+  sessions: string[]
+}
+
+export type TraceRawResponse = {
+  trace_id: string
+  session_id: string
+  path?: string
+  line_count: number
+  lines: string[]
+}
+
+export const fetchTraces = (
+  opts: {
+    from?: Date
+    to?: Date
+    kind?: string
+    session?: string
+    outcome?: string
+    minDurationMs?: number
+    hasError?: boolean
+    limit?: number
+  } = {},
+): Promise<TracesListResponse> => {
+  const qs = new URLSearchParams()
+  if (opts.from) qs.set("from", opts.from.toISOString())
+  if (opts.to) qs.set("to", opts.to.toISOString())
+  if (opts.kind) qs.set("kind", opts.kind)
+  if (opts.session) qs.set("session", opts.session)
+  if (opts.outcome) qs.set("outcome", opts.outcome)
+  if (opts.minDurationMs)
+    qs.set("min_duration_ms", String(opts.minDurationMs))
+  if (opts.hasError) qs.set("has_error", "true")
+  qs.set("limit", String(opts.limit ?? 2000))
+  return synthGet(`/api/traces?${qs}`)
+}
+
+export const fetchTraceRaw = (traceID: string): Promise<TraceRawResponse> =>
+  synthGet(`/api/traces/${encodeURIComponent(traceID)}/raw`)
