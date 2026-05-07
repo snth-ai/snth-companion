@@ -580,20 +580,43 @@ func (w *TasksWorker) resolveAgentConfig(t taskRow) map[string]any {
 	return merged
 }
 
+// failSpawn emits subagent_failed and transitions to error. msg may
+// start with a known SPEC §10.6 category prefix ("workspace_creation_failed: ...",
+// "hook_failed: ...") — we extract it as error_category for dashboards.
 func (w *TasksWorker) failSpawn(taskID, msg, ws string) {
 	log.Printf("[tasks-worker] spawn fail task=%s: %s", taskID, msg)
 	w.mu.Lock()
 	delete(w.running, taskID)
 	w.mu.Unlock()
-	runtime := map[string]any{"error_text": msg}
+	cat := categorizeFailure(msg)
+	runtime := map[string]any{"error_text": msg, "error_category": cat}
 	if ws != "" {
 		runtime["workspace_path"] = ws
 	}
 	_ = w.postEvent(taskID, "subagent_failed",
-		map[string]any{"reason": msg},
+		map[string]any{"reason": cat, "message": msg},
 		runtime,
 		"error",
 	)
+}
+
+// categorizeFailure maps a spawn-time error message to a SPEC §10.6
+// FailureCategory string. Best-effort; falls back to subprocess_spawn_failed.
+func categorizeFailure(msg string) string {
+	switch {
+	case strings.HasPrefix(msg, "workspace_creation_failed"):
+		return "workspace_creation_failed"
+	case strings.HasPrefix(msg, "hook_failed"):
+		return "hook_failed"
+	case strings.HasPrefix(msg, "prompt_render_failed"):
+		return "prompt_render_failed"
+	case strings.HasPrefix(msg, "subprocess_spawn_failed"):
+		return "subprocess_spawn_failed"
+	case strings.HasPrefix(msg, "no active synth pair"):
+		return "companion_offline"
+	default:
+		return "subprocess_spawn_failed"
+	}
 }
 
 func buildCommand(kind, ws string) (string, error) {
@@ -803,7 +826,8 @@ func (w *TasksWorker) monitor(taskID, ws string, pid int, cmd *exec.Cmd, budget 
 					killProcessGroup(pid)
 					_ = w.postEvent(taskID, "subagent_killed",
 						map[string]any{"reason": "cancelled_by_operator"},
-						nil, "",
+						map[string]any{"error_category": "cancelled_by_operator"},
+						"",
 					)
 					return
 				case "blocked":
@@ -811,7 +835,8 @@ func (w *TasksWorker) monitor(taskID, ws string, pid int, cmd *exec.Cmd, budget 
 					killProcessGroup(pid)
 					_ = w.postEvent(taskID, "subagent_killed",
 						map[string]any{"reason": "blocked_by_operator"},
-						nil, "",
+						map[string]any{"error_category": "blocked_by_operator"},
+						"",
 					)
 					return
 				}
@@ -931,6 +956,7 @@ func (w *TasksWorker) monitor(taskID, ws string, pid int, cmd *exec.Cmd, budget 
 			}
 			if exitCode != 0 {
 				runtime["error_text"] = fmt.Sprintf("subagent exited with code %d", exitCode)
+				runtime["error_category"] = "subagent_nonzero_exit"
 			}
 			_ = w.postEvent(taskID, "subagent_exited",
 				map[string]any{
@@ -954,7 +980,10 @@ func (w *TasksWorker) monitor(taskID, ws string, pid int, cmd *exec.Cmd, budget 
 			killProcessGroup(pid)
 			_ = w.postEvent(taskID, "subagent_failed",
 				map[string]any{"reason": "stall_timeout"},
-				map[string]any{"error_text": "no transcript activity for " + budget.StallTimeout.String()},
+				map[string]any{
+					"error_text":     "no transcript activity for " + budget.StallTimeout.String(),
+					"error_category": "stall_timeout",
+				},
 				"error",
 			)
 			return
@@ -964,7 +993,10 @@ func (w *TasksWorker) monitor(taskID, ws string, pid int, cmd *exec.Cmd, budget 
 			killProcessGroup(pid)
 			_ = w.postEvent(taskID, "subagent_failed",
 				map[string]any{"reason": "wall_timeout"},
-				map[string]any{"error_text": "exceeded " + budget.WallTimeout.String()},
+				map[string]any{
+					"error_text":     "exceeded " + budget.WallTimeout.String(),
+					"error_category": "wall_timeout",
+				},
 				"error",
 			)
 			return
@@ -980,8 +1012,9 @@ func (w *TasksWorker) monitor(taskID, ws string, pid int, cmd *exec.Cmd, budget 
 					"cap_usd":    budget.MaxCostUSD,
 				},
 				map[string]any{
-					"error_text": fmt.Sprintf("cost $%.4f exceeded cap $%.4f", lastCost, budget.MaxCostUSD),
-					"cost_usd":   lastCost,
+					"error_text":     fmt.Sprintf("cost $%.4f exceeded cap $%.4f", lastCost, budget.MaxCostUSD),
+					"error_category": "over_budget",
+					"cost_usd":       lastCost,
 				},
 				"error",
 			)
