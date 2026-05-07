@@ -101,7 +101,21 @@ type taskTemplate struct {
 	Name               string `json:"name"`
 	PromptTemplate     string `json:"prompt_template"`
 	DefaultAgentConfig string `json:"default_agent_config"`
+	DefaultHooks       string `json:"default_hooks"`
 }
+
+// hooksConfig is the shape of template.default_hooks (JSON object).
+// Each hook is a shell snippet executed via `bash -lc` from the task
+// workspace as cwd. Empty string = skip.
+type hooksConfig struct {
+	AfterCreate  string `json:"after_create"`
+	BeforeRun    string `json:"before_run"`
+	AfterRun     string `json:"after_run"`
+	BeforeRemove string `json:"before_remove"`
+	TimeoutMS    int    `json:"timeout_ms"`
+}
+
+const defaultHookTimeoutMS = 60000
 
 // global singleton — only one worker per companion process.
 var (
@@ -360,6 +374,10 @@ func (w *TasksWorker) spawn(ctx context.Context, t taskRow) {
 	}
 
 	ws := workspaceFor(t.ID)
+	freshlyCreated := false
+	if _, err := os.Stat(ws); os.IsNotExist(err) {
+		freshlyCreated = true
+	}
 	if err := os.MkdirAll(ws, 0o755); err != nil {
 		w.failSpawn(t.ID, "workspace_creation_failed: "+err.Error(), ws)
 		return
@@ -368,6 +386,19 @@ func (w *TasksWorker) spawn(ctx context.Context, t taskRow) {
 	// --- resolve effective config (template defaults + task overrides) ---
 	effectiveCfg := w.resolveAgentConfig(t)
 	budget := resolveBudget(effectiveCfg)
+	hooks := w.resolveHooks(t)
+	hookTimeout := hooks.TimeoutMS
+	if hookTimeout <= 0 {
+		hookTimeout = defaultHookTimeoutMS
+	}
+
+	// --- after_create hook (only on fresh workspace, fatal on failure) ---
+	if freshlyCreated && hooks.AfterCreate != "" {
+		if err := w.runHook("after_create", hooks.AfterCreate, ws, hookTimeout, true); err != nil {
+			w.failSpawn(t.ID, "hook_failed: "+err.Error(), ws)
+			return
+		}
+	}
 	// Sub-agent kind: task wins, then config, then "claude".
 	kind := strings.TrimSpace(t.SubAgentKind)
 	if kind == "" {
@@ -399,6 +430,14 @@ func (w *TasksWorker) spawn(ctx context.Context, t taskRow) {
 		// starts writing.
 		w.failSpawn(t.ID, "init transcript: "+err.Error(), ws)
 		return
+	}
+
+	// --- before_run hook (fatal on failure) ---
+	if hooks.BeforeRun != "" {
+		if err := w.runHook("before_run", hooks.BeforeRun, ws, hookTimeout, true); err != nil {
+			w.failSpawn(t.ID, "hook_failed: "+err.Error(), ws)
+			return
+		}
 	}
 
 	// --- build command ---
@@ -467,7 +506,52 @@ func (w *TasksWorker) spawn(ctx context.Context, t taskRow) {
 	// Detach the process from the cmd struct's Wait loop. We poll for
 	// exit ourselves via signal 0 in the monitor — that way the
 	// subprocess outlives the companion and can be reattached later.
-	go w.monitor(t.ID, ws, pid, cmd, budget)
+	go w.monitor(t.ID, ws, pid, cmd, budget, hooks)
+}
+
+// resolveHooks reads template.default_hooks JSON. Returns zero-value
+// hooksConfig when no template or no hooks (each field empty → skip).
+func (w *TasksWorker) resolveHooks(t taskRow) hooksConfig {
+	var hc hooksConfig
+	if t.TemplateID == nil || *t.TemplateID == "" {
+		return hc
+	}
+	tpl, err := w.getTemplate(*t.TemplateID)
+	if err != nil || tpl == nil || tpl.DefaultHooks == "" {
+		return hc
+	}
+	_ = json.Unmarshal([]byte(tpl.DefaultHooks), &hc)
+	return hc
+}
+
+// runHook executes a hook script via `bash -lc <script>` with cwd =
+// workspace and the same env as the sub-agent will get. Returns nil
+// on success, error on non-zero exit or timeout. Empty script = noop.
+func (w *TasksWorker) runHook(name, script, workspace string, timeoutMS int, fatal bool) error {
+	if strings.TrimSpace(script) == "" {
+		return nil
+	}
+	if timeoutMS <= 0 {
+		timeoutMS = defaultHookTimeoutMS
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMS)*time.Millisecond)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", "-lc", script)
+	cmd.Dir = workspace
+	cmd.Env = append(os.Environ(),
+		"SNTH_TASK_WORKSPACE="+workspace,
+		"SNTH_HOOK_NAME="+name,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("[tasks-worker] hook=%s ws=%s failed (fatal=%v): %v\n%s",
+			name, workspace, fatal, err, truncate(string(out), 800))
+		return fmt.Errorf("hook %s: %w (output: %s)", name, err, truncate(string(out), 200))
+	}
+	if len(out) > 0 {
+		log.Printf("[tasks-worker] hook=%s ws=%s ok (%d bytes)", name, workspace, len(out))
+	}
+	return nil
 }
 
 // resolveAgentConfig merges template.default_agent_config and task.
@@ -666,10 +750,20 @@ func toFloat(v any) float64 {
 
 // monitor tails transcript.log every 1s, posts progress + handles
 // awaiting_input + detects exit. Owns the localRun until exit.
-func (w *TasksWorker) monitor(taskID, ws string, pid int, cmd *exec.Cmd, budget runBudget) {
+func (w *TasksWorker) monitor(taskID, ws string, pid int, cmd *exec.Cmd, budget runBudget, hooks hooksConfig) {
+	hookTimeout := hooks.TimeoutMS
+	if hookTimeout <= 0 {
+		hookTimeout = defaultHookTimeoutMS
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("[tasks-worker] monitor panic task=%s: %v", taskID, r)
+		}
+		// after_run hook — best-effort, fires on any exit path (done,
+		// error, stall, wall_timeout, cost cap). Logs but doesn't change
+		// task state on failure.
+		if hooks.AfterRun != "" {
+			_ = w.runHook("after_run", hooks.AfterRun, ws, hookTimeout, false)
 		}
 		w.mu.Lock()
 		delete(w.running, taskID)
@@ -774,6 +868,11 @@ func (w *TasksWorker) monitor(taskID, ws string, pid int, cmd *exec.Cmd, budget 
 			runtime := map[string]any{
 				"last_progress_at":   time.Now().UTC().Format(time.RFC3339),
 				"last_progress_text": truncate(lastLine, 400),
+				// Push the last 50 lines of transcript so hub can serve
+				// /api/my/tasks/{id}/transcript without reaching into the
+				// companion (SPEC §11). 50 lines × ~120 chars ≈ 6 KB —
+				// fits comfortably in a SQLite TEXT column.
+				"last_transcript_tail": readTranscriptTail(transcriptPath, 50, 8000),
 			}
 			if lastTokens > 0 {
 				runtime["total_tokens"] = lastTokens
@@ -819,9 +918,10 @@ func (w *TasksWorker) monitor(taskID, ws string, pid int, cmd *exec.Cmd, budget 
 				newState = "error"
 			}
 			runtime := map[string]any{
-				"finished_at":        time.Now().UTC().Format(time.RFC3339),
-				"last_progress_at":   time.Now().UTC().Format(time.RFC3339),
-				"last_progress_text": truncate(finalLine, 400),
+				"finished_at":          time.Now().UTC().Format(time.RFC3339),
+				"last_progress_at":     time.Now().UTC().Format(time.RFC3339),
+				"last_progress_text":   truncate(finalLine, 400),
+				"last_transcript_tail": readTranscriptTail(transcriptPath, 100, 16000),
 			}
 			if lastTokens > 0 {
 				runtime["total_tokens"] = lastTokens
@@ -930,6 +1030,49 @@ func truncate(s string, max int) string {
 	return s[:max] + "…"
 }
 
+// readTranscriptTail reads the last `lines` lines of the transcript
+// file, capped at `maxBytes` bytes total. Cheap O(seek-from-end) read.
+// Returns empty on any error (best-effort — transcript serving is
+// non-critical).
+func readTranscriptTail(path string, lines, maxBytes int) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	size := st.Size()
+	if size == 0 {
+		return ""
+	}
+	readSize := int64(maxBytes)
+	if readSize > size {
+		readSize = size
+	}
+	buf := make([]byte, readSize)
+	if _, err := f.ReadAt(buf, size-readSize); err != nil && err != io.EOF {
+		return ""
+	}
+	s := string(buf)
+	// If we landed mid-line on a partial read, drop the leading partial.
+	if size-readSize > 0 {
+		if i := strings.IndexByte(s, '\n'); i >= 0 {
+			s = s[i+1:]
+		}
+	}
+	if lines <= 0 {
+		return s
+	}
+	parts := strings.Split(s, "\n")
+	if len(parts) <= lines {
+		return s
+	}
+	return strings.Join(parts[len(parts)-lines:], "\n")
+}
+
 // --- reattach on companion restart -----------------------------------
 
 func (w *TasksWorker) reattach() error {
@@ -981,7 +1124,13 @@ func (w *TasksWorker) reattach() error {
 		if budget.StallTimeout == 0 {
 			budget.StallTimeout = defaultStallTime
 		}
-		go w.monitor(meta.TaskID, ws, meta.PID, nil, budget)
+		// Reattach has no hooks struct in meta (would require fetching
+		// the task + template again to resolve). after_run is the only
+		// hook the monitor calls, and it's best-effort, so an empty
+		// struct here just means no after_run on reattached runs.
+		// Acceptable trade-off; can be improved by persisting hooks in
+		// meta.json alongside budget.
+		go w.monitor(meta.TaskID, ws, meta.PID, nil, budget, hooksConfig{})
 	}
 	return nil
 }

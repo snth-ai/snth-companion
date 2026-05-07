@@ -918,6 +918,19 @@ export const fetchTaskEvents = (
 ): Promise<{ events: TaskEventRow[]; count: number }> =>
   getJSON(`/api/hub/tasks/${encodeURIComponent(id)}/events?limit=${limit}`)
 
+export type TranscriptResponse = {
+  task_id: string
+  transcript_path: string
+  tail: string
+  updated_at: string
+}
+
+export const fetchTaskTranscript = (
+  id: string,
+  lines = 100,
+): Promise<TranscriptResponse> =>
+  getJSON(`/api/hub/tasks/${encodeURIComponent(id)}/transcript?lines=${lines}`)
+
 export const fetchTaskTemplates = (): Promise<{
   templates: TaskTemplate[]
   count: number

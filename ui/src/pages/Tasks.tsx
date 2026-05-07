@@ -39,6 +39,7 @@ import {
   createTask,
   fetchTask,
   fetchTaskEvents,
+  fetchTaskTranscript,
   fetchTasksList,
   fetchTaskTemplates,
   patchTask,
@@ -396,6 +397,7 @@ function DetailPanel({
 }) {
   const [task, setTask] = useState<TaskRow | null>(null)
   const [events, setEvents] = useState<TaskEventRow[]>([])
+  const [transcript, setTranscript] = useState("")
   const [reason, setReason] = useState("")
   const [answer, setAnswer] = useState("")
   const [busy, setBusy] = useState(false)
@@ -407,6 +409,14 @@ function DetailPanel({
       setTask(t)
       const e = await fetchTaskEvents(taskID, 100)
       setEvents(e.events ?? [])
+      // Transcript tail — best-effort, hub serves last_transcript_tail
+      // column populated by companion on each progress event.
+      try {
+        const tr = await fetchTaskTranscript(taskID, 200)
+        setTranscript(tr.tail || "")
+      } catch {
+        /* ignore — task may not have one yet */
+      }
     } catch (e) {
       toast.error(String((e as Error).message ?? e))
     }
@@ -620,6 +630,17 @@ function DetailPanel({
                   </CardContent>
                 </Card>
               )}
+
+            {transcript && (
+              <div>
+                <Label className="text-xs uppercase tracking-wider text-muted-foreground">
+                  Transcript tail
+                </Label>
+                <pre className="mt-1 text-[11px] font-mono whitespace-pre-wrap p-3 bg-black/40 rounded-md max-h-72 overflow-y-auto leading-relaxed">
+                  {transcript}
+                </pre>
+              </div>
+            )}
 
             <div>
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">
