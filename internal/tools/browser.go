@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -11,6 +12,30 @@ import (
 	"github.com/snth-ai/snth-companion/internal/approval"
 	"github.com/snth-ai/snth-companion/internal/browser"
 )
+
+// browserBackend toggles between the legacy CDP path (current default —
+// attaches to user's Chrome via --remote-debugging-port=9222 or the
+// Manifest V3 extension) and the new Playwright path (spawns a Node
+// worker that drives a persistent Chromium under Mia's own profile).
+//
+// Set BROWSER_BACKEND=playwright in the companion's env to opt in. The
+// companion first-run-doctor (TODO) will install Node + Playwright +
+// Chromium automatically; until then the user runs:
+//
+//   brew install node
+//   npx playwright install chromium
+//
+// Default stays "cdp" until Playwright path is field-validated; new
+// users can flip via env without a code release.
+func browserBackend() string {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("BROWSER_BACKEND")))
+	if v == "" {
+		return "cdp"
+	}
+	return v
+}
+
+func playwrightBackend() bool { return browserBackend() == "playwright" }
 
 // browser.go — one composite tool `remote_browser` with an action
 // enum. We chose single-tool over per-verb (remote_browser_navigate,
@@ -86,8 +111,17 @@ func browserHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 
 	sess := browserSession()
 
+	pw := playwrightBackend()
+
 	switch a.Action {
 	case "tabs":
+		if pw {
+			tabs, err := browser.PWTabs(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"tabs": tabs}, nil
+		}
 		targets, err := sess.Targets(ctx)
 		if err != nil {
 			return nil, err
@@ -101,6 +135,9 @@ func browserHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 		return map[string]any{"tabs": pages}, nil
 
 	case "version":
+		if pw {
+			return browser.PWVersion(ctx)
+		}
 		v, err := sess.Version(ctx)
 		if err != nil {
 			return nil, err
@@ -108,6 +145,9 @@ func browserHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 		return v, nil
 
 	case "snapshot":
+		if pw {
+			return browser.PWSnapshot(ctx)
+		}
 		_, c, err := sess.AttachActive(ctx)
 		if err != nil {
 			return nil, err
@@ -119,6 +159,13 @@ func browserHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 		return snap, nil
 
 	case "screenshot":
+		if pw {
+			data, format, err := browser.PWScreenshot(ctx, a.Format)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"data_base64": data, "format": format}, nil
+		}
 		_, c, err := sess.AttachActive(ctx)
 		if err != nil {
 			return nil, err
@@ -136,6 +183,13 @@ func browserHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 		if err := browserApprove(ctx, fmt.Sprintf("Navigate Chrome to:\n    %s", a.URL)); err != nil {
 			return nil, err
 		}
+		if pw {
+			final, err := browser.PWNavigate(ctx, a.URL)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"final_url": final}, nil
+		}
 		_, c, err := sess.AttachActive(ctx)
 		if err != nil {
 			return nil, err
@@ -148,12 +202,16 @@ func browserHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 
 	case "click":
 		// ref 0 is valid (page-agent numbers from 0). The ref-resolver
-		// in actions.go returns NOT_FOUND if the snapshot doesn't
-		// have that index, so we rely on that for validation rather
-		// than a naive zero-check here.
+		// returns NOT_FOUND if the snapshot doesn't have that index.
 		_ = a.Ref
 		if err := browserApprove(ctx, fmt.Sprintf("Click browser element #%d", a.Ref)); err != nil {
 			return nil, err
+		}
+		if pw {
+			if err := browser.PWClick(ctx, a.Ref); err != nil {
+				return nil, err
+			}
+			return map[string]any{"ok": true, "ref": a.Ref}, nil
 		}
 		_, c, err := sess.AttachActive(ctx)
 		if err != nil {
@@ -173,6 +231,12 @@ func browserHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 		if err := browserApprove(ctx, fmt.Sprintf("Type into browser element #%d:\n    %s", a.Ref, preview)); err != nil {
 			return nil, err
 		}
+		if pw {
+			if err := browser.PWType(ctx, a.Ref, a.Text); err != nil {
+				return nil, err
+			}
+			return map[string]any{"ok": true, "ref": a.Ref, "bytes": len(a.Text)}, nil
+		}
 		_, c, err := sess.AttachActive(ctx)
 		if err != nil {
 			return nil, err
@@ -189,6 +253,12 @@ func browserHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 		if err := browserApprove(ctx, fmt.Sprintf("Press browser key: %s", a.Key)); err != nil {
 			return nil, err
 		}
+		if pw {
+			if err := browser.PWPress(ctx, a.Key); err != nil {
+				return nil, err
+			}
+			return map[string]any{"ok": true, "key": a.Key}, nil
+		}
 		_, c, err := sess.AttachActive(ctx)
 		if err != nil {
 			return nil, err
@@ -199,13 +269,42 @@ func browserHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 		return map[string]any{"ok": true, "key": a.Key}, nil
 
 	case "wait":
-		_, c, err := sess.AttachActive(ctx)
-		if err != nil {
-			return nil, err
-		}
 		timeout := 15 * time.Second
 		if a.TimeoutMs > 0 {
 			timeout = time.Duration(a.TimeoutMs) * time.Millisecond
+		}
+		if pw {
+			switch {
+			case a.Pattern != "":
+				u, err := browser.PWWaitURL(ctx, a.Pattern, timeout)
+				if err != nil {
+					return nil, err
+				}
+				return map[string]any{"matched_url": u}, nil
+			case a.Predicate != "":
+				// Playwright's waitForFunction is the right primitive but
+				// our worker doesn't expose it directly yet; fall back to
+				// a poll-via-eval loop that returns "ok" when the
+				// predicate evaluates truthy. Cheap to add later.
+				deadline := time.Now().Add(timeout)
+				for time.Now().Before(deadline) {
+					out, err := browser.PWPredicateOnce(ctx, a.Predicate)
+					if err != nil {
+						return nil, err
+					}
+					if out {
+						return map[string]any{"ok": true}, nil
+					}
+					time.Sleep(250 * time.Millisecond)
+				}
+				return nil, fmt.Errorf("wait predicate timeout after %s", timeout)
+			default:
+				return nil, fmt.Errorf("wait needs pattern (URL regex) or predicate (JS expression)")
+			}
+		}
+		_, c, err := sess.AttachActive(ctx)
+		if err != nil {
+			return nil, err
 		}
 		switch {
 		case a.Pattern != "":
@@ -229,6 +328,13 @@ func browserHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 		}
 		if err := browserApprove(ctx, "Eval arbitrary JS in active tab"); err != nil {
 			return nil, err
+		}
+		if pw {
+			out, err := browser.PWEval(ctx, a.Expr)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"result": out}, nil
 		}
 		_, c, err := sess.AttachActive(ctx)
 		if err != nil {

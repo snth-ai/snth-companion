@@ -51,6 +51,15 @@ type SelectorEntry struct {
 	Text       string            `json:"text,omitempty"`
 }
 
+// buildSnapshotBundle splices the page-agent extractor into the
+// wrapper IIFE. Same bundle is consumed by the CDP backend (this file's
+// Snapshot) and the Playwright backend (playwright_worker.go's
+// PWSnapshot). Both call paths get an identical FlatDomTree on the
+// wire — no DOM logic is duplicated.
+func buildSnapshotBundle() string {
+	return strings.Replace(wrapperJS, "__SNTH_DOM_TREE_FN__", "("+domTreeJS+")", 1)
+}
+
 // Snapshot runs the embedded JS, parses the FlatDomTree map, and
 // formats the text. Stashes window.__snth_tree on the page so
 // click/type can resolve refs in a second Runtime.evaluate.
@@ -62,7 +71,7 @@ func Snapshot(ctx context.Context, c Conn) (*SnapshotResult, error) {
 	// The dom_tree.js was sed-converted from `export default (args =...)`
 	// to a naked arrow-function expression. We splice it in at the
 	// placeholder in wrapper.js and eval the combined source.
-	bundle := strings.Replace(wrapperJS, "__SNTH_DOM_TREE_FN__", "("+domTreeJS+")", 1)
+	bundle := buildSnapshotBundle()
 
 	var resp evalResult
 	err := c.Send(ctx, "Runtime.evaluate", map[string]any{
