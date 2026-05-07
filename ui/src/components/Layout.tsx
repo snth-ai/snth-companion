@@ -6,6 +6,7 @@ import {
   Cloud,
   Gauge,
   Image,
+  KanbanSquare,
   KeyRound,
   Network,
   LayoutGrid,
@@ -24,6 +25,7 @@ import { SynthSwitcher } from "@/components/SynthSwitcher"
 
 const navItems = [
   { to: "/", label: "Status", icon: Activity },
+  { to: "/tasks", label: "Tasks", icon: KanbanSquare },
   { to: "/apps", label: "Apps", icon: LayoutGrid },
   { to: "/knowledge", label: "Knowledge", icon: Book },
   { to: "/graph", label: "Graph", icon: Network },

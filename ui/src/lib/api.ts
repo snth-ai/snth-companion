@@ -791,3 +791,134 @@ export const fetchTraces = (
 
 export const fetchTraceRaw = (traceID: string): Promise<TraceRawResponse> =>
   synthGet(`/api/traces/${encodeURIComponent(traceID)}/raw`)
+
+// --- Tasks system (v0.4.52, hub-side board) -------------------------
+
+export type TaskRow = {
+  id: string
+  title: string
+  description: string
+  state: string
+  priority: number
+  template_id?: string | null
+  template_overrides: string
+  owner_synth_id?: string | null
+  created_by: string
+  created_at: string
+  updated_at: string
+  claimed_at?: string | null
+  started_at?: string | null
+  finished_at?: string | null
+  assigned_companion_label: string
+  workspace_path: string
+  sub_agent_pid: number
+  sub_agent_kind: string
+  last_progress_at?: string | null
+  last_progress_text: string
+  retry_attempt: number
+  retry_due_at?: string | null
+  cost_usd: number
+  total_tokens: number
+  transcript_path: string
+  error_text: string
+  cancellation_reason: string
+  wiki_page_id: string
+}
+
+export type TaskListResponse = { tasks: TaskRow[]; count: number }
+
+export type TaskEventRow = {
+  id: number
+  task_id: string
+  ts: string
+  kind: string
+  actor: string
+  payload: string
+}
+
+export type TaskTemplate = {
+  id: string
+  name: string
+  description: string
+  prompt_template: string
+  default_agent_config: string
+  default_hooks: string
+  suggested_keywords: string
+  created_by_synth_id: string
+  created_at: string
+  updated_at: string
+}
+
+export type CreateTaskInput = {
+  title: string
+  description?: string
+  priority?: number
+  template_id?: string
+  template_overrides?: Record<string, unknown>
+  sub_agent_kind?: string
+  state?: "backlog" | "queued"
+  wiki_page_id?: string
+}
+
+export const TASK_STATES = [
+  "backlog",
+  "queued",
+  "claimed",
+  "running",
+  "awaiting_input",
+  "blocked",
+  "done",
+  "error",
+  "cancelled",
+] as const
+export type TaskState = (typeof TASK_STATES)[number]
+
+export const fetchTasksList = (
+  filter: { state?: string; owner_synth_id?: string; limit?: number } = {},
+): Promise<TaskListResponse> => {
+  const qs = new URLSearchParams()
+  if (filter.state) qs.set("state", filter.state)
+  if (filter.owner_synth_id) qs.set("owner_synth_id", filter.owner_synth_id)
+  qs.set("limit", String(filter.limit ?? 500))
+  return getJSON(`/api/hub/tasks?${qs}`)
+}
+
+export const fetchTask = (id: string): Promise<TaskRow> =>
+  getJSON(`/api/hub/tasks/${encodeURIComponent(id)}`)
+
+export const createTask = (input: CreateTaskInput): Promise<TaskRow> =>
+  postJSON(`/api/hub/tasks`, input)
+
+export const patchTask = (
+  id: string,
+  patch: Record<string, unknown>,
+): Promise<TaskRow> =>
+  fetch(`/api/hub/tasks/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  }).then((r) => jsonOrThrow<TaskRow>(r))
+
+export const cancelTask = (id: string, reason: string): Promise<TaskRow> =>
+  postJSON(`/api/hub/tasks/${encodeURIComponent(id)}/cancel`, { reason })
+
+export const provideTaskInput = (
+  id: string,
+  answer: string,
+  source: "user" | "synth" = "user",
+): Promise<{ ok: boolean }> =>
+  postJSON(`/api/hub/tasks/${encodeURIComponent(id)}/provide-input`, {
+    answer,
+    source,
+  })
+
+export const fetchTaskEvents = (
+  id: string,
+  limit = 200,
+): Promise<{ events: TaskEventRow[]; count: number }> =>
+  getJSON(`/api/hub/tasks/${encodeURIComponent(id)}/events?limit=${limit}`)
+
+export const fetchTaskTemplates = (): Promise<{
+  templates: TaskTemplate[]
+  count: number
+}> => getJSON(`/api/hub/task-templates`)

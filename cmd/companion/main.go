@@ -13,6 +13,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -99,6 +100,13 @@ func main() {
 
 	client.Start()
 	log.Printf("UI at %s", uiURL)
+
+	// Tasks system worker — polls hub for claimed tasks owned by the
+	// active synth, spawns sub-agent subprocesses in isolated workspaces,
+	// reports events back to hub. No-ops gracefully when no pair set.
+	workerCtx, cancelWorker := context.WithCancel(context.Background())
+	daemon.StartTasksWorker(workerCtx)
+	defer cancelWorker()
 
 	if *headless || runtime.GOOS != "darwin" {
 		// Headless: no menubar, no auto-open. Just wait for a signal.

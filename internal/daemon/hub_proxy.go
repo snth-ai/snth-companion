@@ -55,6 +55,15 @@ func (s *UIServer) registerHubProxies(mux *http.ServeMux) {
 	// because path-prefix proxy semantics differ — see
 	// registerHubProxyPrefix below.
 	s.registerHubProxyPrefix(mux, "/api/hub/mini-app/", "/api/my/mini-app/")
+	// Tasks system (v0.4.52). Bare collection + nested /{id}/... — Go
+	// mux distinguishes the two patterns, so we register both. Tail-only
+	// proxy keeps us out of the business of listing every action verb
+	// (cancel, claim, release, provide-input, events, poll-active).
+	proxy("/api/hub/tasks", "/api/my/tasks")
+	s.registerHubProxyPrefix(mux, "/api/hub/tasks/", "/api/my/tasks/")
+	proxy("/api/hub/task-templates", "/api/my/task-templates")
+	s.registerHubProxyPrefix(mux, "/api/hub/task-templates/", "/api/my/task-templates/")
+	proxy("/api/hub/task-event", "/api/my/task-event")
 }
 
 // registerHubProxyPrefix wires a directory-style proxy that preserves
