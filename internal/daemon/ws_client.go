@@ -32,6 +32,14 @@ type Client struct {
 	lastSeen time.Time
 	stopCh   chan struct{}
 	doneCh   chan struct{}
+
+	// writeMu serializes WS writes for paths that may write
+	// concurrently with the ping loop or other frames. Existing
+	// tool_call handler does its own naive write (race-prone but
+	// historically OK because writes are infrequent). The streaming
+	// turn path emits text_delta frames in a tight loop and MUST
+	// serialize — gorilla websocket forbids concurrent writers.
+	writeMu sync.Mutex
 }
 
 // Status is a read-only snapshot for the UI.
@@ -159,6 +167,18 @@ func (c *Client) runOnce(synthURL, token string) error {
 	for i, d := range catalog {
 		caps[i] = ToolDesc{Name: d.Name, Description: d.Description, DangerLevel: d.DangerLevel}
 	}
+	// Append the agent_sdk_max_ready capability when `claude` CLI is
+	// present + authed. Synth-side companion-claude-max provider
+	// filters the pool by this name to decide where to route Agent
+	// SDK turns. It's a synthetic capability — there's no Tool to
+	// dispatch; the Name is the only field synth-side hasCap() checks.
+	if IsClaudeCLIReady() {
+		caps = append(caps, ToolDesc{
+			Name:        CapAgentSdkMaxReady,
+			Description: "Local `claude` CLI authed with Max subscription; can host Agent SDK turns",
+			DangerLevel: "host", // not user-facing, this just labels it as a host-level capability
+		})
+	}
 	cfg := config.Get()
 	role := ""
 	tags := []string(nil)
@@ -216,6 +236,16 @@ func (c *Client) runOnce(synthURL, token string) error {
 			// noop — just means the remote is alive
 		case FrameError:
 			return fmt.Errorf("server error: %s", frame.Error)
+		case FrameAgentRunTurn:
+			// Streaming-turn experimental path. Spawn `claude` CLI
+			// with the synth's prompt, stream events back. writeMu
+			// serializes WS writes during the turn so text_delta
+			// frames don't race the ping loop. parent context here
+			// is Background — the agent runner builds its own
+			// per-turn cancel context internally.
+			go HandleAgentRunTurn(context.Background(), frame, safeWriteFrame(conn, &c.writeMu))
+		case FrameAgentCancel:
+			CancelAgentTurn(frame.TurnID)
 		default:
 			log.Printf("[ws] unknown frame type: %q", frame.Type)
 		}

@@ -85,6 +85,13 @@ func main() {
 	tools.RegisterSubagent()
 	tools.RegisterYtDlp()
 
+	// Probe `claude` CLI once at boot. When present + authed, we
+	// advertise CapAgentSdkMaxReady in the hello frame so the
+	// synth-side companion-claude-max provider can route turns here.
+	// Best-effort — failure is non-fatal (companion just doesn't
+	// expose the capability and the synth's fallback ladder kicks in).
+	daemon.DetectClaudeCLI()
+
 	client := &daemon.Client{}
 
 	_, uiURL, err := daemon.StartUIServer(client)
