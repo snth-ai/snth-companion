@@ -76,11 +76,25 @@ const handlers = {
 
   // Run an IIFE bundle that already returns a string (typically JSON).
   // Used for snapshot — the embedded dom_tree.js + wrapper.js bundle is
-  // an IIFE that computes the tree, stashes it on window.__snth_tree,
-  // and returns JSON.stringify(tree). Mirrors Runtime.evaluate on CDP.
+  // a statement-shaped IIFE (`;(() => { ... return JSON.stringify(...); })();`).
+  // page.evaluate(string) treats the arg as an expression, so a leading
+  // semicolon + statement form makes it return undefined. Wrap in
+  // page-context `eval()` which evaluates statements + returns the
+  // value of the final expression. Mirrors Runtime.evaluate's behavior
+  // on the CDP side.
   eval_bundle: (args) => withPage(async (page) => {
-    const raw = await page.evaluate(args.bundle);
-    return { raw: typeof raw === "string" ? raw : JSON.stringify(raw) };
+    const raw = await page.evaluate((bundle) => {
+      try {
+        // eslint-disable-next-line no-eval
+        const out = eval(bundle);
+        if (typeof out === "string") return out;
+        if (out === undefined) return "";
+        return JSON.stringify(out);
+      } catch (e) {
+        return JSON.stringify({ error: String((e && e.stack) || e) });
+      }
+    }, args.bundle);
+    return { raw: raw || "" };
   }),
 
   // Navigate. domcontentloaded is enough — full load can hang on slow
