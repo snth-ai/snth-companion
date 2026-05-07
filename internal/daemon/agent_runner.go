@@ -153,7 +153,13 @@ func HandleAgentRunTurn(parent context.Context, frame Frame, writeFrame func(Fra
 		"--model", model,
 	}
 	if frame.SystemPrompt != "" {
-		args = append(args, "--append-system-prompt", frame.SystemPrompt)
+		// REPLACE (not append) so the synth's identity is the only
+		// system prompt the model sees. Claude Code's default system
+		// prompt would otherwise dominate ("You are Claude Code,
+		// Anthropic's official CLI…") and Mia would answer in that
+		// voice instead of her own. Tool-use machinery in claude CLI
+		// isn't carried by the system prompt — it stays functional.
+		args = append(args, "--system-prompt", frame.SystemPrompt)
 	}
 	if frame.Effort != "" {
 		args = append(args, "--effort", frame.Effort)
@@ -249,6 +255,7 @@ func parseStreamJSON(r io.Reader, turnID string, writeFrame func(Frame) error) {
 
 	doneSent := false
 	var aggregatedText strings.Builder
+	var servedModel string // captured from claude.ai's actual served-model field
 
 	for scanner.Scan() {
 		raw := scanner.Bytes()
@@ -259,6 +266,16 @@ func parseStreamJSON(r io.Reader, turnID string, writeFrame func(Frame) error) {
 		if err := json.Unmarshal(raw, &ev); err != nil {
 			log.Printf("[agent-runner %s] parse: %v (line=%q)", turnID[:min(8, len(turnID))], err, truncate(string(raw), 200))
 			continue
+		}
+
+		// Capture the served-model id whenever claude.ai exposes it.
+		// This is the GROUND TRUTH for "what model actually answered" —
+		// model field in init is what we asked for, but the model
+		// inside assistant.message.model is what claude.ai actually
+		// routed to (would differ if our requested model was unavailable
+		// and the SDK fell back).
+		if ev.Type == "assistant" && ev.Message != nil && ev.Message.Model != "" {
+			servedModel = ev.Message.Model
 		}
 
 		switch ev.Type {
@@ -306,12 +323,23 @@ func parseStreamJSON(r io.Reader, turnID string, writeFrame func(Frame) error) {
 			}); err != nil {
 				log.Printf("[agent-runner %s] write done: %v", turnID[:min(8, len(turnID))], err)
 			}
+			// Definitive proof line. servedModel comes from claude.ai's
+			// own response (assistant.message.model), so it's not just
+			// "what we asked for" but "what actually answered".
+			log.Printf("[agent-runner %s] DONE served_by=%s tokens=%d/%d cache_r/w=%d/%d cost_usd=%.4f (sub=Max, no $ charge)",
+				turnID[:min(8, len(turnID))], servedModel,
+				usage.InputTokens, usage.OutputTokens,
+				usage.CacheReadTokens, usage.CacheWriteTokens,
+				ev.TotalCostUSD)
 			doneSent = true
 
 		case "system":
-			// init event with model/tools/session info — log for
-			// observability, no frame.
-			log.Printf("[agent-runner %s] init: model=%s session=%s", turnID[:min(8, len(turnID))], ev.Model, ev.SessionID)
+			// Only log subtype=init (has model field). Other system
+			// subtypes like "status" don't carry useful info for our
+			// per-turn tracing.
+			if ev.Subtype == "init" {
+				log.Printf("[agent-runner %s] start model=%s session=%s", turnID[:min(8, len(turnID))], ev.Model, ev.SessionID)
+			}
 
 		default:
 			// Other types we explicitly ignore for phase 1: assistant
@@ -354,12 +382,27 @@ func CancelAgentTurn(turnID string) {
 // declare the fields we actually inspect; json.Unmarshal happily
 // ignores the rest.
 type streamEvent struct {
-	Type      string             `json:"type"`
-	Event     *streamSubEvent    `json:"event,omitempty"`     // when type=stream_event
-	Result    string             `json:"result,omitempty"`    // when type=result
-	Usage     *streamUsage       `json:"usage,omitempty"`     // when type=result
-	Model     string             `json:"model,omitempty"`     // when type=system,subtype=init
-	SessionID string             `json:"session_id,omitempty"`
+	Type    string             `json:"type"`
+	Subtype string             `json:"subtype,omitempty"`   // when type=system: "init" | "status" | etc.
+	Event   *streamSubEvent    `json:"event,omitempty"`     // when type=stream_event
+	Result  string             `json:"result,omitempty"`    // when type=result
+	Usage   *streamUsage       `json:"usage,omitempty"`     // when type=result
+	// Total cost reported by claude CLI in the result event. Under
+	// Max subscription this is INFORMATIONAL (no actual charge) — we
+	// log it for visibility but the synth's usage tracker treats
+	// companion-claude-max as $0 since the user already paid via
+	// the subscription, not per-token.
+	TotalCostUSD float64           `json:"total_cost_usd,omitempty"`
+	Model        string            `json:"model,omitempty"`     // when type=system,subtype=init
+	SessionID    string            `json:"session_id,omitempty"`
+	// Message present on type=assistant. message.model is the
+	// authoritative "what claude.ai actually used" — different from
+	// the requested model only on fallbacks/availability issues.
+	Message *streamAssistantMessage `json:"message,omitempty"`
+}
+
+type streamAssistantMessage struct {
+	Model string `json:"model,omitempty"`
 }
 
 type streamSubEvent struct {

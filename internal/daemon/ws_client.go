@@ -231,7 +231,9 @@ func (c *Client) runOnce(synthURL, token string) error {
 		case FrameToolCall:
 			go c.handleToolCall(frame)
 		case FramePing:
+			c.writeMu.Lock()
 			_ = conn.WriteJSON(Frame{Type: FramePong})
+			c.writeMu.Unlock()
 		case FramePong:
 			// noop — just means the remote is alive
 		case FrameError:
@@ -266,7 +268,15 @@ func (c *Client) pingLoop(conn *websocket.Conn, done chan struct{}) {
 			if ws != conn {
 				return
 			}
-			if err := conn.WriteJSON(Frame{Type: FramePing}); err != nil {
+			// writeMu serializes with agent-runner's text_delta stream.
+			// Without it, gorilla websocket's internal frame writer can
+			// interleave bytes from two goroutines → "bad MASK" on the
+			// other end → connection dropped mid-turn. Caught
+			// 2026-05-08 during companion-claude-max smoke.
+			c.writeMu.Lock()
+			err := conn.WriteJSON(Frame{Type: FramePing})
+			c.writeMu.Unlock()
+			if err != nil {
 				return
 			}
 		}
@@ -318,7 +328,10 @@ func (c *Client) handleToolCall(frame Frame) {
 		log.Printf("[ws] dropped tool_result for %s: no connection", frame.CallID)
 		return
 	}
-	if err := ws.WriteJSON(resp); err != nil {
+	c.writeMu.Lock()
+	err = ws.WriteJSON(resp)
+	c.writeMu.Unlock()
+	if err != nil {
 		log.Printf("[ws] write tool_result %s: %v", frame.CallID, err)
 	}
 }
