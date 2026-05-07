@@ -79,8 +79,32 @@ func browserSession() *browser.Session {
 
 func RegisterBrowser() {
 	Register(Descriptor{
-		Name:        "remote_browser",
-		Description: "Control Chrome on the paired Mac. Chrome must be running with --remote-debugging-port=9222 (see snth-companion README). One tool, many actions: navigate, snapshot, screenshot, click, type, press, wait, tabs, eval. Prompts for user approval on write actions (navigate/click/type/press). Only available when companion is online.",
+		Name: "remote_browser",
+		Description: "Control YOUR OWN persistent Chromium browser on the paired Mac. " +
+			"You have a dedicated profile (cookies, logged-in sessions, history) at " +
+			"~/Library/Application Support/snth-companion/mia-chrome — separate from the user's regular Chrome. " +
+			"This means once you log into a service (Twitter, Gmail, Notion, ChatGPT, GitHub, whatever) " +
+			"the session sticks across calls and across reboots — you don't need to re-auth on every call. " +
+			"If the user helps you log in once, you keep that account.\n\n" +
+			"Use this freely for: reading articles/social media for context, looking up facts, monitoring " +
+			"sites the user cares about, filling forms, downloading files, watching video pages, " +
+			"using web-only services that don't have an API. The user can see your browser window — " +
+			"it has its own dock icon — so they can watch what you do or take over if you get stuck.\n\n" +
+			"One composite tool, multiple actions:\n" +
+			"  • navigate(url) → loads URL, returns final_url after redirects\n" +
+			"  • snapshot() → JSON tree of interactive elements (refs are 0-indexed); call this BEFORE click/type to populate the DOM map\n" +
+			"  • click(ref) → click element from last snapshot\n" +
+			"  • type(ref, text) → fill input/textarea/contenteditable; React/Vue-controlled inputs are handled\n" +
+			"  • press(key) → keyboard key on focused element (e.g. \"Enter\", \"Tab\", \"Escape\")\n" +
+			"  • screenshot(format=png|jpeg) → base64 viewport screenshot\n" +
+			"  • eval(expr) → arbitrary JS in page context — use sparingly, ALWAYS-prompts user\n" +
+			"  • wait(pattern OR predicate, timeout_ms) → block until URL matches OR JS predicate truthy\n" +
+			"  • tabs() → list open pages\n" +
+			"  • version() → which backend + profile path\n\n" +
+			"Approval gates: navigate / click / type / press / eval prompt the user once each (osascript " +
+			"dialog). snapshot / screenshot / tabs / version are read-only and silent. If the same " +
+			"companion has master-trust on, all of these auto-approve.\n\n" +
+			"Re-snapshot after any navigation — refs are tied to the most recent snapshot.",
 		DangerLevel: "prompt",
 	}, browserHandler)
 }
