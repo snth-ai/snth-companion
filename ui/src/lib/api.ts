@@ -922,3 +922,34 @@ export const fetchTaskTemplates = (): Promise<{
   templates: TaskTemplate[]
   count: number
 }> => getJSON(`/api/hub/task-templates`)
+
+export type TaskTemplateInput = {
+  name: string
+  description?: string
+  prompt_template: string
+  default_agent_config?: Record<string, unknown>
+  default_hooks?: Record<string, unknown>
+  suggested_keywords?: string[]
+}
+
+export const fetchTaskTemplate = (id: string): Promise<TaskTemplate> =>
+  getJSON(`/api/hub/task-templates/${encodeURIComponent(id)}`)
+
+export const createTaskTemplate = (
+  in_: TaskTemplateInput,
+): Promise<TaskTemplate> => postJSON(`/api/hub/task-templates`, in_)
+
+export const patchTaskTemplate = (
+  id: string,
+  patch: Record<string, unknown>,
+): Promise<TaskTemplate> =>
+  fetch(`/api/hub/task-templates/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  }).then((r) => jsonOrThrow<TaskTemplate>(r))
+
+export const deleteTaskTemplate = (id: string): Promise<{ ok: boolean }> =>
+  fetch(`/api/hub/task-templates/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  }).then((r) => jsonOrThrow<{ ok: boolean }>(r))

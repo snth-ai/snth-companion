@@ -1,10 +1,11 @@
-import { NavLink, Outlet } from "react-router-dom"
+import { NavLink, Outlet, useLocation } from "react-router-dom"
 import {
   Activity,
   Book,
   Brain,
   Cloud,
   Gauge,
+  FileCode,
   Image,
   KanbanSquare,
   KeyRound,
@@ -26,6 +27,7 @@ import { SynthSwitcher } from "@/components/SynthSwitcher"
 const navItems = [
   { to: "/", label: "Status", icon: Activity },
   { to: "/tasks", label: "Tasks", icon: KanbanSquare },
+  { to: "/task-templates", label: "Templates", icon: FileCode },
   { to: "/apps", label: "Apps", icon: LayoutGrid },
   { to: "/knowledge", label: "Knowledge", icon: Book },
   { to: "/graph", label: "Graph", icon: Network },
@@ -45,7 +47,14 @@ const navItems = [
   { to: "/logs", label: "Logs", icon: ScrollText },
 ]
 
+// Routes that need the full main-pane width (no max-w container). Tasks
+// Kanban has 9 columns, Graph is a force-directed canvas — both need
+// every horizontal pixel.
+const WIDE_ROUTES = new Set(["/tasks", "/graph", "/diagnostics"])
+
 export function Layout() {
+  const loc = useLocation()
+  const wide = WIDE_ROUTES.has(loc.pathname)
   return (
     <div className="dark min-h-svh bg-background text-foreground">
       <div className="flex min-h-svh">
@@ -84,7 +93,13 @@ export function Layout() {
           </nav>
         </aside>
         <main className="flex-1 min-w-0">
-          <div className="max-w-5xl mx-auto px-8 py-10">
+          <div
+            className={
+              wide
+                ? "px-6 py-6"
+                : "max-w-5xl mx-auto px-8 py-10"
+            }
+          >
             <Outlet />
           </div>
         </main>

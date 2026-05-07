@@ -19,6 +19,7 @@ import { LibraryPage } from "@/pages/Library"
 import { GraphPage } from "@/pages/Graph"
 import { DiagnosticsPage } from "@/pages/Diagnostics"
 import { TasksPage } from "@/pages/Tasks"
+import { TaskTemplatesPage } from "@/pages/TaskTemplates"
 import { Toaster } from "@/components/ui/sonner"
 
 // HashRouter (not BrowserRouter) so in-page navigation never triggers
@@ -50,6 +51,7 @@ export default function App() {
             <Route path="graph" element={<GraphPage />} />
             <Route path="diagnostics" element={<DiagnosticsPage />} />
             <Route path="tasks" element={<TasksPage />} />
+            <Route path="task-templates" element={<TaskTemplatesPage />} />
           </Route>
         </Routes>
       </HashRouter>

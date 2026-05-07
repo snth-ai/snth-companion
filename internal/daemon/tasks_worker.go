@@ -40,6 +40,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/osteele/liquid"
+
 	"github.com/snth-ai/snth-companion/internal/config"
 )
 
@@ -75,6 +77,7 @@ type taskMeta struct {
 	PID          int       `json:"pid"`
 	StartedAt    time.Time `json:"started_at"`
 	Command      string    `json:"command"`
+	Budget       runBudget `json:"budget"`
 }
 
 // taskRow is the subset of the hub Task wire shape we use here.
@@ -362,6 +365,20 @@ func (w *TasksWorker) spawn(ctx context.Context, t taskRow) {
 		return
 	}
 
+	// --- resolve effective config (template defaults + task overrides) ---
+	effectiveCfg := w.resolveAgentConfig(t)
+	budget := resolveBudget(effectiveCfg)
+	// Sub-agent kind: task wins, then config, then "claude".
+	kind := strings.TrimSpace(t.SubAgentKind)
+	if kind == "" {
+		if v, ok := effectiveCfg["sub_agent_kind"].(string); ok {
+			kind = v
+		}
+	}
+	if kind == "" {
+		kind = "claude"
+	}
+
 	// --- render prompt ---
 	prompt, err := w.renderPrompt(t)
 	if err != nil {
@@ -385,7 +402,7 @@ func (w *TasksWorker) spawn(ctx context.Context, t taskRow) {
 	}
 
 	// --- build command ---
-	cmdStr, err := buildCommand(t.SubAgentKind, ws)
+	cmdStr, err := buildCommand(kind, ws)
 	if err != nil {
 		w.failSpawn(t.ID, "build command: "+err.Error(), ws)
 		return
@@ -414,10 +431,11 @@ func (w *TasksWorker) spawn(ctx context.Context, t taskRow) {
 	meta := taskMeta{
 		TaskID:       t.ID,
 		SynthID:      pair.ID,
-		SubAgentKind: t.SubAgentKind,
+		SubAgentKind: kind,
 		PID:          pid,
 		StartedAt:    time.Now(),
 		Command:      cmdStr,
+		Budget:       budget,
 	}
 	if raw, err := json.MarshalIndent(meta, "", "  "); err == nil {
 		_ = os.WriteFile(filepath.Join(ws, "meta.json"), raw, 0o644)
@@ -449,7 +467,33 @@ func (w *TasksWorker) spawn(ctx context.Context, t taskRow) {
 	// Detach the process from the cmd struct's Wait loop. We poll for
 	// exit ourselves via signal 0 in the monitor — that way the
 	// subprocess outlives the companion and can be reattached later.
-	go w.monitor(t.ID, ws, pid, cmd)
+	go w.monitor(t.ID, ws, pid, cmd, budget)
+}
+
+// resolveAgentConfig merges template.default_agent_config and task.
+// template_overrides per SPEC §5.2: overrides win on collision. Both
+// are stored as JSON strings; this returns the merged map.
+func (w *TasksWorker) resolveAgentConfig(t taskRow) map[string]any {
+	merged := map[string]any{}
+	if t.TemplateID != nil && *t.TemplateID != "" {
+		if tpl, err := w.getTemplate(*t.TemplateID); err == nil && tpl != nil && tpl.DefaultAgentConfig != "" {
+			var base map[string]any
+			if err := json.Unmarshal([]byte(tpl.DefaultAgentConfig), &base); err == nil {
+				for k, v := range base {
+					merged[k] = v
+				}
+			}
+		}
+	}
+	if t.TemplateOverrides != "" {
+		var ov map[string]any
+		if err := json.Unmarshal([]byte(t.TemplateOverrides), &ov); err == nil {
+			for k, v := range ov {
+				merged[k] = v
+			}
+		}
+	}
+	return merged
 }
 
 func (w *TasksWorker) failSpawn(taskID, msg, ws string) {
@@ -490,9 +534,23 @@ func buildCommand(kind, ws string) (string, error) {
 
 // --- prompt rendering -------------------------------------------------
 
+// liquidEngine is the strict Liquid engine used for prompt rendering
+// (SPEC §12). One per process — engines are concurrent-safe.
+var liquidEngine = liquid.NewEngine()
+
 // renderPrompt resolves template + overrides + task description per
-// SPEC §5.2 and §12. v1 implementation: simple {{ key }} substitution
-// — no full Liquid yet. If task has no template, returns description.
+// SPEC §5.2 and §12. Uses osteele/liquid in strict-undefined mode so
+// unknown variables fail the render rather than silently emit empty
+// strings (per SPEC: "Unknown variables/filters MUST fail rendering").
+//
+// Bindings:
+//   task.{id, title, description, sub_agent_kind, priority,
+//         retry_attempt, created_by, created_at, updated_at,
+//         workspace_path}
+//   overrides.{...}        (flattened JSON map from task.template_overrides)
+//   attempt                (alias for task.retry_attempt — Symphony idiom)
+//
+// If task has no template, returns description (or title) verbatim.
 func (w *TasksWorker) renderPrompt(t taskRow) (string, error) {
 	body := strings.TrimSpace(t.Description)
 	if body == "" {
@@ -506,41 +564,109 @@ func (w *TasksWorker) renderPrompt(t taskRow) (string, error) {
 		log.Printf("[tasks-worker] template fetch failed for %s (using raw description): %v", *t.TemplateID, err)
 		return body, nil
 	}
-	vars := map[string]string{
-		"task.title":       t.Title,
-		"task.description": t.Description,
-		"task.id":          t.ID,
+
+	bindings := map[string]any{
+		"task": map[string]any{
+			"id":             t.ID,
+			"title":          t.Title,
+			"description":    t.Description,
+			"sub_agent_kind": t.SubAgentKind,
+		},
+		"attempt": 0,
 	}
-	// Mix in template_overrides JSON keys (flat string conversion only).
 	if t.TemplateOverrides != "" {
 		var ov map[string]any
-		if err := json.Unmarshal([]byte(t.TemplateOverrides), &ov); err == nil {
-			for k, v := range ov {
-				vars["overrides."+k] = fmt.Sprint(v)
-			}
+		if err := json.Unmarshal([]byte(t.TemplateOverrides), &ov); err == nil && len(ov) > 0 {
+			bindings["overrides"] = ov
 		}
 	}
-	out := tpl.PromptTemplate
-	for k, v := range vars {
-		out = strings.ReplaceAll(out, "{{ "+k+" }}", v)
-		out = strings.ReplaceAll(out, "{{"+k+"}}", v)
+	if _, ok := bindings["overrides"]; !ok {
+		bindings["overrides"] = map[string]any{}
 	}
-	return out, nil
+
+	rendered, err := liquidEngine.ParseAndRenderString(tpl.PromptTemplate, bindings)
+	if err != nil {
+		return "", fmt.Errorf("liquid render: %w", err)
+	}
+	return rendered, nil
 }
 
 // --- monitor ----------------------------------------------------------
 
 var (
-	tokenRE   = regexp.MustCompile(`(?i)total tokens?:\s*(\d+)`)
-	costRE    = regexp.MustCompile(`(?i)cost:\s*\$?(\d+\.\d+)`)
-	askRE     = regexp.MustCompile(`(?i)^\s*(INPUT REQUIRED|ASKING):\s*(.+)$`)
-	stallTime = 5 * time.Minute
-	walTime   = 60 * time.Minute
+	tokenRE          = regexp.MustCompile(`(?i)total tokens?:\s*(\d+)`)
+	costRE           = regexp.MustCompile(`(?i)cost:\s*\$?(\d+\.\d+)`)
+	askRE            = regexp.MustCompile(`(?i)^\s*(INPUT REQUIRED|ASKING):\s*(.+)$`)
+	defaultStallTime = 5 * time.Minute
+	defaultWallTime  = 60 * time.Minute
 )
+
+// runBudget is the merged set of caps the monitor enforces. Resolved
+// from template.default_agent_config + task.template_overrides per
+// SPEC §5.2 (overrides win over template defaults).
+type runBudget struct {
+	StallTimeout time.Duration `json:"stall_timeout_ns"`
+	WallTimeout  time.Duration `json:"wall_timeout_ns"`
+	MaxCostUSD   float64       `json:"max_cost_usd"` // 0 = no cap
+}
+
+func defaultBudget() runBudget {
+	return runBudget{
+		StallTimeout: defaultStallTime,
+		WallTimeout:  defaultWallTime,
+		MaxCostUSD:   0,
+	}
+}
+
+// resolveBudget reads budget caps from the resolved agent config map.
+// Keys (all optional):
+//
+//	max_wall_minutes  → wallTimeout (number, minutes)
+//	stall_timeout_ms  → stallTimeout (number, milliseconds)
+//	max_cost_usd      → maxCostUSD  (number)
+func resolveBudget(cfg map[string]any) runBudget {
+	b := defaultBudget()
+	if cfg == nil {
+		return b
+	}
+	if v, ok := cfg["max_wall_minutes"]; ok {
+		if f := toFloat(v); f > 0 {
+			b.WallTimeout = time.Duration(f * float64(time.Minute))
+		}
+	}
+	if v, ok := cfg["stall_timeout_ms"]; ok {
+		if f := toFloat(v); f > 0 {
+			b.StallTimeout = time.Duration(f * float64(time.Millisecond))
+		}
+	}
+	if v, ok := cfg["max_cost_usd"]; ok {
+		if f := toFloat(v); f > 0 {
+			b.MaxCostUSD = f
+		}
+	}
+	return b
+}
+
+func toFloat(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case float32:
+		return float64(n)
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case json.Number:
+		f, _ := n.Float64()
+		return f
+	}
+	return 0
+}
 
 // monitor tails transcript.log every 1s, posts progress + handles
 // awaiting_input + detects exit. Owns the localRun until exit.
-func (w *TasksWorker) monitor(taskID, ws string, pid int, cmd *exec.Cmd) {
+func (w *TasksWorker) monitor(taskID, ws string, pid int, cmd *exec.Cmd, budget runBudget) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("[tasks-worker] monitor panic task=%s: %v", taskID, r)
@@ -721,24 +847,42 @@ func (w *TasksWorker) monitor(taskID, ws string, pid int, cmd *exec.Cmd) {
 			return
 		}
 
-		// Stall + wall-time enforcement.
-		if time.Since(lastNewLine) > stallTime {
+		// Stall + wall-time + cost enforcement (per-template budget).
+		if time.Since(lastNewLine) > budget.StallTimeout {
 			log.Printf("[tasks-worker] task=%s stalled (no transcript for %s) — killing",
-				taskID, stallTime)
+				taskID, budget.StallTimeout)
 			killProcessGroup(pid)
 			_ = w.postEvent(taskID, "subagent_failed",
 				map[string]any{"reason": "stall_timeout"},
-				map[string]any{"error_text": "no transcript activity for " + stallTime.String()},
+				map[string]any{"error_text": "no transcript activity for " + budget.StallTimeout.String()},
 				"error",
 			)
 			return
 		}
-		if time.Since(startedAt) > walTime {
-			log.Printf("[tasks-worker] task=%s wall_timeout (>%s) — killing", taskID, walTime)
+		if time.Since(startedAt) > budget.WallTimeout {
+			log.Printf("[tasks-worker] task=%s wall_timeout (>%s) — killing", taskID, budget.WallTimeout)
 			killProcessGroup(pid)
 			_ = w.postEvent(taskID, "subagent_failed",
 				map[string]any{"reason": "wall_timeout"},
-				map[string]any{"error_text": "exceeded " + walTime.String()},
+				map[string]any{"error_text": "exceeded " + budget.WallTimeout.String()},
+				"error",
+			)
+			return
+		}
+		if budget.MaxCostUSD > 0 && lastCost > budget.MaxCostUSD {
+			log.Printf("[tasks-worker] task=%s over_budget ($%.4f > $%.4f cap) — killing",
+				taskID, lastCost, budget.MaxCostUSD)
+			killProcessGroup(pid)
+			_ = w.postEvent(taskID, "subagent_failed",
+				map[string]any{
+					"reason":     "over_budget",
+					"cost_usd":   lastCost,
+					"cap_usd":    budget.MaxCostUSD,
+				},
+				map[string]any{
+					"error_text": fmt.Sprintf("cost $%.4f exceeded cap $%.4f", lastCost, budget.MaxCostUSD),
+					"cost_usd":   lastCost,
+				},
 				"error",
 			)
 			return
@@ -828,7 +972,16 @@ func (w *TasksWorker) reattach() error {
 			startedAt: meta.StartedAt,
 		}
 		w.mu.Unlock()
-		go w.monitor(meta.TaskID, ws, meta.PID, nil)
+		// Reattach budget — fall back to defaults if meta predates the
+		// budget field (older companion versions).
+		budget := meta.Budget
+		if budget.WallTimeout == 0 {
+			budget.WallTimeout = defaultWallTime
+		}
+		if budget.StallTimeout == 0 {
+			budget.StallTimeout = defaultStallTime
+		}
+		go w.monitor(meta.TaskID, ws, meta.PID, nil, budget)
 	}
 	return nil
 }
