@@ -6,13 +6,22 @@ import remarkGfm from "remark-gfm"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { Sparkles, X, ExternalLink, Pencil } from "lucide-react"
 import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import { Sparkles, X, ExternalLink, Pencil, Wand2 } from "lucide-react"
+import {
+  dedupeNamespace,
   fetchAllEdges,
   fetchProjects,
   fetchWikiList,
   fetchWikiPage,
   seedSimilarEdges,
+  type DedupeResponse,
   type Project,
   type WikiPageDetail,
   type WikiPageLite,
@@ -96,6 +105,12 @@ export function GraphPage() {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const fgRef = useRef<{ refresh?: () => void } | null>(null)
   const [size, setSize] = useState({ w: 800, h: 600 })
+  const [dedupeOpen, setDedupeOpen] = useState(false)
+  const [dedupeNS, setDedupeNS] = useState("themes")
+  const [dedupeThreshold, setDedupeThreshold] = useState(0.94)
+  const [dedupePlan, setDedupePlan] = useState<DedupeResponse | null>(null)
+  const [dedupeLoading, setDedupeLoading] = useState(false)
+  const [dedupeApplying, setDedupeApplying] = useState(false)
 
   // Initial load.
   useEffect(() => {
@@ -254,6 +269,68 @@ export function GraphPage() {
 
   const projectOf = (pid?: string | null) =>
     pid ? projects.find((p) => p.id === pid) : undefined
+
+  // Open the dedupe dialog & immediately fetch the dry-run plan so the
+  // user sees what would be merged before they commit.
+  const openDedupeDialog = async () => {
+    setDedupeOpen(true)
+    setDedupePlan(null)
+    setDedupeLoading(true)
+    try {
+      const r = await dedupeNamespace(dedupeNS, dedupeThreshold, true)
+      setDedupePlan(r)
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+      setDedupeOpen(false)
+    } finally {
+      setDedupeLoading(false)
+    }
+  }
+
+  // Refresh the dry-run plan when threshold changes (debounced via a
+  // simple guard — only fire when dialog is open and not currently
+  // applying).
+  useEffect(() => {
+    if (!dedupeOpen || dedupeApplying) return
+    let cancelled = false
+    setDedupeLoading(true)
+    void (async () => {
+      try {
+        const r = await dedupeNamespace(dedupeNS, dedupeThreshold, true)
+        if (!cancelled) setDedupePlan(r)
+      } catch (e) {
+        if (!cancelled) toast.error(String((e as Error).message ?? e))
+      } finally {
+        if (!cancelled) setDedupeLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dedupeNS, dedupeThreshold])
+
+  const applyDedupe = async () => {
+    setDedupeApplying(true)
+    try {
+      const r = await dedupeNamespace(dedupeNS, dedupeThreshold, false)
+      toast.success(
+        `merged ${r.deleted} pages into ${r.clusters} canonicals (${r.edges_merged} edges)`,
+      )
+      setDedupeOpen(false)
+      // Refetch graph data so cleanup is visible immediately.
+      const [pj, pg] = await Promise.all([
+        fetchProjects(),
+        fetchWikiList({ limit: 1000 }),
+      ])
+      setProjects(pj.projects ?? [])
+      setPages(pg.pages ?? [])
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    } finally {
+      setDedupeApplying(false)
+    }
+  }
 
   return (
     // fixed inset-0 left-60 = full-bleed of main area (sidebar is w-60 = 240px)
@@ -460,6 +537,16 @@ export function GraphPage() {
               <Sparkles className="h-3.5 w-3.5 mr-1" />
               {seeding ? "seeding…" : "seed similar"}
             </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="bg-background/80"
+              onClick={openDedupeDialog}
+              title="Find + merge near-duplicate themes (preview first)"
+            >
+              <Wand2 className="h-3.5 w-3.5 mr-1" />
+              dedupe
+            </Button>
           </div>
           <div className="text-[11px] text-muted-foreground tabular-nums">
             {nodes.length} nodes · {links.length} edges
@@ -619,6 +706,174 @@ export function GraphPage() {
           </div>
         )}
       </aside>
+
+      <Dialog
+        open={dedupeOpen}
+        onOpenChange={(o) => !dedupeApplying && setDedupeOpen(o)}
+      >
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Wand2 className="h-4 w-4" />
+              Cleanup duplicate pages
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="flex items-end gap-3">
+              <div className="space-y-1">
+                <label className="text-xs uppercase tracking-wider text-muted-foreground">
+                  Namespace
+                </label>
+                <select
+                  value={dedupeNS}
+                  onChange={(e) => setDedupeNS(e.target.value)}
+                  className="text-sm bg-background border border-border rounded px-2 h-8 w-32"
+                  disabled={dedupeApplying}
+                >
+                  <option value="themes">themes</option>
+                  <option value="dreams">dreams</option>
+                  <option value="personal">personal</option>
+                </select>
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs uppercase tracking-wider text-muted-foreground">
+                  Cosine threshold
+                </label>
+                <select
+                  value={dedupeThreshold}
+                  onChange={(e) => setDedupeThreshold(Number(e.target.value))}
+                  className="text-sm bg-background border border-border rounded px-2 h-8 w-32"
+                  disabled={dedupeApplying}
+                >
+                  <option value="0.90">0.90 (broad)</option>
+                  <option value="0.92">0.92</option>
+                  <option value="0.94">0.94 (recommended)</option>
+                  <option value="0.96">0.96</option>
+                  <option value="0.98">0.98 (strict)</option>
+                </select>
+              </div>
+              {dedupeLoading && (
+                <span className="text-xs italic text-muted-foreground self-center pb-1">
+                  computing plan…
+                </span>
+              )}
+            </div>
+
+            {dedupePlan && !dedupeLoading && (
+              <>
+                <div className="flex flex-wrap gap-3 text-sm pt-2 border-t border-border">
+                  <Stat label="scanned" value={String(dedupePlan.scanned)} />
+                  <Stat
+                    label="clusters"
+                    value={String(dedupePlan.clusters)}
+                  />
+                  <Stat
+                    label="will delete"
+                    value={String(dedupePlan.would_delete ?? 0)}
+                    accent="text-orange-400"
+                  />
+                  <Stat
+                    label="after cleanup"
+                    value={String(
+                      dedupePlan.scanned -
+                        (dedupePlan.would_delete ?? 0),
+                    )}
+                    accent="text-emerald-400"
+                  />
+                </div>
+
+                {dedupePlan.plan.length === 0 ? (
+                  <div className="text-sm italic text-muted-foreground py-6 text-center">
+                    No duplicates at this threshold — nothing to merge.
+                  </div>
+                ) : (
+                  <div className="max-h-80 overflow-auto border border-border rounded p-3 space-y-3 bg-background/50">
+                    {dedupePlan.plan
+                      .slice()
+                      .sort(
+                        (a, b) => b.dupes.length - a.dupes.length,
+                      )
+                      .map((pe) => (
+                        <div key={pe.canonical} className="space-y-1">
+                          <div className="text-xs">
+                            <span className="text-emerald-400">
+                              KEEP
+                            </span>{" "}
+                            <span className="font-medium text-foreground">
+                              {pe.canonical_title}
+                            </span>{" "}
+                            <span className="font-mono text-[10px] text-muted-foreground">
+                              {pe.canonical}
+                            </span>
+                          </div>
+                          {pe.dupes.map((d, i) => (
+                            <div
+                              key={d}
+                              className="text-xs pl-6 text-muted-foreground line-through decoration-orange-500/60"
+                            >
+                              {pe.dupe_titles[i] || d}{" "}
+                              <span className="font-mono text-[10px] opacity-60">
+                                {d}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      ))}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setDedupeOpen(false)}
+              disabled={dedupeApplying}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={applyDedupe}
+              disabled={
+                dedupeApplying ||
+                dedupeLoading ||
+                !dedupePlan ||
+                (dedupePlan.would_delete ?? 0) === 0
+              }
+              variant="destructive"
+            >
+              {dedupeApplying
+                ? "applying…"
+                : `Apply (delete ${dedupePlan?.would_delete ?? 0})`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}
+
+function Stat({
+  label,
+  value,
+  accent,
+}: {
+  label: string
+  value: string
+  accent?: string
+}) {
+  return (
+    <div className="space-y-0.5">
+      <div
+        className={
+          "text-base font-semibold tabular-nums " + (accent ?? "")
+        }
+      >
+        {value}
+      </div>
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+        {label}
+      </div>
     </div>
   )
 }

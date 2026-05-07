@@ -563,6 +563,50 @@ export type WikiEdge = {
 export const fetchAllEdges = (): Promise<{ edges: WikiEdge[] }> =>
   synthGet(`/api/wiki/edges`)
 
+export type DedupePlanEntry = {
+  canonical: string
+  canonical_title: string
+  dupes: string[]
+  dupe_titles: string[]
+}
+
+export type DedupeResponse = {
+  ns: string
+  threshold: number
+  dry_run: boolean
+  scanned: number
+  clusters: number
+  plan: DedupePlanEntry[]
+  // present on dry_run=true:
+  would_delete?: number
+  // present on dry_run=false:
+  edges_merged?: number
+  deleted?: number
+  errors?: string[]
+}
+
+// Cluster a wiki namespace's pages by cosine similarity and either
+// preview (dry_run=true) or commit the merge of duplicates into their
+// canonical sibling. Synth-side endpoint: POST /api/wiki/dedupe-namespace.
+export const dedupeNamespace = (
+  ns: string,
+  threshold: number,
+  dryRun: boolean,
+): Promise<DedupeResponse> => {
+  const qs = new URLSearchParams({
+    ns,
+    threshold: String(threshold),
+    dry_run: String(dryRun),
+  })
+  return synthFetch<DedupeResponse>(
+    `/api/wiki/dedupe-namespace?${qs}`,
+    "POST",
+  ).then((r) => {
+    if (!r.ok) throw new Error(`synth HTTP ${r.status}`)
+    return r.body
+  })
+}
+
 export const seedSimilarEdges = (
   threshold = 0.85,
   topK = 3,
