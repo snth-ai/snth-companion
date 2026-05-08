@@ -931,6 +931,34 @@ export const fetchTaskTranscript = (
 ): Promise<TranscriptResponse> =>
   getJSON(`/api/hub/tasks/${encodeURIComponent(id)}/transcript?lines=${lines}`)
 
+// --- Synth owner settings (per-session feature toggles, owner-scoped)
+
+export type SynthOwnerSettings = {
+  session_id: string
+  timezone: string
+  bio: string
+  heartbeat: boolean
+  emotional_state_enabled: boolean
+  preferred_name: string
+  updated_at: string
+}
+
+export const fetchSynthOwnerSettings = (): Promise<SynthOwnerSettings> =>
+  synthGet(`/api/settings/owner`)
+
+export const patchSynthOwnerSettings = (
+  patch: Partial<{
+    timezone: string
+    bio: string
+    heartbeat: boolean
+    emotional_state_enabled: boolean
+  }>,
+): Promise<{ ok: boolean }> =>
+  synthFetch<{ ok: boolean }>(`/api/settings/owner`, "PUT", patch).then((r) => {
+    if (!r.ok) throw new Error(`synth HTTP ${r.status}`)
+    return r.body
+  })
+
 export const fetchTaskTemplates = (): Promise<{
   templates: TaskTemplate[]
   count: number
