@@ -44,6 +44,7 @@ const navItems = [
   { to: "/tools", label: "Tools", icon: Wrench },
   { to: "/synth-tools", label: "Synth Tools", icon: Settings },
   { to: "/synth-settings", label: "Synth Settings", icon: Heart },
+  { to: "/public", label: "Public", icon: Users },
   { to: "/privacy", label: "Privacy", icon: Lock },
   { to: "/sandbox", label: "Sandbox", icon: Shield },
   { to: "/logs", label: "Logs", icon: ScrollText },

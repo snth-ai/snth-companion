@@ -994,3 +994,228 @@ export const deleteTaskTemplate = (id: string): Promise<{ ok: boolean }> =>
   fetch(`/api/hub/task-templates/${encodeURIComponent(id)}`, {
     method: "DELETE",
   }).then((r) => jsonOrThrow<{ ok: boolean }>(r))
+
+// --- Mia Public V1 (2026-05-11) ---------------------------------------
+//
+// Multi-user TG group/channel surface. Synth-side endpoints exposed via
+// the existing /api/hub/synth-fetch pass-through. See atlas
+// `20-mia-public-surface.md` for the design.
+
+export type GroupConfig = {
+  group_chat_id: string
+  name: string
+  kind: "group" | "channel" | "discussion"
+  linked_channel_id?: string
+  linked_discussion_id?: string
+  mode: "strict" | "soft" | "trust"
+  bot_privacy: "on" | "off"
+  triggers: {
+    mention: boolean
+    reply: boolean
+    scheduled: boolean
+    topic: boolean
+  }
+  cooldown_min: number
+  daily_max_sent: number
+  trusted_users: string[]
+  banned_topics: string[]
+  tone_overlay: string
+  private_memory_blocked: boolean
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type PendingOutbound = {
+  id: number
+  group_chat_id: string
+  trigger_kind: string
+  draft_text: string
+  draft_attachments?: string
+  /**
+   * Rich-media payload (post_to_channel v2). JSON-encoded; parsed by
+   * PendingCard to render a kind-aware preview. Empty / undefined for
+   * text-only drafts (legacy path). Schema:
+   *   { kind: "photo"|"video"|"album"|..., path?, caption?, items?, ... }
+   * See openpaw_server/mia_public.go AttachmentPayload for the full
+   * field set.
+   */
+  attachment_json?: string
+  reply_to_msg_id?: string
+  message_thread_id?: number
+  source_session_id?: string
+  source_turn_trace?: string
+  reason?: string
+  status: "pending" | "approved" | "rejected" | "sent" | "expired"
+  final_text?: string
+  approver?: string
+  approved_at?: string
+  sent_at?: string
+  rejection_reason?: string
+  expires_at?: string
+  created_at: string
+}
+
+/**
+ * AttachmentPayload — decoded shape of PendingOutbound.attachment_json.
+ * Mirrors openpaw_server/mia_public.go.
+ */
+export type AttachmentPayload = {
+  kind:
+    | "text"
+    | "photo"
+    | "video"
+    | "video_note"
+    | "voice"
+    | "audio"
+    | "document"
+    | "sticker"
+    | "animation"
+    | "album"
+    | "poll"
+  path?: string
+  caption?: string
+  width?: number
+  height?: number
+  items?: Array<{
+    kind: "photo" | "video"
+    path: string
+    caption?: string
+    width?: number
+    height?: number
+  }>
+  title?: string
+  performer?: string
+  sticker_id?: string
+  gif_url?: string
+  question?: string
+  options?: string[]
+  anonymous?: boolean
+  multi?: boolean
+  quiz?: boolean
+  correct_option?: number
+  explanation?: string
+}
+
+export const parseAttachment = (raw?: string): AttachmentPayload | null => {
+  if (!raw) return null
+  try {
+    return JSON.parse(raw) as AttachmentPayload
+  } catch {
+    return null
+  }
+}
+
+export const fetchGroupConfigs = async (): Promise<GroupConfig[]> => {
+  const r = await synthFetch<{ groups: GroupConfig[] }>(`/api/group-config`, "GET")
+  if (!r.ok) throw new Error(`synth HTTP ${r.status}`)
+  return r.body.groups ?? []
+}
+
+export const upsertGroupConfig = async (cfg: Partial<GroupConfig>): Promise<{ ok: boolean; group_chat_id: string }> => {
+  const r = await synthFetch<{ ok: boolean; group_chat_id: string }>(`/api/group-config`, "POST", cfg)
+  if (!r.ok) throw new Error(`synth HTTP ${r.status}`)
+  return r.body
+}
+
+export const deleteGroupConfig = async (groupChatID: string): Promise<{ ok: boolean }> => {
+  const r = await synthFetch<{ ok: boolean }>(
+    `/api/group-config/delete?id=${encodeURIComponent(groupChatID)}`,
+    "POST",
+  )
+  if (!r.ok) throw new Error(`synth HTTP ${r.status}`)
+  return r.body
+}
+
+export const fetchPendingOutbound = async (
+  groupChatID?: string,
+  limit = 50,
+): Promise<PendingOutbound[]> => {
+  const qs = new URLSearchParams()
+  if (groupChatID) qs.set("group", groupChatID)
+  qs.set("limit", String(limit))
+  const r = await synthFetch<{ pending: PendingOutbound[]; count: number }>(
+    `/api/outbound/pending?${qs}`,
+    "GET",
+  )
+  if (!r.ok) throw new Error(`synth HTTP ${r.status}`)
+  return r.body.pending ?? []
+}
+
+export const approveOutbound = async (
+  id: number,
+  approver: string,
+  finalText?: string,
+): Promise<{ ok: boolean; id: number }> => {
+  const r = await synthFetch<{ ok: boolean; id: number }>(`/api/outbound/approve`, "POST", {
+    id,
+    approver,
+    final_text: finalText ?? "",
+  })
+  if (!r.ok) throw new Error(`synth HTTP ${r.status}`)
+  return r.body
+}
+
+export const rejectOutbound = async (
+  id: number,
+  approver: string,
+  reason: string,
+): Promise<{ ok: boolean; id: number }> => {
+  const r = await synthFetch<{ ok: boolean; id: number }>(`/api/outbound/reject`, "POST", {
+    id,
+    approver,
+    reason,
+  })
+  if (!r.ok) throw new Error(`synth HTTP ${r.status}`)
+  return r.body
+}
+
+export const queueOutboundManual = async (
+  groupChatID: string,
+  text: string,
+  opts?: { replyToMsgID?: string; approver?: string; sendNow?: boolean },
+): Promise<{ ok: boolean; id: number; approved: boolean }> => {
+  const r = await synthFetch<{ ok: boolean; id: number; approved: boolean }>(
+    `/api/outbound/queue`,
+    "POST",
+    {
+      group_chat_id: groupChatID,
+      text,
+      reply_to_msg_id: opts?.replyToMsgID ?? "",
+      approver: opts?.approver ?? "operator",
+      send_now: opts?.sendNow ?? false,
+    },
+  )
+  if (!r.ok) throw new Error(`synth HTTP ${r.status}`)
+  return r.body
+}
+
+export type BriefingMember = {
+  tg_user_id: string
+  name: string
+  relationship?: string
+  trusted?: boolean
+  topics?: string[]
+  notes?: string
+  authority?: string
+  group_chat_id?: string
+}
+
+export const importBriefing = async (
+  members?: BriefingMember[],
+  markdown?: string,
+  defaultGroupChatID?: string,
+): Promise<{ imported_count: number; failed_count: number; imported: unknown[]; failed: unknown[] }> => {
+  const r = await synthFetch<{
+    imported_count: number
+    failed_count: number
+    imported: unknown[]
+    failed: unknown[]
+  }>(`/api/briefing/import`, "POST", {
+    members: members ?? [],
+    markdown: markdown ?? "",
+    default_group_chat_id: defaultGroupChatID ?? "",
+  })
+  if (!r.ok) throw new Error(`synth HTTP ${r.status}`)
+  return r.body
+}
