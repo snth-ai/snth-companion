@@ -1106,6 +1106,25 @@ export const parseAttachment = (raw?: string): AttachmentPayload | null => {
   }
 }
 
+/**
+ * synthFileURL builds the browser-usable URL for streaming a file
+ * straight out of the bound synth's workspace. Used to <img>/<video>
+ * preview queued media drafts in the Public-tab pending feed before
+ * the operator approves. Goes through companion → hub → synth. The
+ * synth's /api/file handler enforces path-traversal guards (must
+ * resolve under ./workspace/).
+ *
+ * `absPath` is the path the synth recorded into post_to_channel's
+ * attachment_json (always pre-resolved through the tool's sandbox at
+ * queue-time).
+ */
+export const synthFileURL = (absPath: string): string => {
+  // Two layers of URL-encoding: the outer path= carries the inner
+  // /api/file?path=... query as a single literal value.
+  const inner = `/api/file?path=${encodeURIComponent(absPath)}`
+  return `/api/hub/synth-fetch-raw?path=${encodeURIComponent(inner)}`
+}
+
 export const fetchGroupConfigs = async (): Promise<GroupConfig[]> => {
   const r = await synthFetch<{ groups: GroupConfig[] }>(`/api/group-config`, "GET")
   if (!r.ok) throw new Error(`synth HTTP ${r.status}`)

@@ -34,6 +34,7 @@ import {
   queueOutboundManual,
   importBriefing,
   parseAttachment,
+  synthFileURL,
   type GroupConfig,
   type PendingOutbound,
   type AttachmentPayload,
@@ -278,6 +279,36 @@ function kindIcon(kind: AttachmentPayload["kind"]) {
   }
 }
 
+function MediaThumb({ path, kind }: { path: string; kind: "photo" | "video" }) {
+  // Synth's workspace files stream through hub /api/my/synth-fetch-raw.
+  // For videos we'd need the file path of the .mp4 + a <video> tag; for
+  // photos we just point an <img>. Both kinds render whatever bytes
+  // the synth's /api/file returns.
+  if (kind === "photo") {
+    return (
+      <img
+        src={synthFileURL(path)}
+        alt={path}
+        className="rounded border max-h-40 object-cover"
+        loading="lazy"
+        onError={(e) => {
+          // Fall through to a text-only marker when the file is
+          // unreachable (synth offline / file deleted / path moved).
+          (e.currentTarget as HTMLImageElement).style.display = "none"
+        }}
+      />
+    )
+  }
+  return (
+    <video
+      src={synthFileURL(path)}
+      className="rounded border max-h-40"
+      controls
+      preload="metadata"
+    />
+  )
+}
+
 function AttachmentPreview({ a }: { a: AttachmentPayload }) {
   const baseRow = "text-xs flex items-center gap-2 px-2 py-1 bg-muted/40 rounded"
   if (a.kind === "album") {
@@ -286,15 +317,17 @@ function AttachmentPreview({ a }: { a: AttachmentPayload }) {
         <div className="flex items-center gap-2 text-sm font-medium">
           {kindIcon("album")} Album · {a.items?.length ?? 0} items
         </div>
-        <div className="space-y-1">
+        <div className="grid grid-cols-3 gap-2">
           {a.items?.map((it, i) => (
-            <div key={i} className={baseRow}>
-              {kindIcon(it.kind)}
-              <code className="truncate flex-1">{it.path}</code>
-              {(it.width || it.height) && (
-                <span className="opacity-60">{it.width}×{it.height}</span>
+            <div key={i} className="space-y-1">
+              <MediaThumb path={it.path} kind={it.kind} />
+              <div className="flex items-center gap-1 text-xs opacity-70">
+                {kindIcon(it.kind)}
+                <code className="truncate flex-1">{it.path.split("/").pop()}</code>
+              </div>
+              {it.caption && (
+                <div className="text-xs opacity-60 truncate">“{it.caption}”</div>
               )}
-              {it.caption && <span className="opacity-60 truncate">“{it.caption}”</span>}
             </div>
           ))}
         </div>
@@ -354,14 +387,22 @@ function AttachmentPreview({ a }: { a: AttachmentPayload }) {
     )
   }
   // Single-file kinds: photo, video, video_note, voice, audio, document
+  // photo/video render an inline preview straight from the synth via
+  // /api/my/synth-fetch-raw. Other kinds (voice/audio/document) are
+  // metadata-only since browsers can't preview them in a useful way
+  // and we'd just be wasting bandwidth fetching them.
+  const showThumb = (a.kind === "photo" || a.kind === "video") && !!a.path
   return (
-    <div className="space-y-1 border border-dashed rounded p-3">
+    <div className="space-y-2 border border-dashed rounded p-3">
       <div className="flex items-center gap-2 text-sm font-medium">
         {kindIcon(a.kind)} {a.kind}
         {(a.width || a.height) && (
           <span className="text-xs opacity-60">{a.width}×{a.height}</span>
         )}
       </div>
+      {showThumb && (
+        <MediaThumb path={a.path!} kind={a.kind as "photo" | "video"} />
+      )}
       {a.path && (
         <code className="block text-xs break-all opacity-80">{a.path}</code>
       )}
