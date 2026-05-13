@@ -22,6 +22,7 @@ import { TasksPage } from "@/pages/Tasks"
 import { TaskTemplatesPage } from "@/pages/TaskTemplates"
 import { SynthSettingsPage } from "@/pages/SynthSettings"
 import { PublicPage } from "@/pages/Public"
+import { PlacesPage } from "@/pages/Places"
 import { Toaster } from "@/components/ui/sonner"
 
 // HashRouter (not BrowserRouter) so in-page navigation never triggers
@@ -56,6 +57,7 @@ export default function App() {
             <Route path="task-templates" element={<TaskTemplatesPage />} />
             <Route path="synth-settings" element={<SynthSettingsPage />} />
             <Route path="public" element={<PublicPage />} />
+            <Route path="places" element={<PlacesPage />} />
           </Route>
         </Routes>
       </HashRouter>
