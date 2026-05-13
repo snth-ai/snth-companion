@@ -604,6 +604,12 @@ function GroupConfigDialog({
     tone_overlay: "",
     private_memory_blocked: true,
     enabled: true,
+    model_override: "",
+    memory_addendum: "",
+    soul_full_override: "",
+    soul_addendum: "",
+    allowed_tools: "",
+    trigger_mode: "selective",
     created_at: "",
     updated_at: "",
   }
@@ -808,6 +814,142 @@ function GroupConfigDialog({
               onCheckedChange={(v) => setCfg({ ...cfg, enabled: v })}
             />
             <Label>Enabled (off = drop all outbound + audit)</Label>
+          </div>
+
+          <Separator />
+
+          <div className="space-y-1">
+            <div className="text-sm font-medium">
+              Per-channel overrides (advanced)
+            </div>
+            <div className="text-xs text-muted-foreground">
+              Leave fields empty to inherit the synth's instance default.
+              These take effect for messages in THIS channel only.
+            </div>
+          </div>
+
+          <div>
+            <Label>Trigger mode</Label>
+            <Select
+              value={cfg.trigger_mode || "selective"}
+              onValueChange={(v) =>
+                setCfg({
+                  ...cfg,
+                  trigger_mode: v as GroupConfig["trigger_mode"],
+                })
+              }
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="selective">
+                  selective — agent decides (default)
+                </SelectItem>
+                <SelectItem value="mention_or_reply">
+                  mention_or_reply — hard gate
+                </SelectItem>
+                <SelectItem value="mention_only">
+                  mention_only — hard gate
+                </SelectItem>
+                <SelectItem value="always">
+                  always — answer every message
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            <div className="text-xs text-muted-foreground mt-1">
+              <strong>selective</strong>: must respond to mention/reply,
+              MAY respond to others if she has something genuine to add.
+              Bias toward silence.
+              <br />
+              <strong>mention_only</strong> / <strong>mention_or_reply</strong>:
+              hard delivery-layer gate — non-matching messages are dropped
+              before the LLM runs (no cost, no audit).
+            </div>
+          </div>
+
+          <div>
+            <Label>Model override (provider:model)</Label>
+            <Input
+              value={cfg.model_override}
+              onChange={(e) =>
+                setCfg({ ...cfg, model_override: e.target.value })
+              }
+              placeholder="openrouter:anthropic/claude-sonnet-4-6"
+            />
+            <div className="text-xs text-muted-foreground mt-1">
+              Empty = inherit instance default. Format:{" "}
+              <code>provider:model_id</code> (same as <code>/provider</code>{" "}
+              command).
+            </div>
+          </div>
+
+          <div>
+            <Label>Allowed tools (comma-separated; empty = all)</Label>
+            <Textarea
+              value={cfg.allowed_tools}
+              onChange={(e) =>
+                setCfg({ ...cfg, allowed_tools: e.target.value })
+              }
+              placeholder="memory_recall, wiki_search, send_message"
+              rows={2}
+            />
+            <div className="text-xs text-muted-foreground mt-1">
+              When non-empty, ONLY these tools are visible to the LLM in this
+              channel. Useful for read-only public channels (e.g. block{" "}
+              <code>send_message</code>, <code>post_to_channel</code>).
+            </div>
+          </div>
+
+          <div>
+            <Label>Per-channel memory addendum</Label>
+            <Textarea
+              value={cfg.memory_addendum}
+              onChange={(e) =>
+                setCfg({ ...cfg, memory_addendum: e.target.value })
+              }
+              placeholder={
+                "Free-form context for THIS channel:\n- who's in here, history with them\n- recurring topics\n- inside jokes / shared references\n- anything not in the graph but matters here"
+              }
+              rows={5}
+            />
+            <div className="text-xs text-muted-foreground mt-1">
+              Injected into the turn's dynamic context. The synth treats this
+              as operator-curated knowledge about this channel.
+            </div>
+          </div>
+
+          <div>
+            <Label>Per-channel SOUL addendum (additive)</Label>
+            <Textarea
+              value={cfg.soul_addendum}
+              onChange={(e) =>
+                setCfg({ ...cfg, soul_addendum: e.target.value })
+              }
+              placeholder="Light tweaks layered on top of the default persona — e.g. 'in this channel, lean technical and skip flirty asides.'"
+              rows={3}
+            />
+            <div className="text-xs text-muted-foreground mt-1">
+              Use this for SMALL persona tweaks. For a full persona
+              replacement use the field below.
+            </div>
+          </div>
+
+          <div>
+            <Label>Per-channel SOUL FULL override (replaces persona)</Label>
+            <Textarea
+              value={cfg.soul_full_override}
+              onChange={(e) =>
+                setCfg({ ...cfg, soul_full_override: e.target.value })
+              }
+              placeholder="A complete different persona for this channel (e.g. formal corporate voice). Takes precedence over the addendum."
+              rows={6}
+            />
+            <div className="text-xs text-muted-foreground mt-1">
+              When non-empty, this REPLACES the default SOUL persona for
+              messages in this channel. Name/identity stays; voice/style/
+              topic boundaries get the override. Wins over addendum.
+            </div>
           </div>
         </div>
 

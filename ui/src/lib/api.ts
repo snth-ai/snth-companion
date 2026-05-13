@@ -1022,6 +1022,14 @@ export type GroupConfig = {
   tone_overlay: string
   private_memory_blocked: boolean
   enabled: boolean
+  // PUB-1..5 per-channel overrides (2026-05-13). All optional; empty
+  // string = inherit from the synth's instance default.
+  model_override: string
+  memory_addendum: string
+  soul_full_override: string
+  soul_addendum: string
+  allowed_tools: string
+  trigger_mode: "always" | "selective" | "mention_or_reply" | "mention_only" | ""
   created_at: string
   updated_at: string
 }
