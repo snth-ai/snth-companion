@@ -1246,3 +1246,59 @@ export const importBriefing = async (
   if (!r.ok) throw new Error(`synth HTTP ${r.status}`)
   return r.body
 }
+
+// --- mobile companion: landmarks (hub-side, snth-mobile feature) -----
+//
+// Landmarks are user-scoped geofences (home, gym, work, custom) defined
+// here on the Mac companion and consumed by the paired iPhone for
+// CLCircularRegion monitoring. iOS never sends raw coordinates — only
+// the landmark name on entry/exit. Hub stores per-user, pushes
+// `landmarks.updated` over WS to mobile peer on every CRUD.
+//
+// Hub endpoint: /api/landmarks (GET + POST), /api/landmarks/<id> (PUT + DELETE)
+// Hub-side impl status: codex's snth-hub commit 6 (TBD as of 2026-05-13)
+
+export type LandmarkTag = "home" | "gym" | "work" | "store" | "custom"
+
+export type Landmark = {
+  id: number
+  name: string
+  tag: LandmarkTag
+  lat: number
+  lng: number
+  radius_m: number
+  created_at: number
+  updated_at: number
+}
+
+export type LandmarkInput = {
+  name: string
+  tag: LandmarkTag
+  lat: number
+  lng: number
+  radius_m: number
+}
+
+export const fetchLandmarks = (): Promise<Landmark[]> =>
+  getJSON<{ landmarks: Landmark[] }>("/api/hub/landmarks").then(
+    (r) => r.landmarks ?? [],
+  )
+
+export const createLandmark = (
+  input: LandmarkInput,
+): Promise<{ id: number }> => postJSON<{ id: number }>("/api/hub/landmarks", input)
+
+export const updateLandmark = (
+  id: number,
+  input: LandmarkInput,
+): Promise<{ ok: boolean }> =>
+  fetch(`/api/hub/landmarks/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  }).then((r) => jsonOrThrow<{ ok: boolean }>(r))
+
+export const deleteLandmark = (id: number): Promise<{ ok: boolean }> =>
+  fetch(`/api/hub/landmarks/${id}`, { method: "DELETE" }).then((r) =>
+    jsonOrThrow<{ ok: boolean }>(r),
+  )

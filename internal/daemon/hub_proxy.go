@@ -44,6 +44,14 @@ func (s *UIServer) registerHubProxies(mux *http.ServeMux) {
 	proxy("/api/hub/logs-remote", "/api/my/logs")
 	proxy("/api/hub/synth-tools", "/api/my/tools")
 	proxy("/api/hub/synth-tools/toggle", "/api/my/tools/toggle")
+	// Mobile companion (snth-mobile) — landmarks live on hub, are
+	// authored from this Mac companion, and consumed by the paired
+	// iPhone for CLCircularRegion monitoring. Hub-side impl: codex's
+	// snth-hub PR per docs/mobile-companion-impl-task.md commit 6.
+	// GET (list) + POST (create) on the collection:
+	proxy("/api/hub/landmarks", "/api/landmarks")
+	// PUT + DELETE on /api/hub/landmarks/<id>:
+	s.registerHubProxyPrefix(mux, "/api/hub/landmarks/", "/api/landmarks/")
 	// Mini-apps surface (Wave 9, v0.4.39+ companion). The bound synth
 	// serves the actual content; hub bridges, companion sandboxes the
 	// iframe + handles the $mini postMessage bridge in the UI shell.
