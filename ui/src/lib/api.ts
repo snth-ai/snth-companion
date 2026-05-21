@@ -1358,3 +1358,63 @@ export const deleteLandmark = (id: number): Promise<{ ok: boolean }> =>
   fetch(`/api/hub/landmarks/${id}`, { method: "DELETE" }).then((r) =>
     jsonOrThrow<{ ok: boolean }>(r),
   )
+
+// ----------------------------------------------------------------------
+// Context snapshot — CTXMAP. Per-turn breakdown of what fills the synth's
+// LLM context, captured ring-buffer style in synth /api/context-snapshot
+// and proxied through the hub. Mirror of synth-side soul.PromptSnapshot.
+
+export type CtxPromptSectionSize = {
+  key: string
+  group: string
+  bytes: number
+}
+
+export type CtxPromptSnapshot = {
+  built_at: string
+  mode: string
+  total_bytes: number
+  sections: CtxPromptSectionSize[]
+}
+
+export type CtxMessageHistorySize = {
+  total_bytes: number
+  user_bytes: number
+  assistant_bytes: number
+  tool_result_bytes: number
+  system_bytes: number
+  message_count: number
+}
+
+export type CtxSnapshot = {
+  session_id: string
+  built_at: string
+  channel?: string
+  provider?: string
+  model?: string
+  system_prompt: CtxPromptSnapshot
+  message_history: CtxMessageHistorySize
+  tool_schemas_bytes: number
+  dynamic_context_bytes: number
+  total_bytes: number
+}
+
+export const fetchContextSessions = async (): Promise<string[]> => {
+  const r = await synthFetch<{ sessions?: string[] }>(
+    "/api/context-snapshot",
+    "GET",
+  )
+  if (!r.ok) throw new Error(`synth HTTP ${r.status}`)
+  return r.body?.sessions ?? []
+}
+
+export const fetchContextSnapshots = async (
+  session: string,
+): Promise<CtxSnapshot[]> => {
+  const r = await synthFetch<{ snapshots?: CtxSnapshot[] }>(
+    `/api/context-snapshot?session=${encodeURIComponent(session)}`,
+    "GET",
+  )
+  if (!r.ok) throw new Error(`synth HTTP ${r.status}`)
+  return r.body?.snapshots ?? []
+}

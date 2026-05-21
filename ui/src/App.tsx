@@ -18,6 +18,7 @@ import { DreamsPage } from "@/pages/Dreams"
 import { LibraryPage } from "@/pages/Library"
 import { GraphPage } from "@/pages/Graph"
 import { DiagnosticsPage } from "@/pages/Diagnostics"
+import { ContextPage } from "@/pages/Context"
 import { TasksPage } from "@/pages/Tasks"
 import { TaskTemplatesPage } from "@/pages/TaskTemplates"
 import { SynthSettingsPage } from "@/pages/SynthSettings"
@@ -53,6 +54,7 @@ export default function App() {
             <Route path="library" element={<LibraryPage />} />
             <Route path="graph" element={<GraphPage />} />
             <Route path="diagnostics" element={<DiagnosticsPage />} />
+            <Route path="context" element={<ContextPage />} />
             <Route path="tasks" element={<TasksPage />} />
             <Route path="task-templates" element={<TaskTemplatesPage />} />
             <Route path="synth-settings" element={<SynthSettingsPage />} />
