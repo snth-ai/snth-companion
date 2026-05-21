@@ -34,6 +34,14 @@
   --radius-lg: 0.5rem;
 }
 
+/* Hardcoded equivalent of hsl(222 47% 6%) so the WKWebView is dark
+   from the very first paint, before CSS variables resolve. Prevents
+   a flash of white before the React tree mounts, and is also what
+   shows during macOS overscroll/rubber-band. */
+html {
+  background-color: #080d18;
+}
+
 html,
 body,
 #root {
@@ -43,6 +51,9 @@ body,
   color: var(--color-foreground);
   font-family:
     -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  /* Cap rubber-band overscroll — the area exposed past the content
+     was painting the webview's default white background. */
+  overscroll-behavior: none;
 }
 
 @theme inline {
