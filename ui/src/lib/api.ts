@@ -1154,6 +1154,62 @@ export const deleteGroupConfig = async (groupChatID: string): Promise<{ ok: bool
   return r.body
 }
 
+// --- Public-tab settings drawer helpers (PUBUI, 2026-05-16) ----------
+
+// SynthModelOption — one selectable (provider, model) pair for the
+// per-channel model_override dropdown. The value stored in group config
+// is `${provider}:${model}`.
+export type SynthModelOption = {
+  provider: string
+  model: string
+  label: string // "OpenRouter — Claude Sonnet 4.6"
+}
+
+// fetchSynthModels pulls the synth's registered provider/model catalog
+// via /api/llm/providers and flattens it to a flat dropdown list.
+export const fetchSynthModels = async (): Promise<SynthModelOption[]> => {
+  const r = await synthFetch<{
+    providers: Array<{
+      name: string
+      display: string
+      models: Array<{ id: string; display: string }>
+    }>
+  }>("/api/llm/providers", "GET")
+  if (!r.ok) throw new Error(`synth HTTP ${r.status}`)
+  const out: SynthModelOption[] = []
+  for (const p of r.body.providers ?? []) {
+    for (const m of p.models ?? []) {
+      out.push({
+        provider: p.name,
+        model: m.id,
+        label: `${p.display || p.name} — ${m.display || m.id}`,
+      })
+    }
+  }
+  return out
+}
+
+// fetchSynthTools pulls the synth's full tool catalog (builtin + skills
+// + remote) so the per-channel allowed-tools toggle grid can render the
+// real, current set rather than a free-text CSV.
+export const fetchSynthToolNames = async (): Promise<
+  Array<{ name: string; description: string; source: string }>
+> => {
+  const r = await synthFetch<{
+    tools: Array<{ name: string; description: string; source: string }>
+  }>("/api/tools", "GET")
+  if (!r.ok) throw new Error(`synth HTTP ${r.status}`)
+  return r.body.tools ?? []
+}
+
+// fetchSynthSoul returns the synth's current base SOUL.md content so the
+// per-channel SOUL override textarea can be pre-filled for editing.
+export const fetchSynthSoul = async (): Promise<string> => {
+  const r = await synthFetch<{ soul_md: string }>("/api/config", "GET")
+  if (!r.ok) throw new Error(`synth HTTP ${r.status}`)
+  return r.body.soul_md ?? ""
+}
+
 export const fetchPendingOutbound = async (
   groupChatID?: string,
   limit = 50,

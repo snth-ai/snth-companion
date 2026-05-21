@@ -111,7 +111,23 @@ type Config struct {
 
 	// LogRetentionDays is how long to keep the local audit log.
 	LogRetentionDays int `json:"log_retention_days"`
+
+	// MenubarDisplay controls what the macOS menu-bar item shows next to
+	// the heart icon:
+	//   "heart"       — icon only (default)
+	//   "heart_snth"  — icon + the word "snth"
+	//   "heart_name"  — icon + the active synth's friendly name
+	// The heart itself is always shown (empty=disconnected, filled=
+	// connected); this only governs the trailing text.
+	MenubarDisplay string `json:"menubar_display,omitempty"`
 }
+
+// Menu-bar display modes.
+const (
+	MenubarHeart     = "heart"
+	MenubarHeartSNTH = "heart_snth"
+	MenubarHeartName = "heart_name"
+)
 
 var (
 	mu      sync.RWMutex
@@ -356,6 +372,9 @@ func (c *Config) ensureDefaults() {
 	}
 	if c.LogRetentionDays == 0 {
 		c.LogRetentionDays = 30
+	}
+	if c.MenubarDisplay == "" {
+		c.MenubarDisplay = MenubarHeart
 	}
 	if c.SandboxRoots == nil {
 		c.SandboxRoots = []string{}

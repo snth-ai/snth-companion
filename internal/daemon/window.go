@@ -25,6 +25,10 @@ func RunWindow(url, title string) {
 	runtime.LockOSThread()
 	w := webview.New(false)
 	defer w.Destroy()
+	// webview.New created the shared NSApplication — safe to set the
+	// Dock icon now so the control-panel window shows the brand mark
+	// instead of a generic executable icon.
+	SetBrandDockIcon()
 	w.SetTitle(title)
 	w.SetSize(1100, 780, webview.HintNone)
 	w.Navigate(url)

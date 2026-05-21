@@ -35,9 +35,13 @@ import {
   importBriefing,
   parseAttachment,
   synthFileURL,
+  fetchSynthModels,
+  fetchSynthToolNames,
+  fetchSynthSoul,
   type GroupConfig,
   type PendingOutbound,
   type AttachmentPayload,
+  type SynthModelOption,
 } from "@/lib/api"
 import { toast } from "sonner"
 import {
@@ -622,6 +626,50 @@ function GroupConfigDialog({
     (initial?.banned_topics ?? []).join("\n"),
   )
 
+  // PUBUI (2026-05-16): drawer pulls the synth's live model catalog,
+  // tool list and base SOUL so the operator picks from real data
+  // instead of typing free-text.
+  const [models, setModels] = useState<SynthModelOption[]>([])
+  const [synthTools, setSynthTools] = useState<
+    Array<{ name: string; description: string; source: string }>
+  >([])
+  const [baseSoul, setBaseSoul] = useState("")
+  useEffect(() => {
+    fetchSynthModels().then(setModels).catch(() => setModels([]))
+    fetchSynthToolNames().then(setSynthTools).catch(() => setSynthTools([]))
+    fetchSynthSoul().then(setBaseSoul).catch(() => setBaseSoul(""))
+  }, [])
+
+  // allowed_tools is stored as CSV. Empty = every tool enabled. Helpers
+  // translate between that and the toggle grid.
+  const allowedSet = new Set(
+    (cfg.allowed_tools || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  )
+  const toolEnabled = (name: string) =>
+    allowedSet.size === 0 || allowedSet.has(name)
+  const toggleTool = (name: string, on: boolean) => {
+    // First toggle-off from the "all enabled" state seeds the whitelist
+    // with every current tool, then removes the one switched off.
+    let next: Set<string>
+    if (allowedSet.size === 0) {
+      next = new Set(synthTools.map((t) => t.name))
+    } else {
+      next = new Set(allowedSet)
+    }
+    if (on) next.add(name)
+    else next.delete(name)
+    // If the whitelist now covers every tool, collapse back to empty
+    // (= "no restriction") so we don't pin a frozen list.
+    const csv =
+      next.size === synthTools.length && synthTools.length > 0
+        ? ""
+        : Array.from(next).sort().join(",")
+    setCfg({ ...cfg, allowed_tools: csv })
+  }
+
   const save = async () => {
     setSaving(true)
     try {
@@ -648,7 +696,7 @@ function GroupConfigDialog({
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+      <DialogContent className="!max-w-5xl sm:!max-w-5xl w-[92vw] max-h-[92vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>
             {isNew ? "Add new group" : `Settings: ${cfg.name || cfg.group_chat_id}`}
@@ -744,9 +792,23 @@ function GroupConfigDialog({
 
           <Separator />
 
-          <div className="space-y-3">
-            <Label className="text-sm font-medium">Triggers (when she replies)</Label>
-            {(["mention", "reply", "scheduled", "topic"] as const).map((k) => (
+          <div className="space-y-2">
+            <Label className="text-sm font-medium">
+              Proactive triggers — when Mia STARTS a message on her own
+            </Label>
+            <div className="text-xs text-muted-foreground">
+              These let Mia post WITHOUT being addressed. Reactive replies
+              (someone writes → she answers) are governed separately by
+              "Reply behavior" further down.
+            </div>
+            {(
+              [
+                ["mention", "Reacts when @-mentioned"],
+                ["reply", "Reacts when someone replies to her message"],
+                ["scheduled", "May post on a schedule / heartbeat"],
+                ["topic", "May chime in on topics she's briefed on"],
+              ] as const
+            ).map(([k, desc]) => (
               <div key={k} className="flex items-center gap-2">
                 <Switch
                   checked={cfg.triggers[k]}
@@ -757,7 +819,9 @@ function GroupConfigDialog({
                     })
                   }
                 />
-                <Label className="text-sm">{k}</Label>
+                <Label className="text-sm">
+                  {k} <span className="text-muted-foreground">— {desc}</span>
+                </Label>
               </div>
             ))}
           </div>
@@ -829,7 +893,7 @@ function GroupConfigDialog({
           </div>
 
           <div>
-            <Label>Trigger mode</Label>
+            <Label>Reply behavior — when someone WRITES in the chat</Label>
             <Select
               value={cfg.trigger_mode || "selective"}
               onValueChange={(v) =>
@@ -844,61 +908,111 @@ function GroupConfigDialog({
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="selective">
-                  selective — agent decides (default)
+                  Selective — she decides (default)
                 </SelectItem>
                 <SelectItem value="mention_or_reply">
-                  mention_or_reply — hard gate
+                  Only on @-mention or reply-to-her
                 </SelectItem>
                 <SelectItem value="mention_only">
-                  mention_only — hard gate
+                  Only on @-mention
                 </SelectItem>
                 <SelectItem value="always">
-                  always — answer every message
+                  Always — answer every message
                 </SelectItem>
               </SelectContent>
             </Select>
             <div className="text-xs text-muted-foreground mt-1">
-              <strong>selective</strong>: must respond to mention/reply,
-              MAY respond to others if she has something genuine to add.
-              Bias toward silence.
+              <strong>Selective</strong>: always replies to @-mention / reply;
+              for everything else stays quiet unless she has something
+              genuinely worth saying.
               <br />
-              <strong>mention_only</strong> / <strong>mention_or_reply</strong>:
-              hard delivery-layer gate — non-matching messages are dropped
-              before the LLM runs (no cost, no audit).
+              <strong>Only on…</strong> modes are a hard gate — non-matching
+              messages are dropped before the LLM runs (no token cost).
             </div>
           </div>
 
           <div>
-            <Label>Model override (provider:model)</Label>
-            <Input
-              value={cfg.model_override}
-              onChange={(e) =>
-                setCfg({ ...cfg, model_override: e.target.value })
+            <Label>Model override</Label>
+            <Select
+              value={cfg.model_override || "__inherit__"}
+              onValueChange={(v) =>
+                setCfg({
+                  ...cfg,
+                  model_override: v === "__inherit__" ? "" : v,
+                })
               }
-              placeholder="openrouter:anthropic/claude-sonnet-4-6"
-            />
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="Inherit synth default" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__inherit__">
+                  Inherit synth default
+                </SelectItem>
+                {models.map((m) => (
+                  <SelectItem
+                    key={`${m.provider}:${m.model}`}
+                    value={`${m.provider}:${m.model}`}
+                  >
+                    {m.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <div className="text-xs text-muted-foreground mt-1">
-              Empty = inherit instance default. Format:{" "}
-              <code>provider:model_id</code> (same as <code>/provider</code>{" "}
-              command).
+              {models.length === 0
+                ? "Could not load the synth's model list — it may be offline."
+                : "Which LLM answers messages in this channel. Empty = synth default."}
+              {cfg.model_override &&
+                !models.some(
+                  (m) => `${m.provider}:${m.model}` === cfg.model_override,
+                ) && (
+                  <span className="text-amber-600">
+                    {" "}
+                    Current value <code>{cfg.model_override}</code> is not in
+                    the synth's registered list.
+                  </span>
+                )}
             </div>
           </div>
 
           <div>
-            <Label>Allowed tools (comma-separated; empty = all)</Label>
-            <Textarea
-              value={cfg.allowed_tools}
-              onChange={(e) =>
-                setCfg({ ...cfg, allowed_tools: e.target.value })
-              }
-              placeholder="memory_recall, wiki_search, send_message"
-              rows={2}
-            />
-            <div className="text-xs text-muted-foreground mt-1">
-              When non-empty, ONLY these tools are visible to the LLM in this
-              channel. Useful for read-only public channels (e.g. block{" "}
-              <code>send_message</code>, <code>post_to_channel</code>).
+            <div className="flex items-baseline justify-between">
+              <Label>Allowed tools in this channel</Label>
+              <span className="text-xs text-muted-foreground">
+                {allowedSet.size === 0
+                  ? `all ${synthTools.length} enabled`
+                  : `${allowedSet.size} of ${synthTools.length} enabled`}
+              </span>
             </div>
+            <div className="text-xs text-muted-foreground mt-1 mb-2">
+              Turn a tool OFF to hide it from Mia in this channel only. With
+              everything ON there's no restriction.
+            </div>
+            {synthTools.length === 0 ? (
+              <div className="text-xs text-muted-foreground">
+                Could not load the synth's tool list — it may be offline.
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 max-h-56 overflow-y-auto rounded-md border p-3">
+                {synthTools.map((t) => (
+                  <div
+                    key={t.name}
+                    className="flex items-center gap-2"
+                    title={t.description}
+                  >
+                    <Switch
+                      checked={toolEnabled(t.name)}
+                      onCheckedChange={(v) => toggleTool(t.name, v)}
+                    />
+                    <span className="text-sm truncate">{t.name}</span>
+                    <span className="text-[10px] text-muted-foreground">
+                      {t.source}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div>
@@ -936,19 +1050,46 @@ function GroupConfigDialog({
           </div>
 
           <div>
-            <Label>Per-channel SOUL FULL override (replaces persona)</Label>
+            <div className="flex items-baseline justify-between">
+              <Label>Per-channel SOUL FULL override (replaces persona)</Label>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={!baseSoul}
+                onClick={() =>
+                  setCfg({ ...cfg, soul_full_override: baseSoul })
+                }
+              >
+                {baseSoul ? "Load current SOUL" : "SOUL unavailable"}
+              </Button>
+            </div>
             <Textarea
               value={cfg.soul_full_override}
               onChange={(e) =>
                 setCfg({ ...cfg, soul_full_override: e.target.value })
               }
-              placeholder="A complete different persona for this channel (e.g. formal corporate voice). Takes precedence over the addendum."
-              rows={6}
+              placeholder={
+                baseSoul
+                  ? "Click “Load current SOUL” to start from the synth's actual persona, then edit."
+                  : "A complete different persona for this channel."
+              }
+              rows={10}
+              className="font-mono text-xs"
             />
             <div className="text-xs text-muted-foreground mt-1">
               When non-empty, this REPLACES the default SOUL persona for
               messages in this channel. Name/identity stays; voice/style/
-              topic boundaries get the override. Wins over addendum.
+              topic boundaries get the override. Wins over the addendum.
+              {cfg.soul_full_override &&
+                baseSoul &&
+                cfg.soul_full_override === baseSoul && (
+                  <span className="text-amber-600">
+                    {" "}
+                    Identical to the base SOUL — edit it, or clear the field
+                    to just inherit.
+                  </span>
+                )}
             </div>
           </div>
         </div>
