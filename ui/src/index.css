@@ -168,3 +168,31 @@ body,
     @apply font-sans;
   }
 }
+
+/* Scrollbars — dark-themed to match the companion (default WebKit
+   scrollbar shows the OS light track which jars against the
+   hsl(222 47% 6%) background). */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: var(--color-background);
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(222 20% 22%);
+  border: 2px solid var(--color-background);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(222 20% 32%);
+}
+::-webkit-scrollbar-corner {
+  background: var(--color-background);
+}
+
+/* Firefox fallback. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(222 20% 22%) hsl(222 47% 6%);
+}
