@@ -26,16 +26,75 @@ import { toast } from "sonner"
 // Globally-disabled tools (operator-controlled) show a locked
 // indicator and the toggle is greyed out.
 
+// Capability-based grouping — mirrors the hub admin /instances/tools
+// page (openpaw-internal `tools/capabilities.go` policy). Same labels
+// as hub so an operator switching between the two surfaces sees the
+// identical bucket structure.
 const groupOrder: Array<{ key: string; title: string }> = [
-  { key: "synth", title: "Synth-side" },
-  { key: "companion", title: "Companion-routed" },
+  { key: "mac", title: "Mac integration (remote_* / companion_*)" },
+  { key: "mobile", title: "iPhone (mobile_*)" },
+  { key: "spotify", title: "Spotify" },
+  { key: "post_to_channel", title: "Channel posting" },
+  { key: "identity", title: "Identity" },
+  { key: "wiki", title: "Wiki" },
+  { key: "memory", title: "Memory" },
+  { key: "media", title: "Media (send_*, image_*, etc)" },
+  { key: "web", title: "Web" },
+  { key: "self", title: "Self-edit / Workspace" },
   { key: "skill", title: "User skills" },
+  { key: "other", title: "Other" },
 ]
 
 function groupKey(t: SynthToolEntry): string {
+  // User skills override category — they're authored separately and
+  // operators usually want to see them as a distinct group regardless
+  // of what their tool name suggests.
   if (t.source === "skill") return "skill"
-  if (t.scope === "companion") return "companion"
-  return "synth"
+  const name = t.name
+  if (name.startsWith("remote_") || name.startsWith("companion_")) return "mac"
+  if (name.startsWith("mobile_")) return "mobile"
+  if (name === "spotify") return "spotify"
+  if (name === "post_to_channel") return "post_to_channel"
+  if (name === "identity_promote") return "identity"
+  if (name.startsWith("wiki_")) return "wiki"
+  if (name.startsWith("memory_")) return "memory"
+  if (
+    name.startsWith("send_") ||
+    name.startsWith("image_") ||
+    name === "generate_image" ||
+    name === "react" ||
+    name === "tts" ||
+    name === "transcribe" ||
+    name === "media_download" ||
+    name === "youtube_transcript" ||
+    name === "dj" ||
+    name === "giphy" ||
+    name === "edit_message" ||
+    name === "delete_message"
+  ) {
+    return "media"
+  }
+  if (name === "web_search" || name === "web_read") return "web"
+  if (
+    name === "read_file" ||
+    name === "write_file" ||
+    name === "ls" ||
+    name === "find" ||
+    name === "grep" ||
+    name === "exec" ||
+    name === "self_edit" ||
+    name === "update_workspace_file" ||
+    name === "publish_page" ||
+    name === "unpublish_page" ||
+    name === "list_pages" ||
+    name === "create_skill" ||
+    name === "skill_patch" ||
+    name === "self_docs" ||
+    name === "install_package"
+  ) {
+    return "self"
+  }
+  return "other"
 }
 
 export function SynthToolsPage() {
@@ -84,6 +143,50 @@ export function SynthToolsPage() {
       toast.error("Toggle failed", { description: String(e) })
     } finally {
       setBusyTool(null)
+    }
+  }
+
+  // Group-level batch toggle. Loops toggleSynthTool one-by-one through
+  // each non-locked tool in the group. Sequential rather than parallel
+  // so the hub's audit log keeps a clean ordering + we surface partial
+  // failures cleanly (a row that errors stops the rest).
+  const [busyGroup, setBusyGroup] = useState<string | null>(null)
+  const onBatchToggle = async (
+    groupKeyVal: string,
+    rows: SynthToolEntry[],
+    next: boolean,
+  ) => {
+    const actionable = rows.filter((t) => !t.disabled_global && t.disabled !== next)
+    if (actionable.length === 0) return
+    setBusyGroup(groupKeyVal)
+    let ok = 0
+    let firstErr: string | null = null
+    for (const t of actionable) {
+      try {
+        await toggleSynthTool(t.name, next)
+        setTools((prev) =>
+          prev
+            ? prev.map((x) =>
+                x.name === t.name ? { ...x, disabled: next } : x,
+              )
+            : prev,
+        )
+        ok++
+      } catch (e) {
+        firstErr = `${t.name}: ${String(e)}`
+        break
+      }
+    }
+    setBusyGroup(null)
+    if (firstErr) {
+      toast.error(`Group toggle stopped after ${ok} ok`, { description: firstErr })
+    } else {
+      toast.success(
+        next
+          ? `Disabled ${ok} tools in group`
+          : `Enabled ${ok} tools in group`,
+        { description: "Synth picks up changes on next config poll (≤2 min)." },
+      )
     }
   }
 
@@ -177,22 +280,58 @@ export function SynthToolsPage() {
       {groupOrder.map(({ key, title }) => {
         const rows = grouped[key]
         if (!rows || rows.length === 0) return null
+        const enabledCount = rows.filter(
+          (t) => !t.disabled && !t.disabled_global,
+        ).length
+        const disabledHereCount = rows.filter(
+          (t) => t.disabled && !t.disabled_global,
+        ).length
+        const lockedCount = rows.filter((t) => t.disabled_global).length
+        const groupBusy = busyGroup === key
         return (
           <div key={key} className="space-y-3">
-            <div className="flex items-baseline justify-between">
-              <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-                {title}
-              </h2>
-              <span className="text-xs text-muted-foreground">
-                {rows.length} tool{rows.length === 1 ? "" : "s"}
-              </span>
+            <div className="flex items-center justify-between gap-3 rounded-md border bg-muted/40 px-3 py-2">
+              <div>
+                <h2 className="text-sm font-semibold tracking-tight text-foreground">
+                  {title}
+                </h2>
+                <p className="text-xs text-muted-foreground mt-0.5 tabular-nums">
+                  {enabledCount} enabled · {disabledHereCount} off · {lockedCount > 0 ? `${lockedCount} locked · ` : ""}{rows.length} total
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  disabled={groupBusy || enabledCount === 0}
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        `Disable all ${enabledCount} enabled tools in "${title}" on this synth?`,
+                      )
+                    ) {
+                      void onBatchToggle(key, rows, true)
+                    }
+                  }}
+                >
+                  Disable all
+                </Button>
+                <Button
+                  variant="default"
+                  size="sm"
+                  disabled={groupBusy || disabledHereCount === 0}
+                  onClick={() => void onBatchToggle(key, rows, false)}
+                >
+                  Enable all
+                </Button>
+              </div>
             </div>
             <div className="grid grid-cols-1 gap-3">
               {rows.map((t) => (
                 <ToolRow
                   key={t.name}
                   tool={t}
-                  busy={busyTool === t.name}
+                  busy={busyTool === t.name || groupBusy}
                   onToggle={(next) => onToggle(t, next)}
                 />
               ))}
