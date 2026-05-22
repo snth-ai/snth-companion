@@ -1210,6 +1210,47 @@ export const fetchSynthSoul = async (): Promise<string> => {
   return r.body.soul_md ?? ""
 }
 
+// SynthConfigFiles — the full workspace-md file set the synth exposes
+// via GET /api/config. Each key is the in-LLM identity / runtime input
+// the synth reads on every turn from its workspace dir. Used by the
+// companion Context tab editor (Wave D).
+export type SynthConfigFiles = {
+  soul_md: string
+  rules_md: string
+  agents_md: string
+  heartbeat_md: string
+  memory_md: string
+}
+
+// fetchSynthConfigFiles pulls all 5 workspace md files via synth
+// /api/config GET. Empty strings for files that don't exist on disk.
+export const fetchSynthConfigFiles = async (): Promise<SynthConfigFiles> => {
+  const r = await synthFetch<Partial<SynthConfigFiles>>("/api/config", "GET")
+  if (!r.ok) throw new Error(`synth HTTP ${r.status}`)
+  return {
+    soul_md: r.body.soul_md ?? "",
+    rules_md: r.body.rules_md ?? "",
+    agents_md: r.body.agents_md ?? "",
+    heartbeat_md: r.body.heartbeat_md ?? "",
+    memory_md: r.body.memory_md ?? "",
+  }
+}
+
+// saveSynthConfigFile writes a single whitelisted file via synth
+// /api/config POST. `file` is the BARE filename — "SOUL.md",
+// "RULES.md", "AGENTS.md", "HEARTBEAT.md", "MEMORY.md" — not the
+// snake_case key. Synth-side rejects anything outside that allow-list.
+export const saveSynthConfigFile = async (
+  file: string,
+  content: string,
+): Promise<void> => {
+  const r = await synthFetch<{ ok: boolean }>("/api/config", "POST", {
+    file,
+    content,
+  })
+  if (!r.ok) throw new Error(`synth HTTP ${r.status}`)
+}
+
 export const fetchPendingOutbound = async (
   groupChatID?: string,
   limit = 50,

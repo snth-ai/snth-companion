@@ -3,12 +3,47 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { Layers, RefreshCw, ChevronRight, AlertTriangle } from "lucide-react"
+import { Layers, RefreshCw, ChevronRight, AlertTriangle, FileText, Save, Loader2 } from "lucide-react"
 import {
   fetchContextSessions,
   fetchContextSnapshots,
+  fetchSynthConfigFiles,
+  saveSynthConfigFile,
   type CtxSnapshot,
+  type SynthConfigFiles,
 } from "@/lib/api"
+
+// Cost rates (USD per 1M input tokens). Used by the Wave D cost
+// estimator. Conservative defaults — model rates change; this is a
+// rough operator-orienting figure, not billing truth. Lookup is
+// model-name-substring; unknown falls back to GPT-5.5 ($5/M) since
+// most of the fleet runs on it.
+const COST_RATES_USD_PER_1M_INPUT: Array<{ match: RegExp; rate: number; label: string }> = [
+  { match: /gpt-5\.5-pro/i, rate: 30.0, label: "gpt-5.5-pro" },
+  { match: /gpt-5\.5/i, rate: 5.0, label: "gpt-5.5" },
+  { match: /gpt-5\.4-mini/i, rate: 0.4, label: "gpt-5.4-mini" },
+  { match: /gpt-5\.4/i, rate: 2.5, label: "gpt-5.4" },
+  { match: /claude-sonnet/i, rate: 3.0, label: "claude-sonnet" },
+  { match: /claude-haiku/i, rate: 1.0, label: "claude-haiku" },
+  { match: /gemini-3\.1-flash-lite/i, rate: 0.075, label: "gemini-3.1-flash-lite" },
+  { match: /gemini-3/i, rate: 0.3, label: "gemini-3" },
+  { match: /glm-5/i, rate: 1.4, label: "zai-glm-5" },
+]
+
+function lookupRate(model: string): { rate: number; label: string } {
+  for (const r of COST_RATES_USD_PER_1M_INPUT) {
+    if (r.match.test(model)) return { rate: r.rate, label: r.label }
+  }
+  return { rate: 5.0, label: "default (gpt-5.5)" }
+}
+
+const EDITABLE_FILES: Array<{ key: keyof SynthConfigFiles; filename: string; label: string; hint: string }> = [
+  { key: "soul_md", filename: "SOUL.md", label: "SOUL.md", hint: "Identity DNA — name, temperament, reaction rules" },
+  { key: "rules_md", filename: "RULES.md", label: "RULES.md", hint: "Behavior rules + hard NO list" },
+  { key: "heartbeat_md", filename: "HEARTBEAT.md", label: "HEARTBEAT.md", hint: "What synth checks on heartbeat tick" },
+  { key: "memory_md", filename: "MEMORY.md", label: "MEMORY.md", hint: "Long-term persistent notes" },
+  { key: "agents_md", filename: "AGENTS.md", label: "AGENTS.md", hint: "Coding-agent style guide for self-edits" },
+]
 
 // Context — per-turn breakdown of what's filling the LLM context for
 // the bound synth. Fetches from synth /api/context-snapshot through
@@ -169,6 +204,12 @@ export function ContextPage() {
         </Card>
       )}
 
+      {/* Workspace MD editor — Wave D. Independent of any session
+          being selected; always visible at the bottom of the page so
+          operators can edit identity/rules/heartbeat docs without
+          juggling tabs. */}
+      <ConfigEditor />
+
       {session && (
         <>
           <div className="flex items-center gap-2">
@@ -205,6 +246,17 @@ export function ContextPage() {
                     <div className="text-xs text-muted-foreground">
                       ~{humanBytes(Math.round(latest.total_bytes / 4))} tokens
                     </div>
+                    {(() => {
+                      const { rate, label } = lookupRate(latest.model ?? "")
+                      const tokens = Math.round(latest.total_bytes / 4)
+                      const cost = (tokens / 1_000_000) * rate
+                      return (
+                        <div className="text-xs mt-1">
+                          <span className="font-mono">${cost.toFixed(4)}</span>
+                          <span className="text-muted-foreground"> /turn @ {label}</span>
+                        </div>
+                      )
+                    })()}
                   </div>
                 </CardHeader>
                 <CardContent>
@@ -261,6 +313,7 @@ export function ContextPage() {
                 </CardContent>
               </Card>
 
+              {/* placeholder marker — history table follows */}
               {snaps && snaps.length > 1 && (
                 <Card>
                   <CardHeader>
@@ -305,5 +358,148 @@ export function ContextPage() {
         </>
       )}
     </div>
+  )
+}
+
+// ConfigEditor — Wave D. Lets the operator view + edit the 5 workspace
+// markdown files that the synth re-reads from disk on every turn
+// (SOUL.md / RULES.md / HEARTBEAT.md / MEMORY.md / AGENTS.md). The
+// synth side already exposes GET + POST /api/config gated to this
+// allow-list; this is just the UI surface.
+//
+// One file at a time, simple tab strip on top. Save button only
+// enabled when the textarea diverges from the loaded copy. Refresh
+// re-pulls the live disk state (useful after a synth-side edit
+// landed via heartbeat or self_edit).
+function ConfigEditor() {
+  const [files, setFiles] = useState<SynthConfigFiles | null>(null)
+  const [active, setActive] = useState<keyof SynthConfigFiles>("soul_md")
+  const [draft, setDraft] = useState<string>("")
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const [savedAt, setSavedAt] = useState<number | null>(null)
+
+  async function refresh() {
+    setLoading(true)
+    setErr(null)
+    try {
+      const f = await fetchSynthConfigFiles()
+      setFiles(f)
+      setDraft(f[active])
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { void refresh() }, [])
+
+  // Switching tabs loads the live file content into the draft.
+  useEffect(() => {
+    if (files) setDraft(files[active])
+  }, [active, files])
+
+  const dirty = files !== null && draft !== files[active]
+  const activeMeta = EDITABLE_FILES.find((f) => f.key === active)!
+
+  async function save() {
+    if (!files || !dirty) return
+    setSaving(true)
+    setErr(null)
+    try {
+      await saveSynthConfigFile(activeMeta.filename, draft)
+      // Optimistic update so dirty flag clears immediately.
+      setFiles({ ...files, [active]: draft })
+      setSavedAt(Date.now())
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const charCount = draft.length
+  const tokenEst = Math.round(charCount / 4)
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2">
+          <FileText className="h-4 w-4" />
+          Workspace docs
+        </CardTitle>
+        <p className="text-xs text-muted-foreground mt-1">
+          These files are read from the synth's <span className="font-mono">workspace/</span> dir
+          and re-injected into the LLM context on every turn. Changes apply on the next turn —
+          no restart needed.
+        </p>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3">
+        <div className="flex flex-wrap gap-1.5">
+          {EDITABLE_FILES.map((f) => {
+            const isActive = f.key === active
+            const isDirty = files !== null && f.key === active && draft !== files[f.key]
+            return (
+              <button
+                key={f.key}
+                onClick={() => setActive(f.key)}
+                className={`px-3 py-1.5 text-xs rounded-md border transition-colors ${
+                  isActive
+                    ? "bg-primary text-primary-foreground border-primary"
+                    : "bg-muted hover:bg-accent border-transparent"
+                }`}
+              >
+                <span className="font-mono">{f.label}</span>
+                {isDirty && <span className="ml-1 text-yellow-300">●</span>}
+              </button>
+            )
+          })}
+          <Button variant="outline" size="sm" onClick={refresh} disabled={loading || saving} className="ml-auto">
+            <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${loading ? "animate-spin" : ""}`} />
+            Reload
+          </Button>
+        </div>
+
+        <p className="text-xs text-muted-foreground -mt-1">{activeMeta.hint}</p>
+
+        {err && (
+          <Alert variant="destructive">
+            <AlertTriangle className="h-4 w-4" />
+            <AlertTitle>Failed</AlertTitle>
+            <AlertDescription>{err}</AlertDescription>
+          </Alert>
+        )}
+
+        <textarea
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          disabled={loading}
+          spellCheck={false}
+          className="w-full h-64 rounded-md border border-input bg-muted/40 px-3 py-2 text-sm font-mono leading-relaxed focus:outline-none focus:ring-2 focus:ring-ring focus:bg-background resize-y"
+          placeholder={loading ? "Loading…" : `${activeMeta.filename} is empty — type to start editing.`}
+        />
+
+        <div className="flex items-center justify-between text-xs">
+          <div className="text-muted-foreground font-mono tabular-nums">
+            {charCount.toLocaleString()} chars · ~{tokenEst.toLocaleString()} tokens
+            {dirty && <span className="text-yellow-400 ml-2">unsaved changes</span>}
+          </div>
+          <div className="flex items-center gap-2">
+            {savedAt && Date.now() - savedAt < 4000 && (
+              <span className="text-emerald-400 text-xs">saved ✓</span>
+            )}
+            <Button size="sm" onClick={save} disabled={!dirty || saving}>
+              {saving ? (
+                <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Saving…</>
+              ) : (
+                <><Save className="h-3.5 w-3.5 mr-1.5" />Save</>
+              )}
+            </Button>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
   )
 }
