@@ -1,15 +1,20 @@
-import { useEffect, useState, useMemo } from "react"
+import { useEffect, useMemo, useState } from "react"
 import {
   Card,
   CardContent,
-  CardHeader,
-  CardTitle,
 } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Input } from "@/components/ui/input"
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet"
 import {
   fetchSynthTools,
   toggleSynthTool,
@@ -18,37 +23,44 @@ import {
 import { toast } from "sonner"
 
 // SynthToolsPage — per-synth view of the LLM tools the paired synth's
-// container actually loads (memory, wiki, schedule, …). Differs from
-// the existing /tools page which lists COMPANION-side tools (bash,
-// fs, calendar — running on this Mac).
-//
-// The user can toggle individual tools off for THIS synth only.
-// Globally-disabled tools (operator-controlled) show a locked
-// indicator and the toggle is greyed out.
+// container actually loads. Replaces the old vertical 11-section
+// layout with a compact full-width grid + filter chips + Sheet drawer
+// for tool details. See atlas/18-companion.md Wave 13 for the design.
 
 // Capability-based grouping — mirrors the hub admin /instances/tools
-// page (openpaw-internal `tools/capabilities.go` policy). Same labels
-// as hub so an operator switching between the two surfaces sees the
-// identical bucket structure.
-const groupOrder: Array<{ key: string; title: string }> = [
-  { key: "mac", title: "Mac integration (remote_* / companion_*)" },
-  { key: "mobile", title: "iPhone (mobile_*)" },
-  { key: "spotify", title: "Spotify" },
-  { key: "post_to_channel", title: "Channel posting" },
-  { key: "identity", title: "Identity" },
-  { key: "wiki", title: "Wiki" },
-  { key: "memory", title: "Memory" },
-  { key: "media", title: "Media (send_*, image_*, etc)" },
-  { key: "web", title: "Web" },
-  { key: "self", title: "Self-edit / Workspace" },
-  { key: "skill", title: "User skills" },
-  { key: "other", title: "Other" },
+// page (openpaw-internal `tools/capabilities.go` policy).
+type CategoryKey =
+  | "all"
+  | "mac"
+  | "mobile"
+  | "spotify"
+  | "post_to_channel"
+  | "identity"
+  | "wiki"
+  | "memory"
+  | "media"
+  | "web"
+  | "self"
+  | "skill"
+  | "other"
+
+const categoryOrder: Array<{ key: CategoryKey; title: string; short: string }> = [
+  { key: "all", title: "All", short: "All" },
+  { key: "mac", title: "Mac integration (remote_* / companion_*)", short: "Mac" },
+  { key: "mobile", title: "iPhone (mobile_*)", short: "iPhone" },
+  { key: "spotify", title: "Spotify", short: "Spotify" },
+  { key: "post_to_channel", title: "Channel posting", short: "Channel" },
+  { key: "identity", title: "Identity", short: "Identity" },
+  { key: "wiki", title: "Wiki", short: "Wiki" },
+  { key: "memory", title: "Memory", short: "Memory" },
+  { key: "media", title: "Media (send_*, image_*, etc)", short: "Media" },
+  { key: "web", title: "Web", short: "Web" },
+  { key: "self", title: "Self-edit / Workspace", short: "Self-edit" },
+  { key: "skill", title: "User skills", short: "Skills" },
+  { key: "other", title: "Other", short: "Other" },
 ]
 
-function groupKey(t: SynthToolEntry): string {
-  // User skills override category — they're authored separately and
-  // operators usually want to see them as a distinct group regardless
-  // of what their tool name suggests.
+function categorize(t: SynthToolEntry): CategoryKey {
   if (t.source === "skill") return "skill"
   const name = t.name
   if (name.startsWith("remote_") || name.startsWith("companion_")) return "mac"
@@ -102,7 +114,10 @@ export function SynthToolsPage() {
   const [synthId, setSynthId] = useState<string>("")
   const [err, setErr] = useState<string | null>(null)
   const [filter, setFilter] = useState("")
+  const [activeCat, setActiveCat] = useState<CategoryKey>("all")
   const [busyTool, setBusyTool] = useState<string | null>(null)
+  const [busyGroup, setBusyGroup] = useState<boolean>(false)
+  const [openTool, setOpenTool] = useState<SynthToolEntry | null>(null)
 
   const load = async () => {
     try {
@@ -124,8 +139,6 @@ export function SynthToolsPage() {
     setBusyTool(t.name)
     try {
       await toggleSynthTool(t.name, next)
-      // Optimistic update — the synth's poller picks the change up
-      // within ~2 min, but the hub-side row is already correct.
       setTools((prev) =>
         prev
           ? prev.map((x) =>
@@ -133,12 +146,8 @@ export function SynthToolsPage() {
             )
           : prev,
       )
-      toast.success(
-        next ? `${t.name} disabled` : `${t.name} enabled`,
-        {
-          description: "Synth picks up the change on its next config poll (≤2 min).",
-        },
-      )
+      // Keep openTool in sync if the Sheet is showing this tool.
+      setOpenTool((cur) => (cur && cur.name === t.name ? { ...cur, disabled: next } : cur))
     } catch (e) {
       toast.error("Toggle failed", { description: String(e) })
     } finally {
@@ -146,19 +155,54 @@ export function SynthToolsPage() {
     }
   }
 
-  // Group-level batch toggle. Loops toggleSynthTool one-by-one through
-  // each non-locked tool in the group. Sequential rather than parallel
-  // so the hub's audit log keeps a clean ordering + we surface partial
-  // failures cleanly (a row that errors stops the rest).
-  const [busyGroup, setBusyGroup] = useState<string | null>(null)
-  const onBatchToggle = async (
-    groupKeyVal: string,
-    rows: SynthToolEntry[],
-    next: boolean,
-  ) => {
-    const actionable = rows.filter((t) => !t.disabled_global && t.disabled !== next)
+  // Counts per category — drive the chip labels + summary tile.
+  const countsByCat = useMemo(() => {
+    const out: Partial<Record<CategoryKey, number>> = { all: tools?.length ?? 0 }
+    if (tools) {
+      for (const t of tools) {
+        const k = categorize(t)
+        out[k] = (out[k] ?? 0) + 1
+      }
+    }
+    return out
+  }, [tools])
+
+  // Filtered view — applies search + category chip together.
+  const visible = useMemo(() => {
+    if (!tools) return []
+    const q = filter.trim().toLowerCase()
+    return tools.filter((t) => {
+      if (activeCat !== "all" && categorize(t) !== activeCat) return false
+      if (q) {
+        if (
+          !t.name.toLowerCase().includes(q) &&
+          !t.description.toLowerCase().includes(q)
+        ) {
+          return false
+        }
+      }
+      return true
+    })
+  }, [tools, filter, activeCat])
+
+  const stats = useMemo(() => {
+    if (!tools) return { total: 0, disabled: 0, locked: 0 }
+    let disabled = 0
+    let locked = 0
+    for (const t of tools) {
+      if (t.disabled) disabled++
+      if (t.disabled_global) locked++
+    }
+    return { total: tools.length, disabled, locked }
+  }, [tools])
+
+  // Batch toggle over the *currently visible* subset (filter + category).
+  const onBatchToggle = async (next: boolean) => {
+    const actionable = visible.filter(
+      (t) => !t.disabled_global && t.disabled !== next,
+    )
     if (actionable.length === 0) return
-    setBusyGroup(groupKeyVal)
+    setBusyGroup(true)
     let ok = 0
     let firstErr: string | null = null
     for (const t of actionable) {
@@ -177,49 +221,16 @@ export function SynthToolsPage() {
         break
       }
     }
-    setBusyGroup(null)
+    setBusyGroup(false)
     if (firstErr) {
-      toast.error(`Group toggle stopped after ${ok} ok`, { description: firstErr })
+      toast.error(`Batch stopped after ${ok} ok`, { description: firstErr })
     } else {
       toast.success(
-        next
-          ? `Disabled ${ok} tools in group`
-          : `Enabled ${ok} tools in group`,
+        next ? `Disabled ${ok} tools` : `Enabled ${ok} tools`,
         { description: "Synth picks up changes on next config poll (≤2 min)." },
       )
     }
   }
-
-  const filtered = useMemo(() => {
-    if (!tools) return []
-    const q = filter.trim().toLowerCase()
-    if (!q) return tools
-    return tools.filter(
-      (t) =>
-        t.name.toLowerCase().includes(q) ||
-        t.description.toLowerCase().includes(q),
-    )
-  }, [tools, filter])
-
-  const grouped = useMemo(() => {
-    const out: Record<string, SynthToolEntry[]> = {}
-    for (const t of filtered) {
-      const k = groupKey(t)
-      ;(out[k] ??= []).push(t)
-    }
-    return out
-  }, [filtered])
-
-  const stats = useMemo(() => {
-    if (!tools) return { total: 0, disabled: 0, locked: 0 }
-    let disabled = 0
-    let locked = 0
-    for (const t of tools) {
-      if (t.disabled) disabled++
-      if (t.disabled_global) locked++
-    }
-    return { total: tools.length, disabled, locked }
-  }, [tools])
 
   if (err && !tools) {
     return (
@@ -233,31 +244,33 @@ export function SynthToolsPage() {
     return <div className="text-sm text-muted-foreground">Loading…</div>
   }
 
-  return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Synth Tools</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          The LLM tools the paired synth's container loads. Toggle a tool off
-          to hide it from this synth's prompt — saves context + prevents the
-          model from calling it. Operator-locked (globally disabled) tools
-          are shown but can't be re-enabled here.
-        </p>
-        {synthId && (
-          <p className="text-xs text-muted-foreground mt-2">
-            Paired with <code className="font-mono">{synthId}</code>
-          </p>
-        )}
-      </div>
+  const activeMeta = categoryOrder.find((c) => c.key === activeCat)!
+  const enabledInView = visible.filter((t) => !t.disabled && !t.disabled_global).length
+  const disabledInView = visible.filter((t) => t.disabled && !t.disabled_global).length
 
-      <div className="grid grid-cols-3 gap-3">
-        <SummaryTile label="Tools loaded" value={stats.total} />
-        <SummaryTile
-          label="Disabled (effective)"
-          value={stats.disabled}
-          danger={stats.disabled > 0}
-        />
-        <SummaryTile label="Locked by operator" value={stats.locked} />
+  return (
+    <div className="w-full max-w-none space-y-4 px-4">
+      <div className="flex items-baseline justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Synth Tools</h1>
+          {synthId && (
+            <p className="text-xs text-muted-foreground mt-1">
+              Paired with <code className="font-mono">{synthId}</code> · click any cell for description + schema
+            </p>
+          )}
+        </div>
+        <div className="flex items-center gap-3 text-sm tabular-nums">
+          <span className="text-muted-foreground">Total</span>
+          <span className="font-semibold text-lg">{stats.total}</span>
+          <span className="text-muted-foreground ml-3">Disabled</span>
+          <span className="font-semibold text-lg text-destructive">{stats.disabled}</span>
+          {stats.locked > 0 && (
+            <>
+              <span className="text-muted-foreground ml-3">Locked</span>
+              <span className="font-semibold text-lg">{stats.locked}</span>
+            </>
+          )}
+        </div>
       </div>
 
       <Input
@@ -267,109 +280,162 @@ export function SynthToolsPage() {
         className="max-w-md"
       />
 
-      {tools.length === 0 && (
+      <div className="flex flex-wrap items-center gap-1.5">
+        {categoryOrder.map(({ key, short }) => {
+          if (key !== "all" && (countsByCat[key] ?? 0) === 0) return null
+          const isActive = activeCat === key
+          const count = countsByCat[key] ?? 0
+          return (
+            <button
+              key={key}
+              onClick={() => setActiveCat(key)}
+              className={`px-2.5 py-1 text-xs rounded-md border transition-colors ${
+                isActive
+                  ? "bg-primary text-primary-foreground border-primary"
+                  : "bg-muted hover:bg-accent border-transparent"
+              }`}
+            >
+              {short} <span className={isActive ? "opacity-80" : "text-muted-foreground"}>· {count}</span>
+            </button>
+          )
+        })}
+        {activeCat !== "all" && (
+          <div className="ml-auto flex items-center gap-2">
+            <span className="text-xs text-muted-foreground tabular-nums">
+              {enabledInView} on · {disabledInView} off
+            </span>
+            <Button
+              variant="destructive"
+              size="sm"
+              disabled={busyGroup || enabledInView === 0}
+              onClick={() => {
+                if (
+                  window.confirm(
+                    `Disable all ${enabledInView} enabled tools in "${activeMeta.title}" on this synth?`,
+                  )
+                ) {
+                  void onBatchToggle(true)
+                }
+              }}
+            >
+              Disable all
+            </Button>
+            <Button
+              variant="default"
+              size="sm"
+              disabled={busyGroup || disabledInView === 0}
+              onClick={() => void onBatchToggle(false)}
+            >
+              Enable all
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {visible.length === 0 && (
         <Alert>
-          <AlertTitle>No tools yet</AlertTitle>
+          <AlertTitle>No tools match</AlertTitle>
           <AlertDescription>
-            The synth hasn't reported its catalog. This usually means the
-            synth is restarting — give it ~10 seconds and reload.
+            {tools.length === 0
+              ? "The synth hasn't reported its catalog. This usually means the synth is restarting — give it ~10 seconds and reload."
+              : "Try a different filter or category."}
           </AlertDescription>
         </Alert>
       )}
 
-      {groupOrder.map(({ key, title }) => {
-        const rows = grouped[key]
-        if (!rows || rows.length === 0) return null
-        const enabledCount = rows.filter(
-          (t) => !t.disabled && !t.disabled_global,
-        ).length
-        const disabledHereCount = rows.filter(
-          (t) => t.disabled && !t.disabled_global,
-        ).length
-        const lockedCount = rows.filter((t) => t.disabled_global).length
-        const groupBusy = busyGroup === key
-        return (
-          <div key={key} className="space-y-3">
-            <div className="flex items-center justify-between gap-3 rounded-md border bg-muted/40 px-3 py-2">
-              <div>
-                <h2 className="text-sm font-semibold tracking-tight text-foreground">
-                  {title}
-                </h2>
-                <p className="text-xs text-muted-foreground mt-0.5 tabular-nums">
-                  {enabledCount} enabled · {disabledHereCount} off · {lockedCount > 0 ? `${lockedCount} locked · ` : ""}{rows.length} total
-                </p>
-              </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <Button
-                  variant="destructive"
-                  size="sm"
-                  disabled={groupBusy || enabledCount === 0}
-                  onClick={() => {
-                    if (
-                      window.confirm(
-                        `Disable all ${enabledCount} enabled tools in "${title}" on this synth?`,
-                      )
-                    ) {
-                      void onBatchToggle(key, rows, true)
-                    }
-                  }}
-                >
-                  Disable all
-                </Button>
-                <Button
-                  variant="default"
-                  size="sm"
-                  disabled={groupBusy || disabledHereCount === 0}
-                  onClick={() => void onBatchToggle(key, rows, false)}
-                >
-                  Enable all
-                </Button>
-              </div>
-            </div>
-            <div className="grid grid-cols-1 gap-3">
-              {rows.map((t) => (
-                <ToolRow
-                  key={t.name}
-                  tool={t}
-                  busy={busyTool === t.name || groupBusy}
-                  onToggle={(next) => onToggle(t, next)}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2">
+        {visible.map((t) => (
+          <ToolCell
+            key={t.name}
+            tool={t}
+            busy={busyTool === t.name || busyGroup}
+            onToggle={(next) => onToggle(t, next)}
+            onOpen={() => setOpenTool(t)}
+          />
+        ))}
+      </div>
+
+      <Sheet open={!!openTool} onOpenChange={(o) => !o && setOpenTool(null)}>
+        <SheetContent>
+          {openTool && (
+            <>
+              <SheetHeader>
+                <SheetTitle>{openTool.name}</SheetTitle>
+                <SheetDescription>
+                  <div className="flex flex-wrap items-center gap-2 mt-1">
+                    <Badge variant="outline" className="text-xs">{openTool.source}</Badge>
+                    {openTool.scope && (
+                      <Badge variant="outline" className="text-xs">scope: {openTool.scope}</Badge>
+                    )}
+                    {openTool.disabled_global && (
+                      <Badge variant="destructive">locked by operator</Badge>
+                    )}
+                    {openTool.active_variant && (
+                      <Badge variant="secondary">variant: {openTool.active_variant}</Badge>
+                    )}
+                  </div>
+                </SheetDescription>
+              </SheetHeader>
+
+              <div className="flex items-center justify-between gap-3 border rounded-md px-3 py-2 bg-muted/40">
+                <div className="text-sm">
+                  {openTool.disabled
+                    ? "Disabled on this synth"
+                    : openTool.disabled_global
+                      ? "Globally disabled by operator"
+                      : "Enabled"}
+                </div>
+                <Switch
+                  checked={!openTool.disabled}
+                  onCheckedChange={(checked) => onToggle(openTool, !checked)}
+                  disabled={openTool.disabled_global || busyTool === openTool.name}
+                  aria-label={`Toggle ${openTool.name}`}
                 />
-              ))}
-            </div>
-          </div>
-        )
-      })}
+              </div>
+
+              <div className="flex-1 overflow-y-auto space-y-4">
+                <div>
+                  <h3 className="text-xs uppercase tracking-wide text-muted-foreground font-medium mb-1.5">Description</h3>
+                  <p className="text-sm leading-relaxed whitespace-pre-wrap">{openTool.description}</p>
+                </div>
+                <div>
+                  <h3 className="text-xs uppercase tracking-wide text-muted-foreground font-medium mb-1.5">Parameters (JSON Schema)</h3>
+                  <pre className="bg-muted/50 rounded p-2 overflow-x-auto text-[11px] leading-snug">
+                    {JSON.stringify(openTool.parameters, null, 2)}
+                  </pre>
+                </div>
+              </div>
+            </>
+          )}
+        </SheetContent>
+      </Sheet>
     </div>
   )
 }
 
-function ToolRow({
+function ToolCell({
   tool,
   busy,
   onToggle,
+  onOpen,
 }: {
   tool: SynthToolEntry
   busy: boolean
   onToggle: (next: boolean) => void
+  onOpen: () => void
 }) {
-  const [showSchema, setShowSchema] = useState(false)
   const dimmed = tool.disabled || tool.disabled_global
-
+  const cat = categorize(tool)
+  const catShort = categoryOrder.find((c) => c.key === cat)?.short ?? cat
   return (
-    <Card className={dimmed ? "opacity-70" : ""}>
-      <CardHeader className="pb-3">
-        <CardTitle className="flex items-center justify-between gap-3 text-sm font-mono">
-          <span className="truncate">{tool.name}</span>
-          <div className="flex items-center gap-2 shrink-0">
-            {tool.disabled_global && (
-              <Badge variant="destructive">locked by operator</Badge>
-            )}
-            {tool.active_variant && (
-              <Badge variant="secondary">variant: {tool.active_variant}</Badge>
-            )}
-            <Badge variant="outline" className="text-xs">
-              {tool.source}
-            </Badge>
+    <Card
+      className={`relative cursor-pointer transition-colors hover:bg-accent/40 ${dimmed ? "opacity-60" : ""}`}
+      onClick={onOpen}
+    >
+      <CardContent className="p-3 flex flex-col gap-1.5">
+        <div className="flex items-start justify-between gap-2">
+          <span className="font-mono text-xs font-semibold leading-tight break-all">{tool.name}</span>
+          <div onClick={(e) => e.stopPropagation()}>
             <Switch
               checked={!tool.disabled}
               onCheckedChange={(checked) => onToggle(!checked)}
@@ -377,56 +443,16 @@ function ToolRow({
               aria-label={`Toggle ${tool.name}`}
             />
           </div>
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="text-xs text-muted-foreground space-y-2">
-        <p className="leading-relaxed">{tool.description}</p>
-        <div className="flex items-center gap-3 pt-1">
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-6 px-2 text-xs"
-            onClick={() => setShowSchema((v) => !v)}
-          >
-            {showSchema ? "Hide" : "Show"} schema
-          </Button>
-          {tool.scope && (
-            <span className="text-xs">
-              scope: <code className="font-mono">{tool.scope}</code>
-            </span>
+        </div>
+        <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+          <span className="font-medium">{catShort}</span>
+          {tool.disabled_global && (
+            <Badge variant="destructive" className="text-[9px] px-1 py-0">locked</Badge>
+          )}
+          {tool.active_variant && (
+            <Badge variant="secondary" className="text-[9px] px-1 py-0">{tool.active_variant}</Badge>
           )}
         </div>
-        {showSchema && (
-          <pre className="bg-muted/50 rounded p-2 overflow-x-auto text-[11px] leading-snug">
-            {JSON.stringify(tool.parameters, null, 2)}
-          </pre>
-        )}
-      </CardContent>
-    </Card>
-  )
-}
-
-function SummaryTile({
-  label,
-  value,
-  danger,
-}: {
-  label: string
-  value: number
-  danger?: boolean
-}) {
-  return (
-    <Card>
-      <CardContent className="pt-6">
-        <div
-          className={
-            "text-3xl font-semibold tracking-tight " +
-            (danger ? "text-destructive" : "")
-          }
-        >
-          {value}
-        </div>
-        <div className="text-xs text-muted-foreground mt-1">{label}</div>
       </CardContent>
     </Card>
   )
