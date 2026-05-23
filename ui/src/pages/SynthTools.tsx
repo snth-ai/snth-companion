@@ -60,6 +60,35 @@ const categoryOrder: Array<{ key: CategoryKey; title: string; short: string }> =
   { key: "other", title: "Other", short: "Other" },
 ]
 
+// estimateToolTokens approximates how much LLM context this tool's
+// schema burns. The synth's ForLLM serializes each tool as
+// `{"type":"function","function":{"name":..,"description":..,
+// "parameters":..}}` — we model that envelope (~30 chars) + the
+// three variable fields, then divide by ~4 chars/token (Anthropic
+// + OpenAI tokenizers land near that for English/JSON).
+//
+// Not exact (real tokenization varies per provider and per locale),
+// but it's the same chars/4 heuristic the Context tab uses for
+// total-context cost — operators get a consistent picture across
+// the two surfaces.
+function estimateToolTokens(t: SynthToolEntry): number {
+  let bytes = 30 // {"type":"function","function":{...}} envelope
+  bytes += t.name.length + 12 // "name": "..."
+  bytes += t.description.length + 18 // "description": "..."
+  try {
+    const params = typeof t.parameters === "string" ? t.parameters : JSON.stringify(t.parameters ?? {})
+    bytes += params.length + 17 // "parameters": ...
+  } catch {
+    // ignore — parameters unparseable, skip
+  }
+  return Math.max(1, Math.round(bytes / 4))
+}
+
+function fmtTok(n: number): string {
+  if (n < 1000) return `${n} tok`
+  return `${(n / 1000).toFixed(1)}K tok`
+}
+
 function categorize(t: SynthToolEntry): CategoryKey {
   if (t.source === "skill") return "skill"
   const name = t.name
@@ -186,14 +215,19 @@ export function SynthToolsPage() {
   }, [tools, filter, activeCat])
 
   const stats = useMemo(() => {
-    if (!tools) return { total: 0, disabled: 0, locked: 0 }
+    if (!tools) return { total: 0, disabled: 0, locked: 0, activeTokens: 0, totalTokens: 0 }
     let disabled = 0
     let locked = 0
+    let activeTokens = 0 // tokens of tools currently sent to LLM (not disabled, not locked)
+    let totalTokens = 0
     for (const t of tools) {
+      const tok = estimateToolTokens(t)
+      totalTokens += tok
       if (t.disabled) disabled++
       if (t.disabled_global) locked++
+      if (!t.disabled && !t.disabled_global) activeTokens += tok
     }
-    return { total: tools.length, disabled, locked }
+    return { total: tools.length, disabled, locked, activeTokens, totalTokens }
   }, [tools])
 
   // Batch toggle over the *currently visible* subset (filter + category).
@@ -247,6 +281,10 @@ export function SynthToolsPage() {
   const activeMeta = categoryOrder.find((c) => c.key === activeCat)!
   const enabledInView = visible.filter((t) => !t.disabled && !t.disabled_global).length
   const disabledInView = visible.filter((t) => t.disabled && !t.disabled_global).length
+  const activeTokensInView = visible.reduce(
+    (acc, t) => acc + (!t.disabled && !t.disabled_global ? estimateToolTokens(t) : 0),
+    0,
+  )
 
   return (
     <div className="w-full max-w-none space-y-4 px-4">
@@ -270,6 +308,13 @@ export function SynthToolsPage() {
               <span className="font-semibold text-lg">{stats.locked}</span>
             </>
           )}
+          <span
+            className="text-muted-foreground ml-3"
+            title={`Active schema tokens (per cache-prefix write). Total inc. disabled: ${fmtTok(stats.totalTokens)}. Estimated via chars/4 heuristic — see Context tab for full breakdown.`}
+          >
+            Schema
+          </span>
+          <span className="font-semibold text-lg">{fmtTok(stats.activeTokens)}</span>
         </div>
       </div>
 
@@ -302,7 +347,7 @@ export function SynthToolsPage() {
         {activeCat !== "all" && (
           <div className="ml-auto flex items-center gap-2">
             <span className="text-xs text-muted-foreground tabular-nums">
-              {enabledInView} on · {disabledInView} off
+              {enabledInView} on · {disabledInView} off · {fmtTok(activeTokensInView)}
             </span>
             <Button
               variant="destructive"
@@ -427,6 +472,7 @@ function ToolCell({
   const dimmed = tool.disabled || tool.disabled_global
   const cat = categorize(tool)
   const catShort = categoryOrder.find((c) => c.key === cat)?.short ?? cat
+  const tokens = estimateToolTokens(tool)
   return (
     <Card
       className={`relative cursor-pointer transition-colors hover:bg-accent/40 ${dimmed ? "opacity-60" : ""}`}
@@ -444,14 +490,22 @@ function ToolCell({
             />
           </div>
         </div>
-        <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-          <span className="font-medium">{catShort}</span>
-          {tool.disabled_global && (
-            <Badge variant="destructive" className="text-[9px] px-1 py-0">locked</Badge>
-          )}
-          {tool.active_variant && (
-            <Badge variant="secondary" className="text-[9px] px-1 py-0">{tool.active_variant}</Badge>
-          )}
+        <div className="flex items-center justify-between gap-1.5 text-[10px] text-muted-foreground">
+          <div className="flex items-center gap-1.5">
+            <span className="font-medium">{catShort}</span>
+            {tool.disabled_global && (
+              <Badge variant="destructive" className="text-[9px] px-1 py-0">locked</Badge>
+            )}
+            {tool.active_variant && (
+              <Badge variant="secondary" className="text-[9px] px-1 py-0">{tool.active_variant}</Badge>
+            )}
+          </div>
+          <span
+            className={`tabular-nums font-mono ${dimmed ? "" : "text-muted-foreground"}`}
+            title={`~${tokens} schema tokens in cache prefix per LLM call (chars/4 estimate)`}
+          >
+            {fmtTok(tokens)}
+          </span>
         </div>
       </CardContent>
     </Card>
