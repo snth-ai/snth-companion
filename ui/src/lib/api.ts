@@ -405,6 +405,46 @@ export const toggleMCPServer = (id: number) =>
 export const fetchMCPOAuthURL = (id: number) =>
   getJSON<{ url: string }>(`/api/hub/mcp/servers/${id}/oauth-url`)
 
+// --- runtime skills (v0.5.55+, proxied to hub /api/my/skills) -------
+
+export type SkillView = {
+  name: string
+  source: "baked" | "runtime"
+  dir: string
+  manifest_json: string
+  script_name: string
+  script_content: string
+  skill_md: string
+  has_manifest: boolean
+  manifest_error?: string
+}
+
+export type SkillListResponse = {
+  skills: SkillView[]
+  runtime_dir: string
+  baked_dir: string
+}
+
+export const fetchSkills = () =>
+  getJSON<SkillListResponse>("/api/hub/skills")
+
+export type SkillUpsertPayload = {
+  name: string
+  manifest_json: string
+  script_name?: string
+  script_content?: string
+  skill_md?: string
+}
+
+export const upsertSkill = (body: SkillUpsertPayload) =>
+  postJSON<{ status: string; name: string }>("/api/hub/skills/upsert", body)
+
+export const deleteSkill = (name: string) =>
+  postJSON<{ status: string }>("/api/hub/skills/delete", { name })
+
+export const reloadSkills = () =>
+  postJSON<{ status: string; count?: number }>("/api/hub/skills/reload", {})
+
 // --- mini-apps (Wave 9 — synth-authored apps proxied through the hub)
 
 export type MiniAppManifest = {

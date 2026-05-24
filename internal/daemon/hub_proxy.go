@@ -79,6 +79,14 @@ func (s *UIServer) registerHubProxies(mux *http.ServeMux) {
 	// (PATCH/DELETE/toggle/oauth-url).
 	proxy("/api/hub/mcp/servers", "/api/my/mcp/servers")
 	s.registerHubProxyPrefix(mux, "/api/hub/mcp/servers/", "/api/my/mcp/servers/")
+
+	// Runtime skills (v0.5.55+, paired with openpaw v0.3.81+). The
+	// user authors / edits / reloads custom skills (manifest + script)
+	// from the Skills tab. JSON pass-through.
+	proxy("/api/hub/skills", "/api/my/skills")
+	proxy("/api/hub/skills/upsert", "/api/my/skills/upsert")
+	proxy("/api/hub/skills/delete", "/api/my/skills/delete")
+	proxy("/api/hub/skills/reload", "/api/my/skills/reload")
 }
 
 // registerHubProxyPrefix wires a directory-style proxy that preserves

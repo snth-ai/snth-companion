@@ -25,6 +25,7 @@ import { SynthSettingsPage } from "@/pages/SynthSettings"
 import { PublicPage } from "@/pages/Public"
 import { PlacesPage } from "@/pages/Places"
 import { MCPPage } from "@/pages/MCP"
+import { SkillsPage } from "@/pages/Skills"
 import { Toaster } from "@/components/ui/sonner"
 
 // HashRouter (not BrowserRouter) so in-page navigation never triggers
@@ -62,6 +63,7 @@ export default function App() {
             <Route path="public" element={<PublicPage />} />
             <Route path="places" element={<PlacesPage />} />
             <Route path="mcp" element={<MCPPage />} />
+            <Route path="skills" element={<SkillsPage />} />
           </Route>
         </Routes>
       </HashRouter>
