@@ -72,6 +72,13 @@ func (s *UIServer) registerHubProxies(mux *http.ServeMux) {
 	proxy("/api/hub/task-templates", "/api/my/task-templates")
 	s.registerHubProxyPrefix(mux, "/api/hub/task-templates/", "/api/my/task-templates/")
 	proxy("/api/hub/task-event", "/api/my/task-event")
+
+	// MCP servers (v0.5.55+, paired with openpaw v0.5.55). The user
+	// adds Notion / Linear / Gmail / filesystem / custom MCP servers
+	// to their synth from the MCP tab. Collection + per-id routes
+	// (PATCH/DELETE/toggle/oauth-url).
+	proxy("/api/hub/mcp/servers", "/api/my/mcp/servers")
+	s.registerHubProxyPrefix(mux, "/api/hub/mcp/servers/", "/api/my/mcp/servers/")
 }
 
 // registerHubProxyPrefix wires a directory-style proxy that preserves

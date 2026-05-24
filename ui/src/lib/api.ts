@@ -335,6 +335,76 @@ export const toggleSynthTool = (tool: string, disabled: boolean) =>
     { tool, disabled },
   )
 
+// --- MCP servers (v0.5.55+, proxied to hub /api/my/mcp/servers) -----
+
+export type MCPServerView = {
+  id: number
+  name: string
+  transport: "stdio" | "http" | "sse" | "http_oauth"
+  scope: "instance" | "global"
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  url?: string
+  has_static_token?: boolean
+  has_oauth_token?: boolean
+  oauth_auth_url?: string
+  oauth_token_url?: string
+  oauth_client_id?: string
+  oauth_scopes?: string
+  oauth_expires_at?: string
+  enabled: boolean
+  last_status?: string
+  last_status_at?: string
+  editable: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type MCPServerPayload = {
+  name?: string
+  transport?: "stdio" | "http" | "sse" | "http_oauth"
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  url?: string
+  static_token?: string
+  oauth_auth_url?: string
+  oauth_token_url?: string
+  oauth_client_id?: string
+  oauth_client_secret?: string
+  oauth_scopes?: string
+  enabled?: boolean
+}
+
+export const fetchMCPServers = async (): Promise<MCPServerView[]> => {
+  const r = await getJSON<{ servers: MCPServerView[] }>("/api/hub/mcp/servers")
+  return r.servers ?? []
+}
+
+export const createMCPServer = (body: MCPServerPayload) =>
+  postJSON<MCPServerView>("/api/hub/mcp/servers", body)
+
+export const updateMCPServer = async (id: number, body: MCPServerPayload) => {
+  const r = await fetch(`/api/hub/mcp/servers/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  })
+  return jsonOrThrow<MCPServerView>(r)
+}
+
+export const deleteMCPServer = async (id: number) => {
+  const r = await fetch(`/api/hub/mcp/servers/${id}`, { method: "DELETE" })
+  return jsonOrThrow<{ status: string }>(r)
+}
+
+export const toggleMCPServer = (id: number) =>
+  postJSON<MCPServerView>(`/api/hub/mcp/servers/${id}/toggle`, {})
+
+export const fetchMCPOAuthURL = (id: number) =>
+  getJSON<{ url: string }>(`/api/hub/mcp/servers/${id}/oauth-url`)
+
 // --- mini-apps (Wave 9 — synth-authored apps proxied through the hub)
 
 export type MiniAppManifest = {
