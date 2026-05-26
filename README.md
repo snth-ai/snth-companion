@@ -46,7 +46,7 @@ Synth (Hetzner) ─tool call─> Companion (user's Mac)
 | Tool | Waveset | Danger | Description |
 |------|---------|--------|-------------|
 | `remote_bash`               | 1 | prompt        | `bash -c` in sandbox. Accepts `cmd`/`command` + `cwd`/`dir` aliases. |
-| `remote_fs_read`            | 1 | prompt        | 2 MiB cap. Binary → base64. Tilde expansion. |
+| `remote_fs_read`            | 1 | prompt        | 2 MiB cap per call. Optional `offset`/`length` for range reads (2026-05-26) — synth-side `companion_copy_to_workspace` stitches >2 MiB files in 2 MiB chunks. Binary → base64. Tilde expansion. |
 | `remote_fs_write`           | 1 | prompt        | Atomic (temp + rename). 4 MiB cap. |
 | `remote_fs_list`            | 1 | safe          | Sorted entries. |
 | `remote_shortcut`           | 1 | prompt        | `shortcuts run "<name>"`. Session-scoped approval cache. |

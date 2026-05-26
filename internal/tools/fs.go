@@ -47,15 +47,28 @@ const (
 
 type fsReadArgs struct {
 	Path string `json:"path"`
+	// Optional range read. When Length > 0, returns up to Length bytes
+	// starting at Offset; clamped to fsMaxReadBytes per call. Added
+	// 2026-05-26 so the synth's companion_copy_to_workspace can stitch
+	// >2 MiB files (Instagram reels, podcasts) by issuing N range reads.
+	// Old clients omit both → behavior identical to the legacy single
+	// 2 MiB-cap read. Result.Size is always the FULL file size; the
+	// caller compares len(decoded) vs Size to know whether to chunk on.
+	Offset int64 `json:"offset,omitempty"`
+	Length int64 `json:"length,omitempty"`
 }
 
 type fsReadResult struct {
-	Path     string `json:"path"`
-	Content  string `json:"content"`
-	Encoding string `json:"encoding"` // "utf-8" | "base64"
-	Size     int64  `json:"size"`
-	Mtime    time.Time `json:"mtime"`
-	Truncated bool  `json:"truncated,omitempty"`
+	Path      string    `json:"path"`
+	Content   string    `json:"content"`
+	Encoding  string    `json:"encoding"` // "utf-8" | "base64"
+	Size      int64     `json:"size"`     // total file size, not bytes returned
+	Mtime     time.Time `json:"mtime"`
+	Truncated bool      `json:"truncated,omitempty"`
+	// Range-read echo so the caller doesn't have to track per-request
+	// state — set whenever a non-default range was honored.
+	Offset int64 `json:"offset,omitempty"`
+	Bytes  int   `json:"bytes,omitempty"` // bytes actually returned in Content (post-decode)
 }
 
 func fsReadHandler(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -82,6 +95,56 @@ func fsReadHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 	defer f.Close()
 
 	size := info.Size()
+
+	// Range path: caller asked for a specific window. Clamp length to
+	// fsMaxReadBytes so the WS frame stays healthy. truncated=false in
+	// this path — it's an explicit slice, not silent truncation.
+	if a.Length > 0 {
+		if a.Offset < 0 {
+			return nil, fmt.Errorf("offset must be >= 0, got %d", a.Offset)
+		}
+		if a.Offset > size {
+			return nil, fmt.Errorf("offset %d past file size %d", a.Offset, size)
+		}
+		length := a.Length
+		if length > fsMaxReadBytes {
+			length = fsMaxReadBytes
+		}
+		if a.Offset+length > size {
+			length = size - a.Offset
+		}
+		if _, err := f.Seek(a.Offset, 0); err != nil {
+			return nil, fmt.Errorf("seek: %w", err)
+		}
+		buf := make([]byte, length)
+		n, err := f.Read(buf)
+		if err != nil && err.Error() != "EOF" {
+			return nil, fmt.Errorf("read: %w", err)
+		}
+		buf = buf[:n]
+		result := fsReadResult{
+			Path:   p,
+			Size:   size,
+			Mtime:  info.ModTime(),
+			Offset: a.Offset,
+			Bytes:  n,
+		}
+		// Range reads are almost always binary slices; only call them
+		// utf-8 if the slice itself is valid and starts/ends at byte
+		// boundaries. Cheapest correct rule: utf-8 only at offset 0
+		// AND the slice is the whole file AND valid utf-8.
+		if a.Offset == 0 && int64(n) == size && utf8.Valid(buf) {
+			result.Encoding = "utf-8"
+			result.Content = string(buf)
+		} else {
+			result.Encoding = "base64"
+			result.Content = base64.StdEncoding.EncodeToString(buf)
+		}
+		return result, nil
+	}
+
+	// Legacy single-shot path — unchanged: read up to 2 MiB, mark
+	// truncated when the file is bigger. Old synths rely on this.
 	readCap := size
 	truncated := false
 	if readCap > fsMaxReadBytes {
@@ -100,6 +163,7 @@ func fsReadHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 		Size:      size,
 		Mtime:     info.ModTime(),
 		Truncated: truncated,
+		Bytes:     n,
 	}
 	if utf8.Valid(buf) {
 		result.Encoding = "utf-8"
