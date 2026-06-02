@@ -1380,11 +1380,15 @@ export const approveOutbound = async (
   id: number,
   approver: string,
   finalText?: string,
+  force = false,
 ): Promise<{ ok: boolean; id: number }> => {
+  // force=true → backend bypasses the per-channel cooldown + daily cap and
+  // dispatches on the next tick (~8s). See openpaw mia_public.handleOutboundApprove (#106).
   const r = await synthFetch<{ ok: boolean; id: number }>(`/api/outbound/approve`, "POST", {
     id,
     approver,
     final_text: finalText ?? "",
+    force,
   })
   if (!r.ok) throw new Error(`synth HTTP ${r.status}`)
   return r.body

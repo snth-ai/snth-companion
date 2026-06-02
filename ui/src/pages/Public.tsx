@@ -45,7 +45,7 @@ import {
 } from "@/lib/api"
 import { toast } from "sonner"
 import {
-  Users, MessageSquare, Send, Clock, AlertCircle, Trash2,
+  Users, MessageSquare, Send, Clock, AlertCircle, Trash2, Zap,
   Image, Video, FileText, Mic, Music, Smile, Film, BarChart3, LayoutGrid,
 } from "lucide-react"
 
@@ -81,10 +81,10 @@ export function PublicPage() {
     return () => clearInterval(t)
   }, [])
 
-  const handleApprove = async (id: number, finalText?: string) => {
+  const handleApprove = async (id: number, finalText?: string, force = false) => {
     try {
-      await approveOutbound(id, "operator", finalText)
-      toast.success("Approved — will send within ~8s")
+      await approveOutbound(id, "operator", finalText, force)
+      toast.success(force ? "Posting now — bypassing cooldown (~8s)" : "Approved — will send within ~8s")
       await load()
     } catch (e) {
       toast.error(String((e as Error).message ?? e))
@@ -426,7 +426,7 @@ function PendingCard({
   onReject,
 }: {
   p: PendingOutbound
-  onApprove: (id: number, finalText?: string) => void
+  onApprove: (id: number, finalText?: string, force?: boolean) => void
   onReject: (id: number) => void
 }) {
   const [editing, setEditing] = useState(false)
@@ -477,6 +477,14 @@ function PendingCard({
               <Button size="sm" onClick={() => onApprove(p.id)}>
                 <Send className="w-4 h-4 mr-1" /> Send as-is
               </Button>
+              <Button
+                size="sm"
+                variant="destructive"
+                title="Bypass the channel cooldown + daily cap and post on the next tick (~8s)"
+                onClick={() => onApprove(p.id, undefined, true)}
+              >
+                <Zap className="w-4 h-4 mr-1" /> Post now
+              </Button>
               <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
                 Edit
               </Button>
@@ -493,6 +501,14 @@ function PendingCard({
             <>
               <Button size="sm" onClick={() => onApprove(p.id, text)}>
                 Send edited
+              </Button>
+              <Button
+                size="sm"
+                variant="destructive"
+                title="Bypass the channel cooldown + daily cap and post the edited text on the next tick (~8s)"
+                onClick={() => onApprove(p.id, text, true)}
+              >
+                <Zap className="w-4 h-4 mr-1" /> Post now
               </Button>
               <Button
                 size="sm"
