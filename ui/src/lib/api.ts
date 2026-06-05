@@ -771,6 +771,58 @@ export const fetchMemoryList = (
 export const deleteMemory = (id: string) =>
   synthFetch(`/api/memory/delete?id=${encodeURIComponent(id)}`, "POST")
 
+// --- Durable facts + journal (2026-06 memory redesign) ---
+
+export type FactItem = {
+  id: number
+  text: string
+  kind: string
+  occurred_at: string
+  project_id: string
+  source: string
+  confidence: number
+  created_at: string
+}
+export type FactsListResponse = {
+  facts: FactItem[]
+  counts: Record<string, number>
+  total: number
+  enabled: boolean
+}
+export const fetchFacts = (
+  opts: { kind?: string; q?: string; scope?: string; limit?: number; offset?: number } = {},
+): Promise<FactsListResponse> => {
+  const qs = new URLSearchParams()
+  if (opts.kind) qs.set("kind", opts.kind)
+  if (opts.q) qs.set("q", opts.q)
+  if (opts.scope) qs.set("scope", opts.scope)
+  qs.set("limit", String(opts.limit ?? 200))
+  qs.set("offset", String(opts.offset ?? 0))
+  return synthGet(`/api/facts/list?${qs}`)
+}
+
+export type JournalItem = {
+  id: number
+  happened_on: string
+  title: string
+  body: string
+  created_at: string
+}
+export type JournalListResponse = {
+  journal: JournalItem[]
+  total: number
+  enabled: boolean
+}
+export const fetchJournal = (
+  opts: { scope?: string; limit?: number; offset?: number } = {},
+): Promise<JournalListResponse> => {
+  const qs = new URLSearchParams()
+  if (opts.scope) qs.set("scope", opts.scope)
+  qs.set("limit", String(opts.limit ?? 60))
+  qs.set("offset", String(opts.offset ?? 0))
+  return synthGet(`/api/journal/list?${qs}`)
+}
+
 export type DreamPage = {
   id: string
   title: string

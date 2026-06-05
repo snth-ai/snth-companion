@@ -2,6 +2,7 @@ import { NavLink, Outlet, useLocation } from "react-router-dom"
 import {
   Activity,
   Book,
+  BookText,
   Brain,
   Cloud,
   Gauge,
@@ -36,6 +37,7 @@ const navItems = [
   { to: "/apps", label: "Apps", icon: LayoutGrid },
   { to: "/knowledge", label: "Knowledge", icon: Book },
   { to: "/graph", label: "Graph", icon: Network },
+  { to: "/memory", label: "Memory", icon: BookText },
   { to: "/remembered", label: "Remembered", icon: Brain },
   { to: "/dreams", label: "Dreams", icon: Cloud },
   { to: "/library", label: "Library", icon: Image },

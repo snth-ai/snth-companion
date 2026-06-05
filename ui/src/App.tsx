@@ -14,6 +14,7 @@ import { LogsPage } from "@/pages/Logs"
 import { AppsPage } from "@/pages/Apps"
 import { KnowledgePage } from "@/pages/Knowledge"
 import { RememberedPage } from "@/pages/Remembered"
+import { MemoryPage } from "@/pages/Memory"
 import { DreamsPage } from "@/pages/Dreams"
 import { LibraryPage } from "@/pages/Library"
 import { GraphPage } from "@/pages/Graph"
@@ -52,6 +53,7 @@ export default function App() {
             <Route path="apps" element={<AppsPage />} />
             <Route path="knowledge" element={<KnowledgePage />} />
             <Route path="remembered" element={<RememberedPage />} />
+            <Route path="memory" element={<MemoryPage />} />
             <Route path="dreams" element={<DreamsPage />} />
             <Route path="library" element={<LibraryPage />} />
             <Route path="graph" element={<GraphPage />} />
