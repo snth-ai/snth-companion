@@ -9,7 +9,12 @@ import {
   useLoadGraph,
   useRegisterEvents,
   useSetSettings,
+  useSigma,
 } from "@react-sigma/core"
+// Sizing CSS (div.react-sigma{height:100%}) — Vite does NOT auto-pick the
+// package's internal css side-effect, so without this the sigma layers collapse
+// to ~1px and the graph renders blank. Must be imported explicitly.
+import "@react-sigma/core/lib/style.css"
 import { useNavigate } from "react-router-dom"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -101,9 +106,30 @@ function nodeColor(p: WikiPageLite, projects: Project[]): string {
 }
 
 // Distinct vivid color per Louvain community (golden-angle hue spacing).
+// Returns HEX, not hsl() — sigma's WebGL color parser doesn't accept hsl()
+// strings (renders them black/white).
+function hslToHex(h: number, s: number, l: number): string {
+  const c = (1 - Math.abs(2 * l - 1)) * s
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1))
+  const m = l - c / 2
+  let r = 0,
+    g = 0,
+    b = 0
+  if (h < 60) [r, g] = [c, x]
+  else if (h < 120) [r, g] = [x, c]
+  else if (h < 180) [g, b] = [c, x]
+  else if (h < 240) [g, b] = [x, c]
+  else if (h < 300) [r, b] = [x, c]
+  else [r, b] = [c, x]
+  const to = (v: number) =>
+    Math.round((v + m) * 255)
+      .toString(16)
+      .padStart(2, "0")
+  return `#${to(r)}${to(g)}${to(b)}`
+}
+
 function communityColor(i: number): string {
-  const hue = Math.round((i * 137.508) % 360)
-  return `hsl(${hue}, 62%, 60%)`
+  return hslToHex((i * 137.508) % 360, 0.62, 0.6)
 }
 
 type KGMeta = {
@@ -1415,8 +1441,28 @@ function KnowledgeLoader({
   const loadGraph = useLoadGraph()
   const registerEvents = useRegisterEvents()
   const setSettings = useSetSettings()
+  const sigma = useSigma()
   const graphRef = useRef<Graph | null>(null)
   const [hovered, setHovered] = useState<string | null>(null)
+
+  // Sigma can initialize before the absolute-positioned container has its final
+  // height, leaving the WebGL canvases stuck at 1px (blank graph). Force a
+  // resize + refresh after mount, and once more after layout, so the canvases
+  // pick up the real container size and the camera fits the graph.
+  useEffect(() => {
+    const fit = () => {
+      try {
+        sigma.resize(true)
+        sigma.getCamera().animatedReset({ duration: 0 })
+        sigma.refresh()
+      } catch {
+        /* sigma not ready yet */
+      }
+    }
+    fit()
+    const timers = [80, 300, 800, 1600].map((ms) => setTimeout(fit, ms))
+    return () => timers.forEach(clearTimeout)
+  }, [sigma, nodes])
 
   // Build the graphology graph + kick off ForceAtlas2 in a worker.
   useEffect(() => {
@@ -1470,14 +1516,27 @@ function KnowledgeLoader({
         },
       })
       fa2.start()
-      // Let it settle, then freeze (Obsidian-like: animates, then rests).
-      stopT = setTimeout(() => fa2?.stop(), g.order > 600 ? 4500 : 2800)
+      // Let it settle, then freeze + frame the graph (Obsidian-like: animates,
+      // spreads, then rests centered).
+      stopT = setTimeout(
+        () => {
+          fa2?.stop()
+          try {
+            sigma.resize(true)
+            sigma.getCamera().animatedReset({ duration: 300 })
+            sigma.refresh()
+          } catch {
+            /* sigma torn down */
+          }
+        },
+        g.order > 600 ? 4500 : 2800,
+      )
     }
     return () => {
       if (stopT) clearTimeout(stopT)
       fa2?.kill()
     }
-  }, [nodes, links, community, degree, colorBy, loadGraph])
+  }, [nodes, links, community, degree, colorBy, loadGraph, sigma])
 
   // Click = open detail; click empty = deselect; hover = highlight.
   useEffect(() => {
