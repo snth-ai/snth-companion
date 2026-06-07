@@ -99,13 +99,50 @@ function hexA(hex: string, a: number): string {
   return `rgba(${r},${g},${b},${a})`
 }
 
+type EntityNeighbor = {
+  node: GraphV2Node
+  relation: string
+  dir: "out" | "in"
+}
+
 type EntityDetail = {
   center: GraphV2Node
-  neighbors: GraphV2Node[]
+  neighbors: EntityNeighbor[]
+}
+
+// Human labels for entity-type colors (legend). Keys match server `type`.
+const TYPE_LABELS: Record<string, string> = {
+  person: "person",
+  project: "project",
+  place: "place",
+  organization: "org",
+  concept: "concept",
+  event: "event",
+  skill: "skill",
+  tool: "tool",
+}
+
+// Knowledge-graph entity colors (mirror the synth `nodeColors` map so the
+// legend matches what the server paints).
+const ENTITY_COLORS: Record<string, string> = {
+  person: "#4A90D9",
+  project: "#7B68EE",
+  place: "#2ECC71",
+  organization: "#E67E22",
+  concept: "#9B59B6",
+  event: "#E74C3C",
+  skill: "#00BCD4",
+  tool: "#FF9800",
 }
 
 export function GraphPage() {
   const [mode, setMode] = useState<GraphMode>("knowledge")
+
+  // knowledge-mode view controls (declutter the ~2000-node hairball)
+  const [typeFilter, setTypeFilter] = useState<string>("__all__")
+  const [minMentions, setMinMentions] = useState(0)
+  const [maxNodes, setMaxNodes] = useState(250)
+  const [search, setSearch] = useState("")
 
   // pages-mode state
   const [projects, setProjects] = useState<Project[]>([])
@@ -131,7 +168,11 @@ export function GraphPage() {
   const [detailLoading, setDetailLoading] = useState(false)
   const navigate = useNavigate()
   const containerRef = useRef<HTMLDivElement | null>(null)
-  const fgRef = useRef<{ refresh?: () => void } | null>(null)
+  const fgRef = useRef<{
+    refresh?: () => void
+    d3Force?: (name: string) => { strength?: (n: number) => void; distance?: (n: number) => void } | undefined
+    d3ReheatSimulation?: () => void
+  } | null>(null)
   const [size, setSize] = useState({ w: 800, h: 600 })
   const [dedupeOpen, setDedupeOpen] = useState(false)
   const [dedupeNS, setDedupeNS] = useState("themes")
@@ -241,8 +282,23 @@ export function GraphPage() {
           const d = await fetchGraphNode(selectedID)
           if (cancelled) return
           const nodes = d.nodes ?? []
+          const dedges = d.edges ?? []
           const center = nodes.find((n) => n.id === selectedID) ?? null
-          const neighbors = nodes.filter((n) => n.id !== selectedID)
+          const relOf = (
+            nid: string,
+          ): { relation: string; dir: "out" | "in" } => {
+            for (const e of dedges) {
+              if (e.from === selectedID && e.to === nid)
+                return { relation: e.label, dir: "out" }
+              if (e.to === selectedID && e.from === nid)
+                return { relation: e.label, dir: "in" }
+            }
+            return { relation: "", dir: "out" }
+          }
+          const neighbors: EntityNeighbor[] = nodes
+            .filter((n) => n.id !== selectedID)
+            .map((n) => ({ node: n, ...relOf(n.id) }))
+            .sort((a, b) => b.node.mention_count - a.node.mention_count)
           if (center) setEntityDetail({ center, neighbors })
         } else {
           const d = await fetchWikiPage(selectedID)
@@ -289,12 +345,36 @@ export function GraphPage() {
       typeof v === "string" ? v : ((v as { id?: string })?.id ?? "")
 
     if (mode === "knowledge") {
-      const idSet = new Set(gNodes.map((n) => n.id))
-      const ns: GraphNode[] = gNodes.map((n) => ({
+      const q = search.trim().toLowerCase()
+      // 1. base filter: type + salience floor.
+      let pool = gNodes.filter(
+        (n) =>
+          (typeFilter === "__all__" || n.type === typeFilter) &&
+          n.mention_count >= minMentions,
+      )
+      // 2. search: narrow to name matches + their 1-hop neighbours so a single
+      //    entity's neighbourhood is legible instead of the whole hairball.
+      if (q) {
+        const matches = new Set(
+          pool.filter((n) => (n.label || "").toLowerCase().includes(q)).map((n) => n.id),
+        )
+        const keep = new Set(matches)
+        for (const e of gEdges) {
+          if (matches.has(e.from)) keep.add(e.to)
+          if (matches.has(e.to)) keep.add(e.from)
+        }
+        pool = pool.filter((n) => keep.has(n.id))
+      }
+      // 3. cap: render only the top-N by salience so the default isn't a mush.
+      pool = [...pool].sort((a, b) => b.mention_count - a.mention_count)
+      if (maxNodes > 0 && pool.length > maxNodes) pool = pool.slice(0, maxNodes)
+
+      const idSet = new Set(pool.map((n) => n.id))
+      const ns: GraphNode[] = pool.map((n) => ({
         id: n.id,
         name: n.label || n.id,
         type: n.type,
-        color: n.color || TYPE_COLORS[n.type] || "#64748b",
+        color: n.color || ENTITY_COLORS[n.type] || "#64748b",
         // Size by salience: mention_count drives radius (capped by nodeVal).
         val: 1 + Math.min(19, n.mention_count),
         summary: n.summary,
@@ -338,7 +418,43 @@ export function GraphPage() {
       ls.push({ source: src, target: tgt, relation: e.relation })
     }
     return { nodes: ns, links: ls }
-  }, [mode, gNodes, gEdges, pages, projects, edges, filterProj])
+  }, [
+    mode,
+    gNodes,
+    gEdges,
+    pages,
+    projects,
+    edges,
+    filterProj,
+    typeFilter,
+    minMentions,
+    maxNodes,
+    search,
+  ])
+
+  // Total knowledge-graph node count (pre-cap) for the "showing N of M" stat
+  // and to bound the min-mentions slider.
+  const gTotals = useMemo(() => {
+    let max = 0
+    const types = new Map<string, number>()
+    for (const n of gNodes) {
+      if (n.mention_count > max) max = n.mention_count
+      types.set(n.type, (types.get(n.type) ?? 0) + 1)
+    }
+    const present = [...types.entries()].sort((a, b) => b[1] - a[1])
+    return { total: gNodes.length, maxMentions: max, types: present }
+  }, [gNodes])
+
+  // Spread the knowledge graph so it reads as a network, not a clump: stronger
+  // charge repulsion + longer link distance, then reheat the sim.
+  useEffect(() => {
+    if (mode !== "knowledge") return
+    const fg = fgRef.current
+    if (!fg?.d3Force) return
+    fg.d3Force("charge")?.strength?.(-160)
+    fg.d3Force("link")?.distance?.(60)
+    fg.d3ReheatSimulation?.()
+  }, [mode, nodes.length, links.length])
 
   // Connected node IDs — 1-hop neighbours of selectedID (from the rendered links).
   const connectedIDs = useMemo(() => {
@@ -615,6 +731,72 @@ export function GraphPage() {
             </button>
           </div>
 
+          {mode === "knowledge" && (
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="search entity…"
+                  className="text-xs bg-background/80 border border-border rounded px-2 py-1.5 w-36"
+                />
+                <select
+                  value={typeFilter}
+                  onChange={(e) => setTypeFilter(e.target.value)}
+                  className="text-xs bg-background/80 border border-border rounded px-2 py-1.5"
+                  title="filter by entity type"
+                >
+                  <option value="__all__">all types</option>
+                  {gTotals.types.map(([t, c]) => (
+                    <option key={t} value={t}>
+                      {(TYPE_LABELS[t] ?? t) + ` (${c})`}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={maxNodes}
+                  onChange={(e) => setMaxNodes(Number(e.target.value))}
+                  className="text-xs bg-background/80 border border-border rounded px-2 py-1.5"
+                  title="max nodes rendered (top by mentions)"
+                >
+                  <option value={100}>top 100</option>
+                  <option value={250}>top 250</option>
+                  <option value={500}>top 500</option>
+                  <option value={0}>all</option>
+                </select>
+              </div>
+              <div className="flex items-center gap-2">
+                <label className="text-[11px] text-muted-foreground whitespace-nowrap">
+                  min mentions: {minMentions}
+                </label>
+                <input
+                  type="range"
+                  min={0}
+                  max={Math.max(1, Math.min(20, gTotals.maxMentions))}
+                  value={minMentions}
+                  onChange={(e) => setMinMentions(Number(e.target.value))}
+                  className="flex-1 accent-primary"
+                />
+              </div>
+              {gTotals.types.length > 0 && (
+                <div className="flex flex-wrap gap-x-3 gap-y-1 pt-0.5">
+                  {gTotals.types.slice(0, 8).map(([t]) => (
+                    <span
+                      key={t}
+                      className="inline-flex items-center gap-1 text-[10px] text-muted-foreground"
+                    >
+                      <span
+                        className="inline-block h-2 w-2 rounded-full"
+                        style={{ backgroundColor: ENTITY_COLORS[t] ?? "#64748b" }}
+                      />
+                      {TYPE_LABELS[t] ?? t}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
           {mode === "pages" && (
             <div className="flex items-center gap-2 flex-wrap">
               <select
@@ -674,10 +856,11 @@ export function GraphPage() {
           )}
 
           <div className="text-[11px] text-muted-foreground tabular-nums">
-            {nodes.length} nodes · {links.length} edges
-            {mode === "knowledge" && gStats
-              ? ` · ${gStats.total_edges} total in graph`
-              : ""}
+            {mode === "knowledge"
+              ? `showing ${nodes.length} of ${gTotals.total} nodes · ${links.length}${
+                  gStats ? "/" + gStats.total_edges : ""
+                } edges`
+              : `${nodes.length} nodes · ${links.length} edges`}
             {busyLoading && " · loading…"}
           </div>
         </div>
@@ -785,19 +968,29 @@ export function GraphPage() {
                         <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
                           connected to ({entityDetail.neighbors.length})
                         </div>
-                        <div className="flex flex-wrap gap-1.5">
+                        <div className="flex flex-col gap-1">
                           {entityDetail.neighbors.map((nb) => (
                             <button
-                              key={nb.id}
-                              onClick={() => setSelectedID(nb.id)}
-                              className="text-xs px-2 py-1 rounded bg-muted/50 hover:bg-muted text-foreground transition flex items-center gap-1.5"
-                              title={nb.type}
+                              key={nb.node.id}
+                              onClick={() => setSelectedID(nb.node.id)}
+                              className="text-xs px-2 py-1 rounded bg-muted/50 hover:bg-muted text-foreground transition flex items-center gap-1.5 text-left"
+                              title={nb.node.type}
                             >
                               <span
-                                className="inline-block h-2 w-2 rounded-full"
-                                style={{ backgroundColor: nb.color }}
+                                className="inline-block h-2 w-2 rounded-full shrink-0"
+                                style={{ backgroundColor: nb.node.color }}
                               />
-                              {nb.label || nb.id}
+                              <span className="text-muted-foreground shrink-0">
+                                {nb.dir === "in" ? "←" : "→"}
+                              </span>
+                              <span className="truncate">
+                                {nb.node.label || nb.node.id}
+                              </span>
+                              {nb.relation && (
+                                <span className="text-[10px] text-muted-foreground/70 italic ml-auto pl-2 shrink-0">
+                                  {nb.relation}
+                                </span>
+                              )}
                             </button>
                           ))}
                         </div>
