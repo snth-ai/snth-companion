@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import ForceGraph2D from "react-force-graph-2d"
+import Graph from "graphology"
+import forceAtlas2 from "graphology-layout-forceatlas2"
+import louvain from "graphology-communities-louvain"
 import { useNavigate } from "react-router-dom"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -90,6 +93,100 @@ function nodeColor(p: WikiPageLite, projects: Project[]): string {
   return TYPE_COLORS[p.type] ?? "#64748b"
 }
 
+// Distinct vivid color per Louvain community (golden-angle hue spacing).
+function communityColor(i: number): string {
+  const hue = Math.round((i * 137.508) % 360)
+  return `hsl(${hue}, 62%, 60%)`
+}
+
+type KGLayout = {
+  pos: Map<string, { x: number; y: number }>
+  community: Map<string, number>
+  degree: Map<string, number>
+  communityCount: number
+}
+
+// computeKnowledgeLayout runs the real Gephi-style stack on the filtered
+// subgraph: Louvain community detection (cluster discovery) + ForceAtlas2
+// (linLog, outbound-attraction) to spread clusters into legible islands
+// instead of a force-directed hairball. Returns fixed positions + community +
+// degree so the renderer can pin nodes and color/size by structure.
+function computeKnowledgeLayout(
+  nodes: GraphNode[],
+  links: GraphLink[],
+): KGLayout {
+  const idOf = (v: unknown): string =>
+    typeof v === "string" ? v : ((v as { id?: string })?.id ?? "")
+  const g = new Graph({ type: "undirected", multi: false, allowSelfLoops: false })
+  for (const n of nodes) if (!g.hasNode(n.id)) g.addNode(n.id)
+  for (const l of links) {
+    const s = idOf(l.source)
+    const t = idOf(l.target)
+    if (!s || !t || s === t) continue
+    if (!g.hasNode(s) || !g.hasNode(t)) continue
+    if (!g.hasEdge(s, t)) g.addEdge(s, t)
+  }
+
+  const degree = new Map<string, number>()
+  g.forEachNode((id) => degree.set(id, g.degree(id)))
+
+  const community = new Map<string, number>()
+  let communityCount = 0
+  if (g.order > 0 && g.size > 0) {
+    try {
+      const comm = louvain(g) as Record<string, number>
+      let max = -1
+      for (const [k, v] of Object.entries(comm)) {
+        community.set(k, v)
+        if (v > max) max = v
+      }
+      communityCount = max + 1
+    } catch {
+      // no communities (e.g. fully disconnected) — leave empty
+    }
+  }
+
+  // FA2 reads x/y from node attrs and needs non-coincident starting points.
+  let i = 0
+  const N = Math.max(1, g.order)
+  g.forEachNode((id) => {
+    const angle = (2 * Math.PI * i) / N
+    g.setNodeAttribute(id, "x", Math.cos(angle) * 200 + (i % 7) - 3)
+    g.setNodeAttribute(id, "y", Math.sin(angle) * 200 + (i % 5) - 2)
+    g.setNodeAttribute(id, "size", 1 + Math.sqrt(degree.get(id) ?? 0))
+    i++
+  })
+
+  const pos = new Map<string, { x: number; y: number }>()
+  if (g.order > 0) {
+    try {
+      const settings = forceAtlas2.inferSettings(g)
+      const mapping = forceAtlas2(g, {
+        iterations: g.order > 400 ? 250 : 500,
+        settings: {
+          ...settings,
+          linLogMode: true,
+          outboundAttractionDistribution: true,
+          adjustSizes: true,
+          gravity: 1.2,
+          scalingRatio: 14,
+          barnesHutOptimize: g.order > 200,
+        },
+      })
+      for (const [id, p] of Object.entries(mapping)) pos.set(id, p)
+    } catch {
+      // fall back to the circular init already on the graph
+      g.forEachNode((id) => {
+        pos.set(id, {
+          x: g.getNodeAttribute(id, "x") as number,
+          y: g.getNodeAttribute(id, "y") as number,
+        })
+      })
+    }
+  }
+  return { pos, community, degree, communityCount }
+}
+
 // Convert 6-char hex to rgba string with given alpha. No 3-char shortcut.
 function hexA(hex: string, a: number): string {
   const h = hex.replace("#", "")
@@ -143,6 +240,7 @@ export function GraphPage() {
   const [minMentions, setMinMentions] = useState(0)
   const [maxNodes, setMaxNodes] = useState(250)
   const [search, setSearch] = useState("")
+  const [colorBy, setColorBy] = useState<"community" | "type">("community")
 
   // pages-mode state
   const [projects, setProjects] = useState<Project[]>([])
@@ -170,8 +268,7 @@ export function GraphPage() {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const fgRef = useRef<{
     refresh?: () => void
-    d3Force?: (name: string) => { strength?: (n: number) => void; distance?: (n: number) => void } | undefined
-    d3ReheatSimulation?: () => void
+    zoomToFit?: (ms?: number, px?: number) => void
   } | null>(null)
   const [size, setSize] = useState({ w: 800, h: 600 })
   const [dedupeOpen, setDedupeOpen] = useState(false)
@@ -445,16 +542,44 @@ export function GraphPage() {
     return { total: gNodes.length, maxMentions: max, types: present }
   }, [gNodes])
 
-  // Spread the knowledge graph so it reads as a network, not a clump: stronger
-  // charge repulsion + longer link distance, then reheat the sim.
+  // Knowledge layout: Louvain communities + ForceAtlas2 positions for the
+  // current filtered subgraph. Recomputes only when the node/link SET changes
+  // (react-force-graph's in-place mutation of link objects doesn't change the
+  // memo's array ref, so this runs once per filter change, not per frame).
+  const kgLayout = useMemo<KGLayout>(() => {
+    if (mode !== "knowledge")
+      return { pos: new Map(), community: new Map(), degree: new Map(), communityCount: 0 }
+    return computeKnowledgeLayout(nodes, links)
+  }, [mode, nodes, links])
+
+  // Pinned, colored, sized nodes for the force-graph renderer (knowledge mode).
+  const displayNodes = useMemo(() => {
+    if (mode !== "knowledge") return nodes
+    return nodes.map((n) => {
+      const p = kgLayout.pos.get(n.id)
+      const deg = kgLayout.degree.get(n.id) ?? 0
+      const comm = kgLayout.community.get(n.id) ?? 0
+      return {
+        ...n,
+        x: p?.x,
+        y: p?.y,
+        fx: p?.x, // pin: render the FA2 layout, don't re-simulate into a clump
+        fy: p?.y,
+        color:
+          colorBy === "community"
+            ? communityColor(comm)
+            : ENTITY_COLORS[n.type] || n.color || "#64748b",
+        val: 1 + Math.min(24, deg), // size by degree (graph importance)
+      }
+    })
+  }, [mode, nodes, kgLayout, colorBy])
+
+  // Fit the view to the freshly-laid-out knowledge graph.
   useEffect(() => {
-    if (mode !== "knowledge") return
-    const fg = fgRef.current
-    if (!fg?.d3Force) return
-    fg.d3Force("charge")?.strength?.(-160)
-    fg.d3Force("link")?.distance?.(60)
-    fg.d3ReheatSimulation?.()
-  }, [mode, nodes.length, links.length])
+    if (mode !== "knowledge" || displayNodes.length === 0) return
+    const t = setTimeout(() => fgRef.current?.zoomToFit?.(600, 60), 80)
+    return () => clearTimeout(t)
+  }, [mode, displayNodes])
 
   // Connected node IDs — 1-hop neighbours of selectedID (from the rendered links).
   const connectedIDs = useMemo(() => {
@@ -553,7 +678,7 @@ export function GraphPage() {
         {nodes.length > 0 ? (
           <ForceGraph2D
             ref={fgRef as never}
-            graphData={{ nodes, links }}
+            graphData={{ nodes: mode === "knowledge" ? displayNodes : nodes, links }}
             width={size.w}
             height={size.h}
             backgroundColor="rgba(0,0,0,0)"
@@ -601,7 +726,7 @@ export function GraphPage() {
             }}
             linkDirectionalParticleSpeed={0.006}
             linkDirectionalParticleColor={() => "rgba(186, 230, 253, 0.9)"}
-            cooldownTicks={120}
+            cooldownTicks={mode === "knowledge" ? 0 : 120}
             onNodeClick={(n) => setSelectedID((n as GraphNode).id)}
             onBackgroundClick={() => setSelectedID(null)}
             nodeCanvasObjectMode={(n) => {
@@ -671,10 +796,12 @@ export function GraphPage() {
               }
 
               // After-mode for the 99% case — lib has already drawn the
-              // circle, we just paint the label at higher zoom levels.
-              if (scale < 1.5) return
-              ctx.font = `${10 / scale}px sans-serif`
-              ctx.fillStyle = "#cbd5e1"
+              // circle, we just paint the label at higher zoom levels, and
+              // ALWAYS for big hubs in the knowledge graph so the map reads.
+              const isHub = mode === "knowledge" && (node.val ?? 0) >= 10
+              if (scale < 1.5 && !isHub) return
+              ctx.font = `${(isHub ? 11 : 10) / scale}px sans-serif`
+              ctx.fillStyle = isHub ? "#e2e8f0" : "#cbd5e1"
               ctx.textAlign = "center"
               ctx.textBaseline = "top"
               ctx.fillText(node.name, node.x, node.y + 5)
@@ -778,7 +905,39 @@ export function GraphPage() {
                   className="flex-1 accent-primary"
                 />
               </div>
-              {gTotals.types.length > 0 && (
+              <div className="flex items-center gap-2 text-[11px]">
+                <span className="text-muted-foreground">color:</span>
+                <div className="inline-flex rounded border border-border overflow-hidden">
+                  <button
+                    className={
+                      "px-2 py-0.5 " +
+                      (colorBy === "community"
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-background/80 text-muted-foreground hover:text-foreground")
+                    }
+                    onClick={() => setColorBy("community")}
+                  >
+                    communities
+                  </button>
+                  <button
+                    className={
+                      "px-2 py-0.5 border-l border-border " +
+                      (colorBy === "type"
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-background/80 text-muted-foreground hover:text-foreground")
+                    }
+                    onClick={() => setColorBy("type")}
+                  >
+                    type
+                  </button>
+                </div>
+                {colorBy === "community" && kgLayout.communityCount > 0 && (
+                  <span className="text-muted-foreground/70">
+                    {kgLayout.communityCount} clusters
+                  </span>
+                )}
+              </div>
+              {colorBy === "type" && gTotals.types.length > 0 && (
                 <div className="flex flex-wrap gap-x-3 gap-y-1 pt-0.5">
                   {gTotals.types.slice(0, 8).map(([t]) => (
                     <span
