@@ -2,7 +2,14 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import ForceGraph2D from "react-force-graph-2d"
 import Graph from "graphology"
 import forceAtlas2 from "graphology-layout-forceatlas2"
+import FA2LayoutSupervisor from "graphology-layout-forceatlas2/worker"
 import louvain from "graphology-communities-louvain"
+import {
+  SigmaContainer,
+  useLoadGraph,
+  useRegisterEvents,
+  useSetSettings,
+} from "@react-sigma/core"
 import { useNavigate } from "react-router-dom"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -99,29 +106,24 @@ function communityColor(i: number): string {
   return `hsl(${hue}, 62%, 60%)`
 }
 
-type KGLayout = {
-  pos: Map<string, { x: number; y: number }>
+type KGMeta = {
   community: Map<string, number>
   degree: Map<string, number>
   communityCount: number
 }
 
-// computeKnowledgeLayout runs the real Gephi-style stack on the filtered
-// subgraph: Louvain community detection (cluster discovery) + ForceAtlas2
-// (linLog, outbound-attraction) to spread clusters into legible islands
-// instead of a force-directed hairball. Returns fixed positions + community +
-// degree so the renderer can pin nodes and color/size by structure.
-function computeKnowledgeLayout(
-  nodes: GraphNode[],
-  links: GraphLink[],
-): KGLayout {
-  const idOf = (v: unknown): string =>
-    typeof v === "string" ? v : ((v as { id?: string })?.id ?? "")
+const idOfLink = (v: unknown): string =>
+  typeof v === "string" ? v : ((v as { id?: string })?.id ?? "")
+
+// computeCommunities runs Louvain community detection + degree on the filtered
+// subgraph. Cheap (no layout) — ForceAtlas2 itself runs in a web worker inside
+// the sigma renderer, so the main thread never blocks.
+function computeCommunities(nodes: GraphNode[], links: GraphLink[]): KGMeta {
   const g = new Graph({ type: "undirected", multi: false, allowSelfLoops: false })
   for (const n of nodes) if (!g.hasNode(n.id)) g.addNode(n.id)
   for (const l of links) {
-    const s = idOf(l.source)
-    const t = idOf(l.target)
+    const s = idOfLink(l.source)
+    const t = idOfLink(l.target)
     if (!s || !t || s === t) continue
     if (!g.hasNode(s) || !g.hasNode(t)) continue
     if (!g.hasEdge(s, t)) g.addEdge(s, t)
@@ -142,49 +144,10 @@ function computeKnowledgeLayout(
       }
       communityCount = max + 1
     } catch {
-      // no communities (e.g. fully disconnected) — leave empty
+      // disconnected / degenerate — leave empty (color falls back to type)
     }
   }
-
-  // FA2 reads x/y from node attrs and needs non-coincident starting points.
-  let i = 0
-  const N = Math.max(1, g.order)
-  g.forEachNode((id) => {
-    const angle = (2 * Math.PI * i) / N
-    g.setNodeAttribute(id, "x", Math.cos(angle) * 200 + (i % 7) - 3)
-    g.setNodeAttribute(id, "y", Math.sin(angle) * 200 + (i % 5) - 2)
-    g.setNodeAttribute(id, "size", 1 + Math.sqrt(degree.get(id) ?? 0))
-    i++
-  })
-
-  const pos = new Map<string, { x: number; y: number }>()
-  if (g.order > 0) {
-    try {
-      const settings = forceAtlas2.inferSettings(g)
-      const mapping = forceAtlas2(g, {
-        iterations: g.order > 400 ? 250 : 500,
-        settings: {
-          ...settings,
-          linLogMode: true,
-          outboundAttractionDistribution: true,
-          adjustSizes: true,
-          gravity: 1.2,
-          scalingRatio: 14,
-          barnesHutOptimize: g.order > 200,
-        },
-      })
-      for (const [id, p] of Object.entries(mapping)) pos.set(id, p)
-    } catch {
-      // fall back to the circular init already on the graph
-      g.forEachNode((id) => {
-        pos.set(id, {
-          x: g.getNodeAttribute(id, "x") as number,
-          y: g.getNodeAttribute(id, "y") as number,
-        })
-      })
-    }
-  }
-  return { pos, community, degree, communityCount }
+  return { community, degree, communityCount }
 }
 
 // Convert 6-char hex to rgba string with given alpha. No 3-char shortcut.
@@ -238,7 +201,7 @@ export function GraphPage() {
   // knowledge-mode view controls (declutter the ~2000-node hairball)
   const [typeFilter, setTypeFilter] = useState<string>("__all__")
   const [minMentions, setMinMentions] = useState(0)
-  const [maxNodes, setMaxNodes] = useState(250)
+  const [maxNodes, setMaxNodes] = useState(0)
   const [search, setSearch] = useState("")
   const [colorBy, setColorBy] = useState<"community" | "type">("community")
 
@@ -266,10 +229,7 @@ export function GraphPage() {
   const [detailLoading, setDetailLoading] = useState(false)
   const navigate = useNavigate()
   const containerRef = useRef<HTMLDivElement | null>(null)
-  const fgRef = useRef<{
-    refresh?: () => void
-    zoomToFit?: (ms?: number, px?: number) => void
-  } | null>(null)
+  const fgRef = useRef<{ refresh?: () => void } | null>(null)
   const [size, setSize] = useState({ w: 800, h: 600 })
   const [dedupeOpen, setDedupeOpen] = useState(false)
   const [dedupeNS, setDedupeNS] = useState("themes")
@@ -542,44 +502,14 @@ export function GraphPage() {
     return { total: gNodes.length, maxMentions: max, types: present }
   }, [gNodes])
 
-  // Knowledge layout: Louvain communities + ForceAtlas2 positions for the
-  // current filtered subgraph. Recomputes only when the node/link SET changes
-  // (react-force-graph's in-place mutation of link objects doesn't change the
-  // memo's array ref, so this runs once per filter change, not per frame).
-  const kgLayout = useMemo<KGLayout>(() => {
+  // Louvain communities + degree for the current filtered subgraph (cheap;
+  // ForceAtlas2 layout itself runs in the sigma web worker). Used for node
+  // color/size and the cluster-count legend.
+  const kgMeta = useMemo<KGMeta>(() => {
     if (mode !== "knowledge")
-      return { pos: new Map(), community: new Map(), degree: new Map(), communityCount: 0 }
-    return computeKnowledgeLayout(nodes, links)
+      return { community: new Map(), degree: new Map(), communityCount: 0 }
+    return computeCommunities(nodes, links)
   }, [mode, nodes, links])
-
-  // Pinned, colored, sized nodes for the force-graph renderer (knowledge mode).
-  const displayNodes = useMemo(() => {
-    if (mode !== "knowledge") return nodes
-    return nodes.map((n) => {
-      const p = kgLayout.pos.get(n.id)
-      const deg = kgLayout.degree.get(n.id) ?? 0
-      const comm = kgLayout.community.get(n.id) ?? 0
-      return {
-        ...n,
-        x: p?.x,
-        y: p?.y,
-        fx: p?.x, // pin: render the FA2 layout, don't re-simulate into a clump
-        fy: p?.y,
-        color:
-          colorBy === "community"
-            ? communityColor(comm)
-            : ENTITY_COLORS[n.type] || n.color || "#64748b",
-        val: 1 + Math.min(24, deg), // size by degree (graph importance)
-      }
-    })
-  }, [mode, nodes, kgLayout, colorBy])
-
-  // Fit the view to the freshly-laid-out knowledge graph.
-  useEffect(() => {
-    if (mode !== "knowledge" || displayNodes.length === 0) return
-    const t = setTimeout(() => fgRef.current?.zoomToFit?.(600, 60), 80)
-    return () => clearTimeout(t)
-  }, [mode, displayNodes])
 
   // Connected node IDs — 1-hop neighbours of selectedID (from the rendered links).
   const connectedIDs = useMemo(() => {
@@ -676,9 +606,19 @@ export function GraphPage() {
       {/* full-bleed canvas wrapper — ResizeObserver feeds canvas dimensions */}
       <div ref={containerRef} className="absolute inset-0">
         {nodes.length > 0 ? (
+          mode === "knowledge" ? (
+            <KnowledgeGraph
+              nodes={nodes}
+              links={links}
+              community={kgMeta.community}
+              degree={kgMeta.degree}
+              colorBy={colorBy}
+              onSelect={setSelectedID}
+            />
+          ) : (
           <ForceGraph2D
             ref={fgRef as never}
-            graphData={{ nodes: mode === "knowledge" ? displayNodes : nodes, links }}
+            graphData={{ nodes, links }}
             width={size.w}
             height={size.h}
             backgroundColor="rgba(0,0,0,0)"
@@ -726,7 +666,7 @@ export function GraphPage() {
             }}
             linkDirectionalParticleSpeed={0.006}
             linkDirectionalParticleColor={() => "rgba(186, 230, 253, 0.9)"}
-            cooldownTicks={mode === "knowledge" ? 0 : 120}
+            cooldownTicks={120}
             onNodeClick={(n) => setSelectedID((n as GraphNode).id)}
             onBackgroundClick={() => setSelectedID(null)}
             nodeCanvasObjectMode={(n) => {
@@ -796,12 +736,10 @@ export function GraphPage() {
               }
 
               // After-mode for the 99% case — lib has already drawn the
-              // circle, we just paint the label at higher zoom levels, and
-              // ALWAYS for big hubs in the knowledge graph so the map reads.
-              const isHub = mode === "knowledge" && (node.val ?? 0) >= 10
-              if (scale < 1.5 && !isHub) return
-              ctx.font = `${(isHub ? 11 : 10) / scale}px sans-serif`
-              ctx.fillStyle = isHub ? "#e2e8f0" : "#cbd5e1"
+              // circle, we just paint the label at higher zoom levels.
+              if (scale < 1.5) return
+              ctx.font = `${10 / scale}px sans-serif`
+              ctx.fillStyle = "#cbd5e1"
               ctx.textAlign = "center"
               ctx.textBaseline = "top"
               ctx.fillText(node.name, node.x, node.y + 5)
@@ -809,6 +747,7 @@ export function GraphPage() {
             nodeColor={(n) => (n as GraphNode).color || "#64748b"}
             nodeVal={(n) => Math.min(20, (n as GraphNode).val ?? 1) * 4}
           />
+          )
         ) : (
           <div className="absolute inset-0 grid place-items-center text-sm text-muted-foreground italic">
             {busyLoading
@@ -931,9 +870,9 @@ export function GraphPage() {
                     type
                   </button>
                 </div>
-                {colorBy === "community" && kgLayout.communityCount > 0 && (
+                {colorBy === "community" && kgMeta.communityCount > 0 && (
                   <span className="text-muted-foreground/70">
-                    {kgLayout.communityCount} clusters
+                    {kgMeta.communityCount} clusters
                   </span>
                 )}
               </div>
@@ -1427,4 +1366,147 @@ function Stat({
       </div>
     </div>
   )
+}
+
+// --- Knowledge graph (sigma.js / WebGL) -------------------------------------
+// Obsidian-style: GPU renderer, ForceAtlas2 layout in a web worker (no main-
+// thread freeze), Louvain-community color, degree-sized nodes, hover dims the
+// rest. Replaces the canvas force-graph for the v2 knowledge graph.
+
+type KnowledgeGraphProps = {
+  nodes: GraphNode[]
+  links: GraphLink[]
+  community: Map<string, number>
+  degree: Map<string, number>
+  colorBy: "community" | "type"
+  onSelect: (id: string | null) => void
+}
+
+function KnowledgeGraph(props: KnowledgeGraphProps) {
+  return (
+    <SigmaContainer
+      style={{ height: "100%", width: "100%", background: "transparent" }}
+      settings={{
+        allowInvalidContainer: true,
+        renderLabels: true,
+        labelColor: { color: "#cbd5e1" },
+        labelSize: 12,
+        labelDensity: 0.6,
+        labelGridCellSize: 120,
+        labelRenderedSizeThreshold: 9,
+        defaultEdgeColor: "rgba(148,163,184,0.12)",
+        minCameraRatio: 0.05,
+        maxCameraRatio: 12,
+      }}
+    >
+      <KnowledgeLoader {...props} />
+    </SigmaContainer>
+  )
+}
+
+function KnowledgeLoader({
+  nodes,
+  links,
+  community,
+  degree,
+  colorBy,
+  onSelect,
+}: KnowledgeGraphProps) {
+  const loadGraph = useLoadGraph()
+  const registerEvents = useRegisterEvents()
+  const setSettings = useSetSettings()
+  const graphRef = useRef<Graph | null>(null)
+  const [hovered, setHovered] = useState<string | null>(null)
+
+  // Build the graphology graph + kick off ForceAtlas2 in a worker.
+  useEffect(() => {
+    const g = new Graph({ type: "undirected", multi: false, allowSelfLoops: false })
+    const N = Math.max(1, nodes.length)
+    nodes.forEach((n, i) => {
+      if (g.hasNode(n.id)) return
+      const deg = degree.get(n.id) ?? 0
+      const comm = community.get(n.id) ?? 0
+      const angle = (2 * Math.PI * i) / N
+      g.addNode(n.id, {
+        x: Math.cos(angle) * 100 + ((i % 11) - 5),
+        y: Math.sin(angle) * 100 + ((i % 7) - 3),
+        size: Math.min(18, 2 + Math.sqrt(deg) * 1.7),
+        color:
+          colorBy === "community"
+            ? communityColor(comm)
+            : ENTITY_COLORS[n.type] || n.color || "#64748b",
+        label: n.name,
+      })
+    })
+    links.forEach((l) => {
+      const s = idOfLink(l.source)
+      const t = idOfLink(l.target)
+      if (!s || !t || s === t) return
+      if (!g.hasNode(s) || !g.hasNode(t)) return
+      if (!g.hasEdge(s, t)) {
+        try {
+          g.addEdge(s, t)
+        } catch {
+          /* dup/parallel guard */
+        }
+      }
+    })
+    loadGraph(g)
+    graphRef.current = g
+
+    let fa2: FA2LayoutSupervisor | null = null
+    let stopT: ReturnType<typeof setTimeout> | undefined
+    if (g.order > 0 && g.size > 0) {
+      const settings = forceAtlas2.inferSettings(g)
+      fa2 = new FA2LayoutSupervisor(g, {
+        settings: {
+          ...settings,
+          linLogMode: true,
+          outboundAttractionDistribution: true,
+          adjustSizes: true,
+          gravity: 1.2,
+          scalingRatio: 14,
+          barnesHutOptimize: g.order > 200,
+        },
+      })
+      fa2.start()
+      // Let it settle, then freeze (Obsidian-like: animates, then rests).
+      stopT = setTimeout(() => fa2?.stop(), g.order > 600 ? 4500 : 2800)
+    }
+    return () => {
+      if (stopT) clearTimeout(stopT)
+      fa2?.kill()
+    }
+  }, [nodes, links, community, degree, colorBy, loadGraph])
+
+  // Click = open detail; click empty = deselect; hover = highlight.
+  useEffect(() => {
+    registerEvents({
+      clickNode: (e) => onSelect(e.node),
+      enterNode: (e) => setHovered(e.node),
+      leaveNode: () => setHovered(null),
+      clickStage: () => onSelect(null),
+    })
+  }, [registerEvents, onSelect])
+
+  // Hover focus: keep the hovered node + neighbours, dim everything else.
+  useEffect(() => {
+    setSettings({
+      nodeReducer: (node, data) => {
+        const g = graphRef.current
+        if (!hovered || !g) return data
+        if (node === hovered || g.areNeighbors(hovered, node)) return data
+        return { ...data, color: "rgba(100,116,139,0.12)", label: "" }
+      },
+      edgeReducer: (edge, data) => {
+        const g = graphRef.current
+        if (!hovered || !g) return data
+        return g.hasExtremity(edge, hovered)
+          ? { ...data, color: "rgba(125,211,252,0.55)" }
+          : { ...data, hidden: true }
+      },
+    })
+  }, [hovered, setSettings])
+
+  return null
 }
