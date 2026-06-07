@@ -673,6 +673,60 @@ export type WikiEdge = {
 export const fetchAllEdges = (): Promise<{ edges: WikiEdge[] }> =>
   synthGet(`/api/wiki/edges`)
 
+// --- v2 knowledge graph (entities + relations) ------------------------
+// The Graph tab's "Knowledge" mode renders memory_entities/memory_relations
+// straight from the engine (synth-side /api/graph/* routes v2 when
+// MEMORY_ENGINE_ENABLED). Node = entity, edge = typed relation. This is the
+// real knowledge graph; the legacy "Pages" mode (wiki pages + their links)
+// stays available via the mode toggle.
+export type GraphV2Node = {
+  id: string
+  label: string
+  type: string
+  mention_count: number
+  summary: string
+  color: string
+  size: number
+}
+
+export type GraphV2Edge = {
+  id: string
+  from: string
+  to: string
+  label: string
+  relation_group: string
+  strength: number
+  active: boolean
+  color: string
+  width: number
+  dashes: boolean
+}
+
+export type GraphV2Stats = {
+  total_nodes: number
+  total_edges: number
+  active_edges: number
+  invalidated_edges: number
+  total_episodes: number
+}
+
+export type GraphV2Export = {
+  nodes: GraphV2Node[] | null
+  edges: GraphV2Edge[] | null
+  stats: GraphV2Stats | null
+}
+
+// Full entity graph in one round-trip (active edges, entity-entity only).
+export const fetchGraphExport = (): Promise<GraphV2Export> =>
+  synthGet(`/api/graph/export`)
+
+// One entity + its direct entity neighbours (center + 1-hop) for the
+// detail panel. Returns the same {nodes, edges} shape as export.
+export const fetchGraphNode = (
+  id: string,
+): Promise<{ nodes: GraphV2Node[] | null; edges: GraphV2Edge[] | null }> =>
+  synthGet(`/api/graph/node/${encodeURIComponent(id)}`)
+
 export type DedupePlanEntry = {
   canonical: string
   canonical_title: string

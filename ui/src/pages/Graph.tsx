@@ -17,26 +17,36 @@ import { Sparkles, X, ExternalLink, Pencil, Wand2 } from "lucide-react"
 import {
   dedupeNamespace,
   fetchAllEdges,
+  fetchGraphExport,
+  fetchGraphNode,
   fetchProjects,
   fetchWikiList,
   fetchWikiPage,
   seedSimilarEdges,
   type DedupeResponse,
+  type GraphV2Edge,
+  type GraphV2Node,
+  type GraphV2Stats,
   type Project,
   type WikiPageDetail,
   type WikiPageLite,
 } from "@/lib/api"
 import { toast } from "sonner"
 
-// Graph — full-bleed force-directed network of wiki pages + edges.
+// Graph — full-bleed force-directed network. Two modes:
+//   - "knowledge" (default on v2): the real memory-engine-v2 knowledge graph
+//     (entities + typed relations from /api/graph/export). Node click → entity
+//     detail (summary + 1-hop neighbours).
+//   - "pages": the legacy wiki-pages graph (pages + their links). Node click →
+//     page detail with markdown + links_in/out, seed-similar + dedupe tools.
 // Layout strategy:
 //   - Canvas fills the entire main area (escapes Layout's max-w-5xl
 //     wrapper via `fixed inset-0 left-60`).
 //   - Translucent glass-tile in the top-left corner holds the title,
-//     project filter, seed-similar button, and stats (so the screen
-//     reads as one unified visual).
-//   - Click a node → animated slide-in panel from the right showing
-//     the page detail (no router navigation; stays on /graph).
+//     mode toggle, filters, tools, and stats.
+//   - Click a node → animated slide-in panel from the right.
+
+type GraphMode = "knowledge" | "pages"
 
 type GraphNode = {
   id: string
@@ -45,6 +55,7 @@ type GraphNode = {
   project_id?: string | null
   color?: string
   val?: number
+  summary?: string
 }
 
 type GraphLink = {
@@ -88,18 +99,35 @@ function hexA(hex: string, a: number): string {
   return `rgba(${r},${g},${b},${a})`
 }
 
+type EntityDetail = {
+  center: GraphV2Node
+  neighbors: GraphV2Node[]
+}
+
 export function GraphPage() {
+  const [mode, setMode] = useState<GraphMode>("knowledge")
+
+  // pages-mode state
   const [projects, setProjects] = useState<Project[]>([])
   const [pages, setPages] = useState<WikiPageLite[]>([])
   const [edges, setEdges] = useState<GraphLink[]>([])
-  const [err, setErr] = useState<string | null>(null)
   const [loadingEdges, setLoadingEdges] = useState(false)
   const [filterProj, setFilterProj] = useState<string>("__all__")
   const [seeding, setSeeding] = useState(false)
-  const [selectedID, setSelectedID] = useState<string | null>(null)
   const [selectedDetail, setSelectedDetail] = useState<WikiPageDetail | null>(
     null,
   )
+
+  // knowledge-mode state
+  const [gNodes, setGNodes] = useState<GraphV2Node[]>([])
+  const [gEdges, setGEdges] = useState<GraphV2Edge[]>([])
+  const [gStats, setGStats] = useState<GraphV2Stats | null>(null)
+  const [loadingGraph, setLoadingGraph] = useState(false)
+  const [entityDetail, setEntityDetail] = useState<EntityDetail | null>(null)
+
+  // shared
+  const [err, setErr] = useState<string | null>(null)
+  const [selectedID, setSelectedID] = useState<string | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const navigate = useNavigate()
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -112,8 +140,38 @@ export function GraphPage() {
   const [dedupeLoading, setDedupeLoading] = useState(false)
   const [dedupeApplying, setDedupeApplying] = useState(false)
 
-  // Initial load.
+  // Reset selection when switching modes (ids are not interchangeable).
   useEffect(() => {
+    setSelectedID(null)
+    setErr(null)
+  }, [mode])
+
+  // Knowledge-mode load: the full entity graph in one round-trip.
+  useEffect(() => {
+    if (mode !== "knowledge") return
+    let cancelled = false
+    setLoadingGraph(true)
+    void (async () => {
+      try {
+        const g = await fetchGraphExport()
+        if (cancelled) return
+        setGNodes(g.nodes ?? [])
+        setGEdges(g.edges ?? [])
+        setGStats(g.stats ?? null)
+      } catch (e) {
+        if (!cancelled) setErr(String((e as Error).message ?? e))
+      } finally {
+        if (!cancelled) setLoadingGraph(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [mode])
+
+  // Pages-mode initial load.
+  useEffect(() => {
+    if (mode !== "pages") return
     void (async () => {
       try {
         const [pj, pg] = await Promise.all([
@@ -126,7 +184,7 @@ export function GraphPage() {
         setErr(String((e as Error).message ?? e))
       }
     })()
-  }, [])
+  }, [mode])
 
   // Resize observer on the full-bleed container — canvas tracks it 1:1.
   useEffect(() => {
@@ -139,8 +197,9 @@ export function GraphPage() {
     return () => ro.disconnect()
   }, [])
 
-  // Bulk edge fetch — one round-trip via /api/wiki/edges (v0.4.45+).
+  // Pages-mode bulk edge fetch — one round-trip via /api/wiki/edges (v0.4.45+).
   useEffect(() => {
+    if (mode !== "pages") return
     if (pages.length === 0) return
     let cancelled = false
     setLoadingEdges(true)
@@ -163,24 +222,34 @@ export function GraphPage() {
     return () => {
       cancelled = true
     }
-  }, [pages])
+  }, [pages, mode])
 
-  // Lazy detail fetch when a node is clicked.
+  // Lazy detail fetch when a node is clicked (mode-aware).
   useEffect(() => {
     if (!selectedID) {
       setSelectedDetail(null)
+      setEntityDetail(null)
       return
     }
     let cancelled = false
     setDetailLoading(true)
     setSelectedDetail(null)
+    setEntityDetail(null)
     void (async () => {
       try {
-        const d = await fetchWikiPage(selectedID)
-        if (!cancelled) setSelectedDetail(d)
+        if (mode === "knowledge") {
+          const d = await fetchGraphNode(selectedID)
+          if (cancelled) return
+          const nodes = d.nodes ?? []
+          const center = nodes.find((n) => n.id === selectedID) ?? null
+          const neighbors = nodes.filter((n) => n.id !== selectedID)
+          if (center) setEntityDetail({ center, neighbors })
+        } else {
+          const d = await fetchWikiPage(selectedID)
+          if (!cancelled) setSelectedDetail(d)
+        }
       } catch (e) {
-        if (!cancelled)
-          toast.error(String((e as Error).message ?? e))
+        if (!cancelled) toast.error(String((e as Error).message ?? e))
       } finally {
         if (!cancelled) setDetailLoading(false)
       }
@@ -188,7 +257,7 @@ export function GraphPage() {
     return () => {
       cancelled = true
     }
-  }, [selectedID])
+  }, [selectedID, mode])
 
   // Esc closes the panel.
   useEffect(() => {
@@ -215,24 +284,28 @@ export function GraphPage() {
     return () => cancelAnimationFrame(raf)
   }, [selectedID])
 
-  // Connected node IDs — 1-hop neighbours of selectedID.
-  const connectedIDs = useMemo(() => {
-    const s = new Set<string>()
-    if (!selectedID) return s
-    const idOf = (v: unknown) =>
-      typeof v === "string" ? v : ((v as { id?: string })?.id ?? "")
-    for (const e of edges) {
-      const src = idOf(e.source)
-      const tgt = idOf(e.target)
-      if (src === selectedID) s.add(tgt)
-      if (tgt === selectedID) s.add(src)
-    }
-    return s
-  }, [selectedID, edges])
-
   const { nodes, links } = useMemo(() => {
     const idOf = (v: unknown): string =>
       typeof v === "string" ? v : ((v as { id?: string })?.id ?? "")
+
+    if (mode === "knowledge") {
+      const idSet = new Set(gNodes.map((n) => n.id))
+      const ns: GraphNode[] = gNodes.map((n) => ({
+        id: n.id,
+        name: n.label || n.id,
+        type: n.type,
+        color: n.color || TYPE_COLORS[n.type] || "#64748b",
+        // Size by salience: mention_count drives radius (capped by nodeVal).
+        val: 1 + Math.min(19, n.mention_count),
+        summary: n.summary,
+      }))
+      const ls: GraphLink[] = []
+      for (const e of gEdges) {
+        if (!idSet.has(e.from) || !idSet.has(e.to)) continue
+        ls.push({ source: e.from, target: e.to, relation: e.label })
+      }
+      return { nodes: ns, links: ls }
+    }
 
     const filteredPages =
       filterProj === "__all__"
@@ -265,7 +338,22 @@ export function GraphPage() {
       ls.push({ source: src, target: tgt, relation: e.relation })
     }
     return { nodes: ns, links: ls }
-  }, [pages, projects, edges, filterProj])
+  }, [mode, gNodes, gEdges, pages, projects, edges, filterProj])
+
+  // Connected node IDs — 1-hop neighbours of selectedID (from the rendered links).
+  const connectedIDs = useMemo(() => {
+    const s = new Set<string>()
+    if (!selectedID) return s
+    const idOf = (v: unknown) =>
+      typeof v === "string" ? v : ((v as { id?: string })?.id ?? "")
+    for (const e of links) {
+      const src = idOf(e.source)
+      const tgt = idOf(e.target)
+      if (src === selectedID) s.add(tgt)
+      if (tgt === selectedID) s.add(src)
+    }
+    return s
+  }, [selectedID, links])
 
   const projectOf = (pid?: string | null) =>
     pid ? projects.find((p) => p.id === pid) : undefined
@@ -331,6 +419,8 @@ export function GraphPage() {
       setDedupeApplying(false)
     }
   }
+
+  const busyLoading = mode === "knowledge" ? loadingGraph : loadingEdges
 
   return (
     // fixed inset-0 left-60 = full-bleed of main area (sidebar is w-60 = 240px)
@@ -478,79 +568,117 @@ export function GraphPage() {
           />
         ) : (
           <div className="absolute inset-0 grid place-items-center text-sm text-muted-foreground italic">
-            no pages to visualize
+            {busyLoading
+              ? "loading graph…"
+              : mode === "knowledge"
+              ? "no entities to visualize"
+              : "no pages to visualize"}
           </div>
         )}
       </div>
 
-      {/* Glass-tile overlay — title + filter + seed + stats */}
+      {/* Glass-tile overlay — title + mode toggle + filter + tools + stats */}
       <div className="absolute top-4 left-4 max-w-md pointer-events-auto">
         <div className="bg-card/70 backdrop-blur-md border border-border/50 rounded-lg shadow-2xl p-4 space-y-3">
           <div>
             <h1 className="text-xl font-semibold tracking-tight">Graph</h1>
             <p className="text-xs text-muted-foreground mt-1">
-              Force-directed view of pages + their links. Click a node to
-              preview it on the right. Bigger nodes = more inbound links.
+              {mode === "knowledge"
+                ? "Knowledge graph — entities and their relations. Click a node to see its connections. Bigger nodes = mentioned more."
+                : "Force-directed view of pages + their links. Click a node to preview it. Bigger nodes = more inbound links."}
             </p>
           </div>
-          <div className="flex items-center gap-2 flex-wrap">
-            <select
-              value={filterProj}
-              onChange={(e) => setFilterProj(e.target.value)}
-              className="text-xs bg-background/80 border border-border rounded px-2 py-1.5"
+
+          {/* Mode toggle */}
+          <div className="inline-flex rounded-md border border-border overflow-hidden text-xs">
+            <button
+              className={
+                "px-3 py-1.5 transition " +
+                (mode === "knowledge"
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-background/80 text-muted-foreground hover:text-foreground")
+              }
+              onClick={() => setMode("knowledge")}
             >
-              <option value="__all__">all pages</option>
-              <option value="__none__">unassigned</option>
-              {projects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={seeding}
-              className="bg-background/80"
-              onClick={async () => {
-                if (
-                  !confirm(
-                    "Seed edges from vector similarity?\n\nFor every page, top-3 similar pages above 0.85 cosine become a `related` edge. Idempotent (re-running just nudges existing strengths).",
-                  )
-                )
-                  return
-                setSeeding(true)
-                try {
-                  const r = await seedSimilarEdges(0.85, 3)
-                  toast.success(
-                    `seeded ${r.edges_added} new edges (total ${r.edges_total} across ${r.scanned} pages)`,
-                  )
-                  const pg = await fetchWikiList({ limit: 1000 })
-                  setPages([...(pg.pages ?? [])])
-                } catch (e) {
-                  toast.error(String((e as Error).message ?? e))
-                } finally {
-                  setSeeding(false)
-                }
-              }}
+              Knowledge
+            </button>
+            <button
+              className={
+                "px-3 py-1.5 transition border-l border-border " +
+                (mode === "pages"
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-background/80 text-muted-foreground hover:text-foreground")
+              }
+              onClick={() => setMode("pages")}
             >
-              <Sparkles className="h-3.5 w-3.5 mr-1" />
-              {seeding ? "seeding…" : "seed similar"}
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              className="bg-background/80"
-              onClick={openDedupeDialog}
-              title="Find + merge near-duplicate themes (preview first)"
-            >
-              <Wand2 className="h-3.5 w-3.5 mr-1" />
-              dedupe
-            </Button>
+              Pages
+            </button>
           </div>
+
+          {mode === "pages" && (
+            <div className="flex items-center gap-2 flex-wrap">
+              <select
+                value={filterProj}
+                onChange={(e) => setFilterProj(e.target.value)}
+                className="text-xs bg-background/80 border border-border rounded px-2 py-1.5"
+              >
+                <option value="__all__">all pages</option>
+                <option value="__none__">unassigned</option>
+                {projects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={seeding}
+                className="bg-background/80"
+                onClick={async () => {
+                  if (
+                    !confirm(
+                      "Seed edges from vector similarity?\n\nFor every page, top-3 similar pages above 0.85 cosine become a `related` edge. Idempotent (re-running just nudges existing strengths).",
+                    )
+                  )
+                    return
+                  setSeeding(true)
+                  try {
+                    const r = await seedSimilarEdges(0.85, 3)
+                    toast.success(
+                      `seeded ${r.edges_added} new edges (total ${r.edges_total} across ${r.scanned} pages)`,
+                    )
+                    const pg = await fetchWikiList({ limit: 1000 })
+                    setPages([...(pg.pages ?? [])])
+                  } catch (e) {
+                    toast.error(String((e as Error).message ?? e))
+                  } finally {
+                    setSeeding(false)
+                  }
+                }}
+              >
+                <Sparkles className="h-3.5 w-3.5 mr-1" />
+                {seeding ? "seeding…" : "seed similar"}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="bg-background/80"
+                onClick={openDedupeDialog}
+                title="Find + merge near-duplicate themes (preview first)"
+              >
+                <Wand2 className="h-3.5 w-3.5 mr-1" />
+                dedupe
+              </Button>
+            </div>
+          )}
+
           <div className="text-[11px] text-muted-foreground tabular-nums">
             {nodes.length} nodes · {links.length} edges
-            {loadingEdges && " · loading edges…"}
+            {mode === "knowledge" && gStats
+              ? ` · ${gStats.total_edges} total in graph`
+              : ""}
+            {busyLoading && " · loading…"}
           </div>
         </div>
 
@@ -583,26 +711,34 @@ export function GraphPage() {
               <span className="text-xs text-muted-foreground font-mono truncate flex-1">
                 {selectedID}
               </span>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() =>
-                  navigate(`/knowledge?id=${encodeURIComponent(selectedID)}`)
-                }
-                title="Open in Knowledge for editing"
-              >
-                <Pencil className="h-3.5 w-3.5 mr-1" /> edit
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() =>
-                  navigate(`/knowledge?id=${encodeURIComponent(selectedID)}`)
-                }
-                title="Open in Knowledge"
-              >
-                <ExternalLink className="h-3.5 w-3.5" />
-              </Button>
+              {mode === "pages" && (
+                <>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() =>
+                      navigate(
+                        `/knowledge?id=${encodeURIComponent(selectedID)}`,
+                      )
+                    }
+                    title="Open in Knowledge for editing"
+                  >
+                    <Pencil className="h-3.5 w-3.5 mr-1" /> edit
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() =>
+                      navigate(
+                        `/knowledge?id=${encodeURIComponent(selectedID)}`,
+                      )
+                    }
+                    title="Open in Knowledge"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </Button>
+                </>
+              )}
             </div>
 
             <div className="flex-1 overflow-auto px-5 py-4 space-y-3">
@@ -610,6 +746,69 @@ export function GraphPage() {
                 <div className="text-sm italic text-muted-foreground">
                   loading…
                 </div>
+              ) : mode === "knowledge" ? (
+                entityDetail ? (
+                  <>
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap mb-1">
+                        <Badge
+                          variant="secondary"
+                          className="text-[10px] uppercase tracking-wider"
+                        >
+                          {entityDetail.center.type || "entity"}
+                        </Badge>
+                        {entityDetail.center.mention_count > 0 && (
+                          <Badge variant="outline" className="text-[10px]">
+                            {entityDetail.center.mention_count} mentions
+                          </Badge>
+                        )}
+                      </div>
+                      <h2 className="text-lg font-semibold leading-tight">
+                        {entityDetail.center.label || entityDetail.center.id}
+                      </h2>
+                    </div>
+
+                    {entityDetail.center.summary ? (
+                      <article className="prose prose-invert prose-sm max-w-none">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {entityDetail.center.summary}
+                        </ReactMarkdown>
+                      </article>
+                    ) : (
+                      <div className="text-sm italic text-muted-foreground">
+                        no summary
+                      </div>
+                    )}
+
+                    {entityDetail.neighbors.length > 0 && (
+                      <div className="border-t border-border pt-3 space-y-2">
+                        <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                          connected to ({entityDetail.neighbors.length})
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {entityDetail.neighbors.map((nb) => (
+                            <button
+                              key={nb.id}
+                              onClick={() => setSelectedID(nb.id)}
+                              className="text-xs px-2 py-1 rounded bg-muted/50 hover:bg-muted text-foreground transition flex items-center gap-1.5"
+                              title={nb.type}
+                            >
+                              <span
+                                className="inline-block h-2 w-2 rounded-full"
+                                style={{ backgroundColor: nb.color }}
+                              />
+                              {nb.label || nb.id}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <div className="text-sm italic text-muted-foreground">
+                    no detail
+                  </div>
+                )
               ) : selectedDetail ? (
                 <>
                   <div>
