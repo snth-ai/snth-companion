@@ -7,8 +7,10 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import {
   fetchFacts,
   fetchJournal,
+  fetchMemoryOverview,
   type FactItem,
   type JournalItem,
+  type MemoryOverview,
 } from "@/lib/api"
 
 // Memory — the durable journal+facts layer (2026-06 redesign). Two views:
@@ -37,7 +39,10 @@ function kindLabel(k: string) {
 }
 
 export function MemoryPage() {
-  const [tab, setTab] = useState<"facts" | "journal">("facts")
+  const [tab, setTab] = useState<"facts" | "journal" | "overview">("facts")
+
+  // overview state (Wave 4.1)
+  const [overview, setOverview] = useState<MemoryOverview | null>(null)
 
   // facts state
   const [profile, setProfile] = useState<FactItem[]>([])
@@ -96,6 +101,15 @@ export function MemoryPage() {
   useEffect(() => {
     if (tab === "facts") void loadFacts()
     if (tab === "journal" && journal === null) void loadJournal()
+    if (tab === "overview" && overview === null) {
+      void (async () => {
+        try {
+          setOverview(await fetchMemoryOverview())
+        } catch (e) {
+          setErr(String((e as Error).message ?? e))
+        }
+      })()
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, kind])
 
@@ -123,8 +137,15 @@ export function MemoryPage() {
           <Button size="sm" variant={tab === "journal" ? "default" : "outline"} onClick={() => setTab("journal")}>
             Journal {journalTotal ? `· ${journalTotal}` : ""}
           </Button>
+          <Button size="sm" variant={tab === "overview" ? "default" : "outline"} onClick={() => setTab("overview")}>
+            Overview
+          </Button>
         </div>
       </div>
+
+      {tab === "overview" && (
+        <MemoryOverviewPanel ov={overview} />
+      )}
 
       {!enabled && (
         <Alert>
@@ -231,6 +252,99 @@ export function MemoryPage() {
             <p className="text-sm text-muted-foreground">No journal entries yet.</p>
           )}
         </div>
+      )}
+    </div>
+  )
+}
+
+// MemoryOverviewPanel — Wave 4.1 dashboard: counts, kind/predicate distribution,
+// potential conflicts, and recent memory activity (audit trail).
+function MemoryOverviewPanel({ ov }: { ov: MemoryOverview | null }) {
+  if (!ov) return <p className="text-sm text-muted-foreground">Loading overview…</p>
+  if (!ov.enabled)
+    return (
+      <Alert>
+        <AlertTitle>Memory Engine v2 not enabled</AlertTitle>
+        <AlertDescription>This synth runs the v1 memory layer; the overview is v2-only.</AlertDescription>
+      </Alert>
+    )
+  const stat = (label: string, val: number | undefined, accent?: string) => (
+    <Card>
+      <CardContent className="py-3">
+        <div className={"text-xl font-semibold tabular-nums " + (accent ?? "")}>{val ?? 0}</div>
+        <div className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</div>
+      </CardContent>
+    </Card>
+  )
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        {stat("claims (live)", ov.claims?.live)}
+        {stat("entities", ov.entities?.live)}
+        {stat("pages", ov.pages)}
+        {stat("journal", ov.journal)}
+        {stat("forgotten claims", ov.claims?.invalidated, ov.claims?.invalidated ? "text-orange-400" : undefined)}
+        {stat("superseded", ov.claims?.superseded)}
+        {stat("staging", ov.staging_pending)}
+        {stat("quarantine", ov.quarantine, ov.quarantine ? "text-red-400" : undefined)}
+      </div>
+
+      {(ov.kinds?.length ?? 0) > 0 && (
+        <Card>
+          <CardContent className="pt-4">
+            <div className="text-xs uppercase tracking-wide text-muted-foreground mb-2">claim kinds</div>
+            <div className="flex flex-wrap gap-1.5">
+              {ov.kinds!.map((k) => (
+                <Badge key={k.key} variant="secondary" className="text-[11px]">
+                  {kindLabel(k.key)} · {k.n}
+                </Badge>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {(ov.conflicts?.length ?? 0) > 0 && (
+        <Card className="border-orange-500/30 bg-orange-500/5">
+          <CardContent className="pt-4">
+            <div className="text-xs uppercase tracking-wide text-orange-400 mb-2">
+              potential conflicts ({ov.conflicts!.length})
+            </div>
+            <ul className="space-y-2">
+              {ov.conflicts!.map((c, i) => (
+                <li key={i} className="text-sm">
+                  <span className="font-mono text-[11px] text-muted-foreground">{c.predicate}</span>
+                  <ul className="mt-0.5 ml-3 list-disc list-inside text-muted-foreground">
+                    {c.claims.map((t, j) => (
+                      <li key={j} className="leading-snug">{t}</li>
+                    ))}
+                  </ul>
+                </li>
+              ))}
+            </ul>
+          </CardContent>
+        </Card>
+      )}
+
+      {(ov.recent?.length ?? 0) > 0 && (
+        <Card>
+          <CardContent className="pt-4">
+            <div className="text-xs uppercase tracking-wide text-muted-foreground mb-2">recent activity</div>
+            <ul className="space-y-1 font-mono text-[11px]">
+              {ov.recent!.map((t, i) => (
+                <li key={i} className="flex gap-2">
+                  <span className="text-muted-foreground shrink-0">{(t.at || "").slice(0, 16).replace("T", " ")}</span>
+                  <span className="text-foreground shrink-0">{t.event}</span>
+                  <span className="text-muted-foreground truncate">
+                    {t.target_type}
+                    {t.query ? ` "${t.query.slice(0, 40)}"` : ""}
+                    {t.reason ? ` — ${t.reason}` : ""}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </CardContent>
+        </Card>
       )}
     </div>
   )

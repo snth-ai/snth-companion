@@ -855,6 +855,35 @@ export const fetchFacts = (
   return synthGet(`/api/facts/list?${qs}`)
 }
 
+// --- Memory Engine v2 overview (Wave 4.1) — dashboard payload ---
+export type KV = { key: string; n: number }
+export type MemConflict = { subject: string; predicate: string; count: number; claims: string[] }
+export type MemTrace = {
+  event: string
+  target_type: string
+  target_id: string
+  query: string
+  reason: string
+  at: string
+}
+export type MemoryOverview = {
+  enabled: boolean
+  scope?: string
+  counts?: Record<string, number>
+  claims?: { live: number; superseded: number; invalidated: number }
+  entities?: { live: number; archived: number }
+  pages?: number
+  journal?: number
+  staging_pending?: number
+  quarantine?: number
+  kinds?: KV[]
+  predicates?: KV[]
+  conflicts?: MemConflict[]
+  recent?: MemTrace[]
+}
+export const fetchMemoryOverview = (scope?: string): Promise<MemoryOverview> =>
+  synthGet(`/api/memory/v2/overview${scope ? `?scope=${encodeURIComponent(scope)}` : ""}`)
+
 export type JournalItem = {
   id: number
   happened_on: string
