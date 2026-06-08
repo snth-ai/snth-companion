@@ -5,13 +5,22 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import {
+  editFact,
+  fetchAgentJournal,
   fetchFacts,
   fetchJournal,
   fetchMemoryOverview,
+  fetchQuarantine,
+  fetchWhyRecalled,
+  forgetFact,
+  type AgentJournalEntry,
   type FactItem,
   type JournalItem,
   type MemoryOverview,
+  type QuarantineEntry,
+  type WhyRecalled,
 } from "@/lib/api"
+import { toast } from "sonner"
 
 // Memory — the durable journal+facts layer (2026-06 redesign). Two views:
 //   • Facts: the synth's atomic durable knowledge — a "Who she knows you as"
@@ -43,6 +52,37 @@ export function MemoryPage() {
 
   // overview state (Wave 4.1)
   const [overview, setOverview] = useState<MemoryOverview | null>(null)
+  const [agentJournal, setAgentJournal] = useState<AgentJournalEntry[]>([])
+  const [quarantine, setQuarantine] = useState<QuarantineEntry[]>([])
+  const [why, setWhy] = useState<WhyRecalled | null>(null)
+  const [whyOpen, setWhyOpen] = useState(false)
+
+  // facts edit/forget (Wave 4.1 tail #9)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editText, setEditText] = useState("")
+
+  const doForget = async (f: FactItem) => {
+    if (!f.claim_id) return
+    if (!confirm(`Forget this fact?\n\n"${f.text}"`)) return
+    try {
+      await forgetFact(f.claim_id, f.scope, false)
+      toast.success("Forgotten")
+      void loadFacts()
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    }
+  }
+  const doEditSave = async (f: FactItem) => {
+    if (!f.claim_id || !editText.trim()) return
+    try {
+      await editFact(f.claim_id, editText.trim())
+      toast.success("Updated")
+      setEditingId(null)
+      void loadFacts()
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    }
+  }
 
   // facts state
   const [profile, setProfile] = useState<FactItem[]>([])
@@ -105,6 +145,9 @@ export function MemoryPage() {
       void (async () => {
         try {
           setOverview(await fetchMemoryOverview())
+          const [aj, q] = await Promise.all([fetchAgentJournal(), fetchQuarantine()])
+          setAgentJournal(aj.entries ?? [])
+          setQuarantine(q.entries ?? [])
         } catch (e) {
           setErr(String((e as Error).message ?? e))
         }
@@ -144,7 +187,82 @@ export function MemoryPage() {
       </div>
 
       {tab === "overview" && (
-        <MemoryOverviewPanel ov={overview} />
+        <div className="space-y-4">
+          <MemoryOverviewPanel
+            ov={overview}
+            onWhy={async (traceId) => {
+              try {
+                setWhy(await fetchWhyRecalled(traceId))
+                setWhyOpen(true)
+              } catch (e) {
+                toast.error(String((e as Error).message ?? e))
+              }
+            }}
+          />
+
+          {whyOpen && why && (
+            <Card className="border-sky-500/30 bg-sky-500/5">
+              <CardContent className="pt-4">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-xs uppercase tracking-wide text-sky-400">
+                    why recalled — "{why.query}"
+                  </div>
+                  <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={() => setWhyOpen(false)}>
+                    close
+                  </Button>
+                </div>
+                <div className="text-[11px] text-muted-foreground mb-2">{why.reason}</div>
+                {why.items.length === 0 ? (
+                  <div className="text-sm text-muted-foreground italic">no items recorded for this turn</div>
+                ) : (
+                  <ul className="space-y-1 text-sm">
+                    {why.items.map((it, i) => (
+                      <li key={i} className="leading-snug">
+                        <Badge variant="secondary" className="text-[10px] mr-1.5">{it.kind || "claim"}</Badge>
+                        {it.text}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
+          {agentJournal.length > 0 && (
+            <Card>
+              <CardContent className="pt-4">
+                <div className="text-xs uppercase tracking-wide text-muted-foreground mb-2">
+                  agent journal (her self-reflections)
+                </div>
+                <ul className="space-y-2">
+                  {agentJournal.map((a, i) => (
+                    <li key={i} className="text-sm leading-snug">
+                      <span className="text-[11px] font-mono text-muted-foreground mr-2">{(a.at || "").slice(0, 10)}</span>
+                      {a.body}
+                    </li>
+                  ))}
+                </ul>
+              </CardContent>
+            </Card>
+          )}
+
+          {quarantine.length > 0 && (
+            <Card className="border-red-500/30 bg-red-500/5">
+              <CardContent className="pt-4">
+                <div className="text-xs uppercase tracking-wide text-red-400 mb-2">
+                  quarantine (blocked as injection) · {quarantine.length}
+                </div>
+                <ul className="space-y-1 text-xs font-mono text-muted-foreground">
+                  {quarantine.map((q, i) => (
+                    <li key={i} className="leading-snug truncate">
+                      {(q.reason || "")} — {q.payload.slice(0, 80)}
+                    </li>
+                  ))}
+                </ul>
+              </CardContent>
+            </Card>
+          )}
+        </div>
       )}
 
       {!enabled && (
@@ -213,9 +331,50 @@ export function MemoryPage() {
 
           <div className="space-y-2">
             {facts?.map((f) => (
-              <Card key={f.id}>
+              <Card key={f.id} className="group">
                 <CardContent className="py-3">
-                  <div className="text-sm leading-snug">{f.text}</div>
+                  {editingId === f.claim_id ? (
+                    <div className="flex gap-2">
+                      <Input
+                        value={editText}
+                        onChange={(e) => setEditText(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") void doEditSave(f)
+                          if (e.key === "Escape") setEditingId(null)
+                        }}
+                        autoFocus
+                      />
+                      <Button size="sm" onClick={() => void doEditSave(f)}>Save</Button>
+                      <Button size="sm" variant="ghost" onClick={() => setEditingId(null)}>Cancel</Button>
+                    </div>
+                  ) : (
+                    <div className="flex items-start gap-2">
+                      <div className="text-sm leading-snug flex-1">{f.text}</div>
+                      {f.claim_id && (
+                        <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition shrink-0">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-6 px-2 text-xs"
+                            onClick={() => {
+                              setEditingId(f.claim_id!)
+                              setEditText(f.text)
+                            }}
+                          >
+                            edit
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-6 px-2 text-xs text-orange-400 hover:text-orange-300"
+                            onClick={() => void doForget(f)}
+                          >
+                            forget
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  )}
                   <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                     <Badge variant="secondary">{kindLabel(f.kind)}</Badge>
                     {f.occurred_at && <span>{f.occurred_at}</span>}
@@ -259,7 +418,13 @@ export function MemoryPage() {
 
 // MemoryOverviewPanel — Wave 4.1 dashboard: counts, kind/predicate distribution,
 // potential conflicts, and recent memory activity (audit trail).
-function MemoryOverviewPanel({ ov }: { ov: MemoryOverview | null }) {
+function MemoryOverviewPanel({
+  ov,
+  onWhy,
+}: {
+  ov: MemoryOverview | null
+  onWhy: (traceId: string) => void
+}) {
   if (!ov) return <p className="text-sm text-muted-foreground">Loading overview…</p>
   if (!ov.enabled)
     return (
@@ -331,17 +496,25 @@ function MemoryOverviewPanel({ ov }: { ov: MemoryOverview | null }) {
           <CardContent className="pt-4">
             <div className="text-xs uppercase tracking-wide text-muted-foreground mb-2">recent activity</div>
             <ul className="space-y-1 font-mono text-[11px]">
-              {ov.recent!.map((t, i) => (
-                <li key={i} className="flex gap-2">
-                  <span className="text-muted-foreground shrink-0">{(t.at || "").slice(0, 16).replace("T", " ")}</span>
-                  <span className="text-foreground shrink-0">{t.event}</span>
-                  <span className="text-muted-foreground truncate">
-                    {t.target_type}
-                    {t.query ? ` "${t.query.slice(0, 40)}"` : ""}
-                    {t.reason ? ` — ${t.reason}` : ""}
-                  </span>
-                </li>
-              ))}
+              {ov.recent!.map((t, i) => {
+                const clickable = t.event === "recall" && !!t.id
+                return (
+                  <li
+                    key={i}
+                    className={"flex gap-2 " + (clickable ? "cursor-pointer hover:text-foreground" : "")}
+                    onClick={() => clickable && onWhy(t.id!)}
+                    title={clickable ? "why recalled — show injected memory" : ""}
+                  >
+                    <span className="text-muted-foreground shrink-0">{(t.at || "").slice(0, 16).replace("T", " ")}</span>
+                    <span className="text-foreground shrink-0">{t.event}{clickable ? " 🔍" : ""}</span>
+                    <span className="text-muted-foreground truncate">
+                      {t.target_type}
+                      {t.query ? ` "${t.query.slice(0, 40)}"` : ""}
+                      {t.reason ? ` — ${t.reason}` : ""}
+                    </span>
+                  </li>
+                )
+              })}
             </ul>
           </CardContent>
         </Card>

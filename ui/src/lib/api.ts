@@ -829,6 +829,8 @@ export const deleteMemory = (id: string) =>
 
 export type FactItem = {
   id: number
+  claim_id?: string // v2 real claim id (for edit/forget); absent on v1
+  scope?: string // v2 claim scope (so forget busts the right vector cache)
   text: string
   kind: string
   occurred_at: string
@@ -859,6 +861,7 @@ export const fetchFacts = (
 export type KV = { key: string; n: number }
 export type MemConflict = { subject: string; predicate: string; count: number; claims: string[] }
 export type MemTrace = {
+  id?: string
   event: string
   target_type: string
   target_id: string
@@ -883,6 +886,29 @@ export type MemoryOverview = {
 }
 export const fetchMemoryOverview = (scope?: string): Promise<MemoryOverview> =>
   synthGet(`/api/memory/v2/overview${scope ? `?scope=${encodeURIComponent(scope)}` : ""}`)
+
+// --- Memory v2 tail: forget/edit/why-recalled/agent-journal/quarantine ---
+export const forgetFact = (claim_id: string, scope?: string, hard = false) =>
+  synthFetch(`/api/memory/v2/forget`, "POST", { claim_id, scope, hard })
+
+export const editFact = (claim_id: string, text: string) =>
+  synthFetch(`/api/memory/v2/edit`, "POST", { claim_id, text })
+
+export type WhyRecalled = {
+  query: string
+  reason: string
+  items: { id: string; kind: string; text: string }[]
+}
+export const fetchWhyRecalled = (trace: string): Promise<WhyRecalled> =>
+  synthGet(`/api/memory/v2/why-recalled?trace=${encodeURIComponent(trace)}`)
+
+export type AgentJournalEntry = { title: string; body: string; at: string }
+export const fetchAgentJournal = (): Promise<{ entries: AgentJournalEntry[] }> =>
+  synthGet(`/api/memory/v2/agent-journal?limit=50`)
+
+export type QuarantineEntry = { payload: string; reason: string; at: string }
+export const fetchQuarantine = (): Promise<{ entries: QuarantineEntry[] }> =>
+  synthGet(`/api/memory/v2/quarantine?limit=50`)
 
 export type JournalItem = {
   id: number
