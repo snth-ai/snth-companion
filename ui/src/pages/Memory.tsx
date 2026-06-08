@@ -5,16 +5,20 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import {
+  editEntity,
   editFact,
   fetchAgentJournal,
   fetchFacts,
+  fetchGraphExport,
   fetchJournal,
   fetchMemoryOverview,
   fetchQuarantine,
   fetchWhyRecalled,
   forgetFact,
+  mergeEntities,
   type AgentJournalEntry,
   type FactItem,
+  type GraphV2Node,
   type JournalItem,
   type MemoryOverview,
   type QuarantineEntry,
@@ -48,7 +52,7 @@ function kindLabel(k: string) {
 }
 
 export function MemoryPage() {
-  const [tab, setTab] = useState<"facts" | "journal" | "overview">("facts")
+  const [tab, setTab] = useState<"facts" | "journal" | "overview" | "entities">("facts")
 
   // overview state (Wave 4.1)
   const [overview, setOverview] = useState<MemoryOverview | null>(null)
@@ -183,8 +187,13 @@ export function MemoryPage() {
           <Button size="sm" variant={tab === "overview" ? "default" : "outline"} onClick={() => setTab("overview")}>
             Overview
           </Button>
+          <Button size="sm" variant={tab === "entities" ? "default" : "outline"} onClick={() => setTab("entities")}>
+            Entities
+          </Button>
         </div>
       </div>
+
+      {tab === "entities" && <EntitiesPanel />}
 
       {tab === "overview" && (
         <div className="space-y-4">
@@ -519,6 +528,214 @@ function MemoryOverviewPanel({
           </CardContent>
         </Card>
       )}
+    </div>
+  )
+}
+
+// EntitiesPanel — §7.3 entity hygiene: merge fragmented duplicates (e.g.
+// "Sasha"/"Aleksandr"/"Александр" as three nodes) into one survivor, and edit an
+// entity's canonical name + aliases. Lists entities from the v2 graph export.
+// Split is API-only (it needs a per-claim picker) — surfaced as a note.
+function EntitiesPanel() {
+  const [nodes, setNodes] = useState<GraphV2Node[] | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const [q, setQ] = useState("")
+  const [sel, setSel] = useState<Set<string>>(new Set())
+  const [survivor, setSurvivor] = useState<string | null>(null)
+  const [editing, setEditing] = useState<string | null>(null)
+  const [editName, setEditName] = useState("")
+  const [editAliases, setEditAliases] = useState("")
+  const [busy, setBusy] = useState(false)
+
+  const load = async () => {
+    setErr(null)
+    try {
+      const ex = await fetchGraphExport()
+      setNodes((ex.nodes ?? []).slice().sort((a, b) => b.mention_count - a.mention_count))
+    } catch (e) {
+      setErr(String((e as Error).message ?? e))
+    }
+  }
+  useEffect(() => {
+    void load()
+  }, [])
+
+  const shown = useMemo(() => {
+    const all = nodes ?? []
+    const t = q.trim().toLowerCase()
+    const f = t
+      ? all.filter(
+          (n) => n.label.toLowerCase().includes(t) || (n.aliases ?? []).some((a) => a.toLowerCase().includes(t)),
+        )
+      : all
+    return f.slice(0, 200)
+  }, [nodes, q])
+
+  const toggle = (id: string) =>
+    setSel((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) {
+        next.delete(id)
+        if (survivor === id) setSurvivor(null)
+      } else {
+        next.add(id)
+      }
+      return next
+    })
+
+  const markSurvivor = (id: string) => {
+    setSel((prev) => new Set(prev).add(id))
+    setSurvivor(id)
+  }
+
+  const doMerge = async () => {
+    if (!survivor) {
+      toast.error("Mark one entity as the survivor (★) first")
+      return
+    }
+    const dups = [...sel].filter((id) => id !== survivor)
+    if (dups.length === 0) {
+      toast.error("Select at least one duplicate to merge in")
+      return
+    }
+    setBusy(true)
+    try {
+      const r = await mergeEntities(survivor, dups)
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      const b = r.body
+      toast.success(`Merged ${dups.length} → ${b?.claims_rebound ?? 0} claims, ${b?.relations_rebound ?? 0} relations rebound`)
+      setSel(new Set())
+      setSurvivor(null)
+      await load()
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const startEdit = (n: GraphV2Node) => {
+    setEditing(n.id)
+    setEditName(n.label)
+    setEditAliases((n.aliases ?? []).join(", "))
+  }
+  const saveEdit = async () => {
+    if (!editing) return
+    setBusy(true)
+    try {
+      const aliases = editAliases.split(",").map((s) => s.trim()).filter(Boolean)
+      const r = await editEntity(editing, editName.trim(), aliases)
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      toast.success("Entity updated")
+      setEditing(null)
+      await load()
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const survivorLabel = nodes?.find((n) => n.id === survivor)?.label ?? ""
+
+  return (
+    <div className="space-y-3">
+      {err && (
+        <Alert variant="destructive">
+          <AlertTitle>Couldn't load entities</AlertTitle>
+          <AlertDescription>{err}</AlertDescription>
+        </Alert>
+      )}
+      <div className="flex items-center gap-2 flex-wrap">
+        <Input
+          placeholder="filter entities…"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          className="max-w-xs h-8"
+        />
+        <span className="text-xs text-muted-foreground">{nodes ? `${nodes.length} entities` : "loading…"}</span>
+        {sel.size > 0 && (
+          <div className="ml-auto flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">
+              {sel.size} selected{survivor ? ` · survivor: ${survivorLabel}` : ""}
+            </span>
+            <Button size="sm" disabled={busy || !survivor || sel.size < 2} onClick={doMerge}>
+              Merge into survivor
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                setSel(new Set())
+                setSurvivor(null)
+              }}
+            >
+              clear
+            </Button>
+          </div>
+        )}
+      </div>
+      <p className="text-[11px] text-muted-foreground">
+        Check duplicates, mark one as the survivor (★), then Merge — claims/relations rebind to the survivor and the
+        dups archive (audit-safe, never deleted). Split is API-only for now (needs a per-claim picker).
+      </p>
+      <ul className="space-y-1.5">
+        {shown.map((n) => (
+          <li key={n.id} className="rounded-md border border-border/60 px-3 py-2">
+            {editing === n.id ? (
+              <div className="space-y-2">
+                <Input value={editName} onChange={(e) => setEditName(e.target.value)} placeholder="canonical name" className="h-8" />
+                <Input
+                  value={editAliases}
+                  onChange={(e) => setEditAliases(e.target.value)}
+                  placeholder="aliases, comma separated"
+                  className="h-8"
+                />
+                <div className="flex gap-2">
+                  <Button size="sm" disabled={busy} onClick={saveEdit}>
+                    Save
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setEditing(null)}>
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={sel.has(n.id)}
+                  onChange={() => toggle(n.id)}
+                  className="accent-primary"
+                  aria-label={`select ${n.label}`}
+                />
+                <button
+                  title="mark as survivor"
+                  onClick={() => markSurvivor(n.id)}
+                  className={"text-base leading-none " + (survivor === n.id ? "text-amber-400" : "text-muted-foreground/30 hover:text-muted-foreground")}
+                >
+                  ★
+                </button>
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium truncate">
+                    {n.label}
+                    <Badge variant="secondary" className="text-[10px] ml-1.5">
+                      {n.type}
+                    </Badge>
+                    <span className="text-[11px] text-muted-foreground ml-1.5">· {n.mention_count}</span>
+                  </div>
+                  {(n.aliases?.length ?? 0) > 0 && (
+                    <div className="text-[11px] text-muted-foreground truncate">aka {n.aliases!.join(", ")}</div>
+                  )}
+                </div>
+                <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => startEdit(n)}>
+                  edit
+                </Button>
+              </div>
+            )}
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }

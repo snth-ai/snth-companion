@@ -685,6 +685,7 @@ export type GraphV2Node = {
   type: string
   mention_count: number
   summary: string
+  aliases?: string[]
   color: string
   size: number
 }
@@ -893,6 +894,33 @@ export const forgetFact = (claim_id: string, scope?: string, hard = false) =>
 
 export const editFact = (claim_id: string, text: string) =>
   synthFetch(`/api/memory/v2/edit`, "POST", { claim_id, text })
+
+// --- Memory v2 §7.3: entity merge / split / edit ---
+export const mergeEntities = (canonical: string, dups: string[]) =>
+  synthFetch<{
+    ok: boolean
+    canonical: string
+    merged: string[]
+    claims_rebound: number
+    relations_rebound: number
+    aliases_added: string[]
+  }>(`/api/memory/v2/entity/merge`, "POST", { canonical, dups })
+
+export const editEntity = (id: string, canonical_name: string, aliases: string[]) =>
+  synthFetch(`/api/memory/v2/entity/edit`, "POST", { id, canonical_name, aliases })
+
+export const splitEntity = (
+  source: string,
+  canonical_name: string,
+  type: string,
+  claim_ids: string[],
+  relation_ids: string[] = [],
+) =>
+  synthFetch<{ ok: boolean; new_id: string; claims_moved: number; relations_moved: number }>(
+    `/api/memory/v2/entity/split`,
+    "POST",
+    { source, canonical_name, type, claim_ids, relation_ids },
+  )
 
 export type WhyRecalled = {
   query: string
