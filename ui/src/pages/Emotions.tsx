@@ -205,7 +205,7 @@ export function EmotionsPage() {
             seed={overview?.session ?? "sky"}
           />
           <div className="pointer-events-none absolute top-3 left-5 text-[10px] uppercase tracking-[0.3em] text-slate-400/60">
-            {synthName}'s sky · right now
+            {synthName === "She" ? "her sky" : `${synthName}'s sky`} · right now
           </div>
           <div className="pointer-events-none absolute inset-x-0 bottom-0 rounded-b-xl bg-gradient-to-t from-black/60 via-black/25 to-transparent px-6 pb-5 pt-12">
             <div className="text-2xl md:text-3xl font-semibold leading-snug text-slate-50 drop-shadow">
