@@ -16,6 +16,7 @@ import { KnowledgePage } from "@/pages/Knowledge"
 import { RememberedPage } from "@/pages/Remembered"
 import { MemoryPage } from "@/pages/Memory"
 import { DreamsPage } from "@/pages/Dreams"
+import { EmotionsPage } from "@/pages/Emotions"
 import { LibraryPage } from "@/pages/Library"
 import { GraphPage } from "@/pages/Graph"
 import { DiagnosticsPage } from "@/pages/Diagnostics"
@@ -55,6 +56,7 @@ export default function App() {
             <Route path="remembered" element={<RememberedPage />} />
             <Route path="memory" element={<MemoryPage />} />
             <Route path="dreams" element={<DreamsPage />} />
+            <Route path="emotions" element={<EmotionsPage />} />
             <Route path="library" element={<LibraryPage />} />
             <Route path="graph" element={<GraphPage />} />
             <Route path="diagnostics" element={<DiagnosticsPage />} />

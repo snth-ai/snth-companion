@@ -1762,3 +1762,71 @@ export const fetchContextSnapshots = async (
   if (!r.ok) throw new Error(`synth HTTP ${r.status}`)
   return r.body?.snapshots ?? []
 }
+
+// --- Emotional Engine v2 (Wave E) — companion card is READ-ONLY for
+// state (labels only, never numeric axes; iron rule) + the appraisal
+// model setting Sasha asked to surface here ("сделаешь настройкой все
+// равно в сайд каре", 2026-06-11). Endpoints live on the synth; reach
+// it through the standard hub synth-fetch proxy.
+
+export type EmotionalScar = {
+  id: string
+  scope: string
+  cause: string
+  subject_key?: string
+  created_at: string
+}
+
+export type EmotionalValence = {
+  scope: string
+  subject_key: string
+  label: string
+  event_count: number
+  last_ts: string
+}
+
+export type EmotionalEventItem = {
+  id: string
+  scope: string
+  ts: string
+  source: string
+  tags?: string[]
+  subject_key?: string
+  subject_label?: string
+  reason?: string
+}
+
+export type EmotionalOverview = {
+  session: string
+  projection: {
+    scope: string
+    turn_count: number
+    event_count: number
+    last_touched: string
+  } | null
+  mood: string
+  undertones: string
+  scars: EmotionalScar[] | null
+  valences: EmotionalValence[] | null
+  events: EmotionalEventItem[] | null
+}
+
+export const fetchEmotionalOverview = (session?: string): Promise<EmotionalOverview> =>
+  synthGet(
+    `/api/emotional/v2/overview${session ? `?session=${encodeURIComponent(session)}` : ""}`,
+  )
+
+export type AppraisalModelSetting = { model: string; wait_ms: number }
+
+export const fetchAppraisalModel = (): Promise<AppraisalModelSetting> =>
+  synthGet(`/api/emotional/v2/appraisal-model`)
+
+export const saveAppraisalModel = (model: string) =>
+  synthFetch<{ ok: boolean; model: string }>(
+    `/api/emotional/v2/appraisal-model`,
+    "POST",
+    { model },
+  ).then((r) => {
+    if (!r.ok) throw new Error(`synth HTTP ${r.status}`)
+    return r.body
+  })
