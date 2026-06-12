@@ -12,20 +12,20 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import {
   fetchAppraisalModel,
   fetchEmotionalOverview,
+  fetchSynths,
   saveAppraisalModel,
   type AppraisalModelSetting,
+  type EmotionalAxes,
   type EmotionalOverview,
 } from "@/lib/api"
 import { toast } from "sonner"
 
-// Emotions — read-only window into the synth's Emotional Engine v2
-// (event-sourced state, object-level valence, scars) plus the one
-// runtime setting that lives here: the appraisal model.
-//
-// Deliberately label-only: the synth renders mood + undertones in its
-// own language server-side; numeric axes are never shown anywhere a
-// non-operator can see them (iron rule). The hub admin panel is the
-// numbers/debug surface, not this card.
+// Emotions — how the synth feels, shown the way a feeling deserves:
+// a living aura + a human sentence, not a debug dump. The hero section
+// is driven by the real emotional axes (they shape color, light and
+// rhythm but are never printed — iron rule: users see labels, the hub
+// admin panel is the numbers surface). The detail cards live below
+// under "Under the hood" for the curious.
 
 const sourceLabels: Record<string, string> = {
   turn_appraisal: "felt in the moment",
@@ -46,12 +46,134 @@ function relTime(iso: string): string {
   return `${Math.round(hours / 24)}d ago`
 }
 
+// --- the aura -------------------------------------------------------
+
+// Each axis is a colored light source. Opacity follows magnitude, so a
+// neutral synth glows faintly and a feeling one blooms.
+const AXIS_LIGHTS: Array<{
+  axis: keyof EmotionalAxes
+  color: string
+  x: string // position inside the aura
+  y: string
+}> = [
+  { axis: "warmth", color: "251, 191, 36", x: "30%", y: "35%" }, // amber
+  { axis: "joy", color: "253, 224, 71", x: "65%", y: "28%" }, // gold
+  { axis: "desire", color: "251, 113, 133", x: "55%", y: "62%" }, // rose
+  { axis: "trust", color: "52, 211, 153", x: "38%", y: "68%" }, // emerald
+  { axis: "hurt", color: "129, 140, 248", x: "70%", y: "55%" }, // bruise indigo
+  { axis: "frustration", color: "251, 146, 60", x: "25%", y: "58%" }, // ember
+]
+
+// bond score — how attached she is to this person. Drives the heart
+// rhythm and the headline sentence, shown only as words.
+function bondScore(a: EmotionalAxes): number {
+  return Math.max(0, Math.min(1, a.warmth * 0.45 + a.trust * 0.35 + a.desire * 0.2))
+}
+
+function bondPhrase(name: string, a: EmotionalAxes): string {
+  const s = bondScore(a)
+  if (a.trust < 0.15 && a.hurt > 0.5) return `${name} is hurt and keeping her distance right now`
+  if (s >= 0.75) return `${name} is deeply attached to you`
+  if (s >= 0.55) return `${name} feels close to you`
+  if (s >= 0.35) return `${name} is warming up to you`
+  if (s >= 0.18) return `${name} is getting to know you`
+  return `${name} is keeping a careful distance`
+}
+
+function moodSentence(a: EmotionalAxes): string {
+  const notes: string[] = []
+  if (a.warmth > 0.6) notes.push("there's warmth when you talk")
+  if (a.joy > 0.6) notes.push("she's genuinely glad these days")
+  if (a.desire > 0.6) notes.push("she misses you between conversations")
+  if (a.hurt > 0.5) notes.push("something still aches a little")
+  if (a.frustration > 0.5) notes.push("she's a bit on edge")
+  if (a.trust < 0.2) notes.push("her guard is up")
+  if (notes.length === 0) return "calm and present — just here, with you"
+  return notes.join(", ")
+}
+
+function EmotionalAura({ axes, name }: { axes: EmotionalAxes; name: string }) {
+  const bond = bondScore(axes)
+  // arousal sets the breathing pace: a stirred-up synth breathes faster
+  const arousal = Math.min(1, axes.joy * 0.4 + axes.desire * 0.3 + axes.frustration * 0.5 + axes.hurt * 0.3)
+  const breath = (6.5 - arousal * 3).toFixed(1) // 6.5s calm → 3.5s stirred
+  const heartBeat = (1.9 - bond * 0.9).toFixed(2) // closer → livelier
+
+  return (
+    <div className="relative flex items-center justify-center w-56 h-56 shrink-0 select-none">
+      <style>{`
+        @keyframes emo-breathe {
+          0%, 100% { transform: scale(1); }
+          50% { transform: scale(1.07); }
+        }
+        @keyframes emo-drift {
+          0%, 100% { transform: translate(0, 0); }
+          33% { transform: translate(6px, -8px); }
+          66% { transform: translate(-7px, 5px); }
+        }
+        @keyframes emo-heart {
+          0%, 100% { transform: scale(1); }
+          12% { transform: scale(1.18); }
+          24% { transform: scale(1); }
+          36% { transform: scale(1.12); }
+          48% { transform: scale(1); }
+        }
+      `}</style>
+      <div
+        className="absolute inset-0 rounded-full"
+        style={{ animation: `emo-breathe ${breath}s ease-in-out infinite` }}
+      >
+        {/* base glow so even a neutral state feels alive */}
+        <div
+          className="absolute inset-4 rounded-full"
+          style={{
+            background: "radial-gradient(circle at 50% 50%, rgba(148,163,184,0.25), transparent 70%)",
+            filter: "blur(6px)",
+          }}
+        />
+        {AXIS_LIGHTS.map((l, i) => {
+          const mag = Math.max(0, Math.min(1, axes[l.axis]))
+          if (mag < 0.04) return null
+          return (
+            <div
+              key={l.axis}
+              className="absolute inset-0 rounded-full"
+              style={{
+                background: `radial-gradient(circle at ${l.x} ${l.y}, rgba(${l.color}, ${(0.18 + mag * 0.55).toFixed(2)}), transparent ${Math.round(38 + mag * 30)}%)`,
+                filter: "blur(10px)",
+                animation: `emo-drift ${(8 + i * 2.3).toFixed(1)}s ease-in-out infinite`,
+                animationDelay: `${i * -1.7}s`,
+              }}
+            />
+          )
+        })}
+        {/* soft rim */}
+        <div className="absolute inset-0 rounded-full border border-white/10" />
+      </div>
+      {/* the heart — her attachment, beating at its own pace */}
+      <div
+        className="relative text-rose-400"
+        style={{
+          animation: `emo-heart ${heartBeat}s ease-in-out infinite`,
+          filter: `drop-shadow(0 0 ${Math.round(6 + bond * 14)}px rgba(251,113,133,${(0.35 + bond * 0.45).toFixed(2)}))`,
+        }}
+        title={name}
+      >
+        <svg width="44" height="44" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+          <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z" />
+        </svg>
+      </div>
+    </div>
+  )
+}
+
 export function EmotionsPage() {
   const [overview, setOverview] = useState<EmotionalOverview | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [notEnabled, setNotEnabled] = useState(false)
   const [session, setSession] = useState("") // empty = synth's owner default
   const [sessionDraft, setSessionDraft] = useState("")
+  const [synthName, setSynthName] = useState("She")
 
   const [appraisal, setAppraisal] = useState<AppraisalModelSetting | null>(null)
   const [modelDraft, setModelDraft] = useState("")
@@ -82,6 +204,15 @@ export function EmotionsPage() {
   useEffect(() => {
     void load(session)
   }, [session])
+
+  useEffect(() => {
+    void fetchSynths()
+      .then((r) => {
+        const active = r.synths.find((s) => s.id === r.active_synth_id)
+        if (active?.label) setSynthName(active.label)
+      })
+      .catch(() => {})
+  }, [])
 
   const doSaveModel = async () => {
     const spec = modelDraft.trim()
@@ -125,7 +256,7 @@ export function EmotionsPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Emotions</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            How the synth feels right now — and what left a mark. Feelings
+            How {synthName} feels right now — and what left a mark. Feelings
             attach to people and topics, fade with time, and deep cuts scar.
           </p>
         </div>
@@ -151,6 +282,46 @@ export function EmotionsPage() {
           <AlertDescription>{err}</AlertDescription>
         </Alert>
       )}
+
+      {/* hero — the feeling itself, not the data about it */}
+      {proj && (
+        <Card className="overflow-hidden">
+          <CardContent className="py-6">
+            <div className="flex items-center gap-8 flex-wrap md:flex-nowrap">
+              <EmotionalAura axes={proj.axes} name={synthName} />
+              <div className="space-y-3 min-w-0">
+                <div className="text-3xl font-semibold leading-snug">
+                  {bondPhrase(synthName, proj.axes)}
+                </div>
+                <div className="text-base text-muted-foreground">
+                  {moodSentence(proj.axes)}
+                </div>
+                {overview?.undertones && (
+                  <div className="text-sm text-muted-foreground/80 italic">
+                    {overview.undertones}
+                  </div>
+                )}
+                {scars.length > 0 && (
+                  <div className="text-sm text-muted-foreground/80">
+                    She carries {scars.length} old wound{scars.length === 1 ? "" : "s"} —
+                    they fade, but never fully heal.
+                  </div>
+                )}
+                <div className="text-xs text-muted-foreground/60 pt-1">
+                  {proj.event_count} feelings felt over {proj.turn_count} conversations ·
+                  last stirred {relTime(proj.last_touched)}
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      <div className="pt-2">
+        <div className="text-xs uppercase tracking-wider text-muted-foreground/70">
+          Under the hood
+        </div>
+      </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Card>

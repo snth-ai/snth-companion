@@ -1796,10 +1796,21 @@ export type EmotionalEventItem = {
   reason?: string
 }
 
+export type EmotionalAxes = {
+  desire: number
+  warmth: number
+  hurt: number
+  frustration: number
+  joy: number
+  trust: number
+}
+
 export type EmotionalOverview = {
   session: string
   projection: {
     scope: string
+    // axes drive the aura visualization ONLY - never rendered as numbers
+    axes: EmotionalAxes
     turn_count: number
     event_count: number
     last_touched: string
