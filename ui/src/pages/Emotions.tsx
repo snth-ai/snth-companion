@@ -18,7 +18,7 @@ import {
   type EmotionalAxes,
   type EmotionalOverview,
 } from "@/lib/api"
-import { EmotionalSky } from "@/components/EmotionalSky"
+import { EmotionalCore } from "@/components/EmotionalCore"
 import { toast } from "sonner"
 
 // Emotions — how the synth feels, shown the way a feeling deserves:
@@ -192,35 +192,59 @@ export function EmotionsPage() {
         </Alert>
       )}
 
-      {/* hero — her sky right now. The scene IS the state: dawn light is
-          warmth, aurora is feeling, the moon is you (phase = attachment),
-          named stars are what she has feelings about, ringed stars are
-          scars that never leave her sky. */}
+      {/* hero — her feeling as a field of light. Fluid color masses
+          (one hue per axis, brightness = magnitude) drift on slow
+          orbits under film grain; the words carry the meaning. */}
       {proj && (
-        <div className="relative select-none">
-          <EmotionalSky
-            axes={proj.axes}
-            valences={valences}
-            scars={scars}
-            seed={overview?.session ?? "sky"}
-          />
-          <div className="pointer-events-none absolute top-3 left-5 text-[10px] uppercase tracking-[0.3em] text-slate-400/60">
-            {synthName === "She" ? "her sky" : `${synthName}'s sky`} · right now
-          </div>
-          <div className="pointer-events-none absolute inset-x-0 bottom-0 rounded-b-xl bg-gradient-to-t from-black/60 via-black/25 to-transparent px-6 pb-5 pt-12">
-            <div className="text-2xl md:text-3xl font-semibold leading-snug text-slate-50 drop-shadow">
-              {bondPhrase(synthName, proj.axes)}
-            </div>
-            <div className="text-sm md:text-base text-slate-300 mt-1">
-              {moodSentence(proj.axes)}
-            </div>
-            {overview?.undertones && (
-              <div className="text-xs md:text-sm text-slate-400 italic mt-1">
-                {overview.undertones}
+        <div className="relative h-[420px] rounded-2xl overflow-hidden border border-white/[0.06] select-none bg-[#07070d]">
+          <EmotionalCore axes={proj.axes} />
+          <div className="relative z-10 flex h-full flex-col justify-between p-8 md:p-10">
+            <div className="flex items-start justify-between">
+              <div className="text-[11px] uppercase tracking-[0.4em] text-white/35">
+                {synthName === "She" ? "her state of mind" : `${synthName} · state of mind`}
               </div>
-            )}
-            <div className="text-[11px] text-slate-500 mt-2">
-              last stirred {relTime(proj.last_touched)}
+              <div className="flex items-center gap-2 text-[11px] text-white/30">
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400/80 animate-pulse" />
+                live · stirred {relTime(proj.last_touched)}
+              </div>
+            </div>
+            <div className="max-w-3xl space-y-4">
+              <div className="text-4xl md:text-[52px] font-extralight leading-[1.05] tracking-tight text-white">
+                {bondPhrase(synthName, proj.axes)}
+              </div>
+              <div className="text-base md:text-lg font-light text-white/60">
+                {moodSentence(proj.axes)}
+              </div>
+              {(valences.length > 0 || scars.length > 0) && (
+                <div className="flex flex-wrap items-center gap-2 pt-2">
+                  {[...valences]
+                    .sort((x, y) => y.event_count - x.event_count)
+                    .slice(0, 4)
+                    .map((v) => {
+                      const wounded =
+                        (v.axes ? v.axes.hurt >= 0.25 : false) ||
+                        scarredKeys.has(v.subject_key)
+                      return (
+                        <span
+                          key={v.subject_key}
+                          className={
+                            "rounded-full border px-3.5 py-1.5 text-xs backdrop-blur-md " +
+                            (wounded
+                              ? "border-rose-300/25 bg-rose-500/10 text-rose-200/80"
+                              : "border-white/15 bg-white/[0.07] text-white/70")
+                          }
+                        >
+                          {(v.label || v.subject_key.replace(/^(str|mem2):/, "")).toLowerCase()}
+                        </span>
+                      )
+                    })}
+                  {scars.length > 0 && (
+                    <span className="rounded-full border border-rose-300/20 bg-rose-500/[0.07] px-3.5 py-1.5 text-xs text-rose-200/60 backdrop-blur-md">
+                      {scars.length} old wound{scars.length === 1 ? "" : "s"}
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         </div>
