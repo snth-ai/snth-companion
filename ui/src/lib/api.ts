@@ -1781,6 +1781,8 @@ export type EmotionalValence = {
   scope: string
   subject_key: string
   label: string
+  // residue axes - drive the constellation tint only, never printed
+  axes?: EmotionalAxes
   event_count: number
   last_ts: string
 }
