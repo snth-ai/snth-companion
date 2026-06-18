@@ -647,6 +647,26 @@ export const upsertProject = (
 export const deleteProject = (id: string) =>
   synthFetch(`/api/projects/delete?id=${encodeURIComponent(id)}`, "POST")
 
+// --- Project Bridge: connect a coding tool (synth-as-MCP-server) ---
+
+export type ProjectConnect = {
+  mcp_url: string
+  token: string
+  transport: string
+  auth_header: { name: string; value: string }
+  app_setup: { url: string; header: Record<string, string>; note: string }
+  commands: Record<string, string>
+}
+
+// projectConnect mints a fresh MCP token on the synth and returns the per-tool
+// setup (CLI commands + GUI app_setup). Routed through synth-fetch like every
+// other browse API; the synth accepts the hub internal token on /api/project/*.
+export const projectConnect = (): Promise<ProjectConnect> =>
+  synthFetch<ProjectConnect>(`/api/project/connect`, "POST", {}).then((r) => {
+    if (!r.ok) throw new Error(`connect failed: synth HTTP ${r.status}`)
+    return r.body
+  })
+
 export type SeedSimilarResponse = {
   ok: boolean
   scanned: number
