@@ -667,6 +667,60 @@ export const projectConnect = (): Promise<ProjectConnect> =>
     return r.body
   })
 
+// --- Project Bridge: Projects V2 (see + prune project memory/library) ---
+
+export type ProjectRecall = {
+  project_id: string
+  context: string
+  item_ids?: string[]
+}
+
+// projectRecall returns the Tier-1 card the synth always recalls for a project
+// (status, open loops, decisions, location) as a human-readable block.
+export const projectRecall = (slug: string): Promise<ProjectRecall> =>
+  synthGet(`/api/project/recall?project=${encodeURIComponent(slug)}`)
+
+export type LibDoc = {
+  id: string
+  path: string
+  title: string
+  bytes: number
+  created_at: string
+  updated_at: string
+  accessed_at: string | null
+  access_count: number
+}
+
+export type LibList = {
+  project_id: string
+  count: number
+  total_bytes: number
+  docs: LibDoc[]
+}
+
+// projectLibraryList returns the Tier-2 library docs (metadata only, no bodies)
+// + total size, for the Projects V2 prune view.
+export const projectLibraryList = (slug: string): Promise<LibList> =>
+  synthGet(`/api/project/library/list?project=${encodeURIComponent(slug)}`)
+
+export const projectLibraryDelete = (slug: string, path: string) =>
+  synthFetch(
+    `/api/project/library/delete?project=${encodeURIComponent(slug)}&path=${encodeURIComponent(path)}`,
+    "POST",
+  ).then((r) => {
+    if (!r.ok) throw new Error(`delete failed: synth HTTP ${r.status}`)
+    return r.body
+  })
+
+export const projectForget = (slug: string, hard = false) =>
+  synthFetch(
+    `/api/project/forget?project=${encodeURIComponent(slug)}${hard ? "&hard=true" : ""}`,
+    "POST",
+  ).then((r) => {
+    if (!r.ok) throw new Error(`forget failed: synth HTTP ${r.status}`)
+    return r.body
+  })
+
 export type SeedSimilarResponse = {
   ok: boolean
   scanned: number

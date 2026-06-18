@@ -28,6 +28,7 @@ import { PublicPage } from "@/pages/Public"
 import { PlacesPage } from "@/pages/Places"
 import { MCPPage } from "@/pages/MCP"
 import { CodingToolsPage } from "@/pages/CodingTools"
+import { ProjectsV2Page } from "@/pages/ProjectsV2"
 import { SkillsPage } from "@/pages/Skills"
 import { Toaster } from "@/components/ui/sonner"
 
@@ -69,6 +70,7 @@ export default function App() {
             <Route path="places" element={<PlacesPage />} />
             <Route path="mcp" element={<MCPPage />} />
             <Route path="coding-tools" element={<CodingToolsPage />} />
+            <Route path="projects-v2" element={<ProjectsV2Page />} />
             <Route path="skills" element={<SkillsPage />} />
           </Route>
         </Routes>
