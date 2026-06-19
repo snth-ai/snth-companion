@@ -40,14 +40,30 @@ fs.mkdirSync(DOWNLOADS, { recursive: true });
 let context = null;
 let activePage = null;
 
+// SNTH_PW_GRANT_MEDIA=1 (set by Mia's companion for the Real-Time call
+// feature) auto-accepts getUserMedia and ungates audio autoplay so the
+// headed Chromium can join a Google Meet without a permission dialog and
+// actually play the call audio. Off by default — normal browsing is
+// unaffected.
+const GRANT_MEDIA = process.env.SNTH_PW_GRANT_MEDIA === "1";
+
 async function ensure() {
   if (context) return;
-  context = await chromium.launchPersistentContext(PROFILE, {
+  const launchArgs = ["--disable-blink-features=AutomationControlled"];
+  const ctxOpts = {
     headless: HEADLESS,
     viewport: { width: 1280, height: 800 },
     acceptDownloads: true,
-    args: ["--disable-blink-features=AutomationControlled"],
-  });
+  };
+  if (GRANT_MEDIA) {
+    launchArgs.push(
+      "--use-fake-ui-for-media-stream",
+      "--autoplay-policy=no-user-gesture-required",
+    );
+    ctxOpts.permissions = ["microphone", "camera"];
+  }
+  ctxOpts.args = launchArgs;
+  context = await chromium.launchPersistentContext(PROFILE, ctxOpts);
   const pages = context.pages();
   activePage = pages.length ? pages[0] : await context.newPage();
   context.on("page", (p) => { activePage = p; });

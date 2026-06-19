@@ -41,6 +41,10 @@ func (s *UIServer) registerSPAAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/listen/start", s.apiListenStart)
 	mux.HandleFunc("/api/listen/stop", s.apiListenStop)
 	mux.HandleFunc("/api/listen/status", s.apiListenStatus)
+	// Real-Time "call" surface (Mia joins a Google Meet, then listen).
+	mux.HandleFunc("/api/call/join", s.apiCallJoin)
+	mux.HandleFunc("/api/call/leave", s.apiCallLeave)
+	mux.HandleFunc("/api/call/status", s.apiCallStatus)
 }
 
 // --- Pair -----------------------------------------------------------
