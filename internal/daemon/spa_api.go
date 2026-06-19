@@ -37,6 +37,10 @@ func (s *UIServer) registerSPAAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/synths/active", s.apiSynthsActive)
 	mux.HandleFunc("/api/synths/update", s.apiSynthsUpdate)
 	mux.HandleFunc("/api/companion-config", s.apiCompanionConfig)
+	// Real-Time "listen" surface (BlackHole capture -> hub transcribe).
+	mux.HandleFunc("/api/listen/start", s.apiListenStart)
+	mux.HandleFunc("/api/listen/stop", s.apiListenStop)
+	mux.HandleFunc("/api/listen/status", s.apiListenStatus)
 }
 
 // --- Pair -----------------------------------------------------------
@@ -319,9 +323,9 @@ func (s *UIServer) apiTools(w http.ResponseWriter, r *http.Request) {
 	// last-invocation outcome + counts.
 	audit := RecentAudit(500)
 	type toolStat struct {
-		Last     *AuditEntry `json:"last,omitempty"`
-		Calls    int         `json:"calls"`
-		Errors   int         `json:"errors"`
+		Last   *AuditEntry `json:"last,omitempty"`
+		Calls  int         `json:"calls"`
+		Errors int         `json:"errors"`
 	}
 	stats := map[string]toolStat{}
 	for _, e := range audit {
