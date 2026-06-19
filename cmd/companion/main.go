@@ -84,6 +84,8 @@ func main() {
 	tools.RegisterFlights()
 	tools.RegisterSubagent()
 	tools.RegisterYtDlp()
+	// Browser-based call-join removed: cloud calls go through the synth's
+	// Recall.ai integration (join_call tool), not the Mac Chrome path.
 
 	client := &daemon.Client{}
 

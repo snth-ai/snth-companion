@@ -230,6 +230,7 @@ func (c *CallState) run(ctx context.Context, meetURL string) {
 	notRoutedSince := time.Now()
 	switched := false
 	mErrs := 0
+	var aloneSince time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -255,6 +256,21 @@ func (c *CallState) run(ctx context.Context, meetURL string) {
 			log.Printf("[call] call ended (inCall=false) — cleaning up")
 			c.cleanup("call_ended")
 			return
+		}
+
+		// Everyone else left -> auto-leave so we don't sit in an empty call
+		// (and so the post-call recap fires). 25s grace to avoid leaving on a
+		// brief solo moment right after joining.
+		if probe.AloneInCall {
+			if aloneSince.IsZero() {
+				aloneSince = time.Now()
+			} else if time.Since(aloneSince) > 25*time.Second {
+				log.Printf("[call] alone in call >25s — auto-leaving")
+				c.cleanup("alone")
+				return
+			}
+		} else {
+			aloneSince = time.Time{}
 		}
 
 		if probe.AudioRouted {
@@ -374,6 +390,7 @@ type joinProbe struct {
 	CameraOff            *bool    `json:"cameraOff"`
 	ClickedJoin          bool     `json:"clickedJoin"`
 	LobbyWaiting         bool     `json:"lobbyWaiting"`
+	AloneInCall          bool     `json:"aloneInCall"`
 	NameFilled           bool     `json:"nameFilled"`
 	ManualActionRequired bool     `json:"manualActionRequired"`
 	ManualActionReason   string   `json:"manualActionReason"`
@@ -474,6 +491,9 @@ const meetJoinScript = `(async () => {
 
   const inCall = buttons.some((b) => /leave call/i.test(b.getAttribute('aria-label') || text(b)));
   const lobbyWaiting = !inCall && /asking to be let in|you.?ll join when someone lets you in|waiting to be let in/i.test(pageText);
+  // Alone = everyone else left and Mia is the last one in the call. Meet shows
+  // a "You're the only one here" / "No one else is in the call" banner.
+  const aloneInCall = inCall && /you.?re the only one|no one else is (here|in the call|in this call)|nobody else is (here|in the call)/i.test(pageText);
 
   // Route Meet's media output to BlackHole (per-element setSinkId) so the
   // call audio reaches the BlackHole-input capture WITHOUT touching the
@@ -520,6 +540,7 @@ const meetJoinScript = `(async () => {
     cameraOff: cam ? /turn on camera/i.test(label(cam)) : undefined,
     clickedJoin: Boolean(join),
     lobbyWaiting,
+    aloneInCall,
     nameFilled,
     manualActionRequired: Boolean(reason),
     manualActionReason: reason,
