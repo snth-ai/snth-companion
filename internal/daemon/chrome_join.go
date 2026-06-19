@@ -45,9 +45,11 @@ type CallState struct {
 	manualMessage string
 	lastErr       string
 	lastProbe     string // last join-probe summary (title/url/notes) for diagnosis
-	output        string // capture output device currently forced
-	origOutput    string // output device to restore on leave
-	startedAt     time.Time
+	output         string // capture output device currently forced
+	origOutput     string // output device captured at join start (to restore)
+	outputSwitched bool   // we actually switched the system output (fallback) — restore needed
+	startedAt      time.Time
+	tornDown       bool // cleanup() ran — idempotency guard
 }
 
 var GlobalCall = &CallState{status: "idle"}
@@ -117,6 +119,8 @@ func (c *CallState) Join(meetURL string) error {
 	c.lastErr = ""
 	c.output = ""
 	c.origOutput = ""
+	c.outputSwitched = false
+	c.tornDown = false
 	c.startedAt = time.Now()
 	c.mu.Unlock()
 
@@ -132,51 +136,43 @@ func (c *CallState) run(ctx context.Context, meetURL string) {
 		c.mu.Unlock()
 	}()
 
-	// 1. Force system output to a BlackHole-reaching device so the listen
-	//    connector's BlackHole-input capture carries the call.
-	out := pickCaptureOutput()
+	// Navigate the headed Chromium (mia-chrome profile) to the Meet link.
+	// We do NOT switch the system output here: once in-call the probe routes
+	// ONLY Meet's <audio>/<video> elements to BlackHole via setSinkId, so the
+	// speakers never carry the call (no echo) and Screen Sharing can't hijack
+	// it. The system-output switch is a FALLBACK if setSinkId never confirms.
+	log.Printf("[call] joining %s", meetURL)
+	if _, err := browser.PWNavigate(ctx, meetURL); err != nil {
+		c.setStatus("error", "chrome navigate: "+err.Error())
+		return
+	}
+	c.setStatus("joining", "")
+
+	// Capture the current system output up-front so a later fallback switch
+	// can always be reverted — don't rely on reading it mid-fallback.
 	if orig, err := currentAudioOutput(ctx); err == nil {
 		c.mu.Lock()
 		c.origOutput = orig
 		c.mu.Unlock()
-	}
-	if err := switchAudioOutput(ctx, out); err != nil {
-		c.restoreOutput(ctx)
-		c.setStatus("error", "audio output: "+err.Error())
-		return
-	}
-	c.mu.Lock()
-	c.output = out
-	c.mu.Unlock()
-	log.Printf("[call] output -> %q, joining %s", out, meetURL)
-
-	// 2. Navigate the headed Chromium (mia-chrome profile) to the Meet link.
-	if _, err := browser.PWNavigate(ctx, meetURL); err != nil {
-		c.restoreOutput(ctx)
-		c.setStatus("error", "chrome navigate: "+err.Error())
-		return
+	} else {
+		log.Printf("[call] could not read current output: %v", err)
 	}
 
-	c.setStatus("joining", "")
-
-	// 3. Poll the join probe until we're in the call, or a human-only step
-	//    blocks us (Google login / admission). Idempotent re-clicks.
+	// --- JOIN PHASE: poll until in-call / human-only blocker / timeout. ---
 	deadline := time.Now().Add(150 * time.Second)
 	evalErrs := 0
 	for {
 		select {
 		case <-ctx.Done():
-			c.restoreOutput(ctx)
-			c.setStatus("left", "")
+			c.cleanup("left")
 			return
 		default:
 		}
 		if time.Now().After(deadline) {
-			c.restoreOutput(ctx)
 			c.mu.Lock()
 			if c.status == "waiting_admission" {
 				c.manualReason = "meet-admission-timeout"
-				c.manualMessage = "Nobody admitted Mia within the wait window. Admit her in the Meet and rejoin."
+				c.manualMessage = "Nobody admitted Mia within the wait window. Admit her and rejoin."
 				c.status = "manual_action"
 			} else {
 				c.status = "error"
@@ -190,7 +186,6 @@ func (c *CallState) run(ctx context.Context, meetURL string) {
 		if err != nil {
 			evalErrs++
 			if evalErrs >= 8 {
-				c.restoreOutput(ctx)
 				c.setStatus("error", "join probe: "+err.Error())
 				return
 			}
@@ -198,31 +193,14 @@ func (c *CallState) run(ctx context.Context, meetURL string) {
 			continue
 		}
 		evalErrs = 0
-
-		summary := fmt.Sprintf("inCall=%v lobby=%v reason=%q name=%v title=%q url=%q notes=%v",
-			probe.InCall, probe.LobbyWaiting, probe.ManualActionReason, probe.NameFilled, probe.Title, probe.URL, probe.Notes)
-		c.mu.Lock()
-		c.lastProbe = summary
-		c.mu.Unlock()
-		log.Printf("[call] probe: %s", summary)
+		c.recordProbe(probe)
 
 		if probe.InCall {
-			// 4. We're in. Start the listen capture.
-			if err := GlobalListen.Start(""); err != nil {
-				c.restoreOutput(ctx)
-				c.setStatus("error", "listen start: "+err.Error())
-				return
-			}
-			c.setStatus("in_call", "")
-			log.Printf("[call] in call %s — listen started", meetURL)
-			return
+			break // -> in-call setup below
 		}
-
 		// Terminal human-only blockers (login / permission). Lobby/admission
 		// is NOT terminal — keep waiting, the host may admit.
-		if probe.ManualActionRequired &&
-			probe.ManualActionReason != "meet-admission-required" {
-			c.restoreOutput(ctx)
+		if probe.ManualActionRequired && probe.ManualActionReason != "meet-admission-required" {
 			c.mu.Lock()
 			c.status = "manual_action"
 			c.manualReason = probe.ManualActionReason
@@ -231,43 +209,146 @@ func (c *CallState) run(ctx context.Context, meetURL string) {
 			log.Printf("[call] manual action: %s — %s", probe.ManualActionReason, probe.ManualActionMessage)
 			return
 		}
-
 		if probe.LobbyWaiting || probe.ManualActionReason == "meet-admission-required" {
 			c.setStatus("waiting_admission", "")
 		}
 		time.Sleep(1500 * time.Millisecond)
 	}
+
+	// --- IN-CALL: start the BlackHole capture. ---
+	if err := GlobalListen.Start(""); err != nil {
+		c.cleanup("error")
+		c.setStatus("error", "listen start: "+err.Error())
+		return
+	}
+	c.setStatus("in_call", "")
+	log.Printf("[call] in call %s — listen started", meetURL)
+
+	// --- IN-CALL MAINTENANCE: re-apply setSinkId for new media elements,
+	//     fall back to a system-output switch if it never confirms, and
+	//     auto-clean-up when the call ends (inCall flips to false). ---
+	notRoutedSince := time.Now()
+	switched := false
+	mErrs := 0
+	for {
+		select {
+		case <-ctx.Done():
+			c.cleanup("left")
+			return
+		default:
+		}
+		time.Sleep(3 * time.Second)
+
+		probe, err := c.evalJoin(ctx)
+		if err != nil {
+			mErrs++
+			if mErrs >= 8 { // sustained failure (page gone / chrome dropped) -> ended
+				c.cleanup("call_ended")
+				return
+			}
+			continue
+		}
+		mErrs = 0
+		c.recordProbe(probe)
+
+		if !probe.InCall {
+			log.Printf("[call] call ended (inCall=false) — cleaning up")
+			c.cleanup("call_ended")
+			return
+		}
+
+		if probe.AudioRouted {
+			notRoutedSince = time.Now()
+			c.mu.Lock()
+			c.output = probe.AudioDevice
+			c.mu.Unlock()
+			if switched {
+				// setSinkId took over — undo the fallback so speakers stop echoing.
+				c.restoreOutput(ctx)
+				switched = false
+			}
+		} else if !switched && time.Since(notRoutedSince) > 8*time.Second {
+			// setSinkId never confirmed — fall back to switching the system
+			// output (capture works, but the speakers will echo). origOutput
+			// was already captured at join start.
+			out := pickCaptureOutput()
+			if e := switchAudioOutput(ctx, out); e == nil {
+				switched = true
+				c.mu.Lock()
+				c.outputSwitched = true
+				c.output = out + " (fallback)"
+				c.mu.Unlock()
+				log.Printf("[call] setSinkId unconfirmed — fell back to system output %q", out)
+			}
+		}
+	}
 }
 
-// Leave stops the listen capture, leaves the Meet, and restores output.
+// recordProbe stores a one-line probe summary for /api/call/status and logs it.
+func (c *CallState) recordProbe(p *joinProbe) {
+	summary := fmt.Sprintf("inCall=%v lobby=%v routed=%v reason=%q name=%v title=%q notes=%v",
+		p.InCall, p.LobbyWaiting, p.AudioRouted, p.ManualActionReason, p.NameFilled, p.Title, p.Notes)
+	c.mu.Lock()
+	c.lastProbe = summary
+	c.mu.Unlock()
+	log.Printf("[call] probe: %s", summary)
+}
+
+// cleanup tears down a call exactly once: stop listen, click leave, navigate
+// the tab off Meet, restore any system-output fallback. Idempotent via
+// tornDown so Leave() and the run() goroutine can both call it safely.
+func (c *CallState) cleanup(status string) {
+	c.mu.Lock()
+	if c.tornDown {
+		c.status = status
+		c.mu.Unlock()
+		return
+	}
+	c.tornDown = true
+	c.mu.Unlock()
+
+	GlobalListen.Stop()
+	tctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	if _, err := browser.PWEval(tctx, meetLeaveScript); err != nil {
+		log.Printf("[call] leave click: %v", err)
+	}
+	// Leaving the Meet page also disconnects her from any still-live call.
+	if _, err := browser.PWNavigate(tctx, "about:blank"); err != nil {
+		log.Printf("[call] navigate away: %v", err)
+	}
+	c.restoreOutput(tctx)
+	c.mu.Lock()
+	c.running = false
+	c.status = status
+	c.output = ""
+	c.mu.Unlock()
+}
+
+// Leave stops the call: cancels the run loop and tears down (idempotent).
 func (c *CallState) Leave() {
 	c.mu.Lock()
 	cancel := c.cancel
 	c.cancel = nil
 	c.mu.Unlock()
 	if cancel != nil {
-		cancel()
+		cancel() // an active run() goroutine cleans up on ctx.Done
 	}
-	GlobalListen.Stop()
-	// Best-effort: click the in-call "Leave call" button.
-	ctx, cancelTO := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancelTO()
-	if _, err := browser.PWEval(ctx, meetLeaveScript); err != nil {
-		log.Printf("[call] leave click: %v", err)
-	}
-	c.restoreOutput(ctx)
-	c.mu.Lock()
-	c.running = false
-	c.status = "left"
-	c.output = ""
-	c.mu.Unlock()
+	// If run() already exited (manual_action / timeout) nothing reacts to the
+	// cancel — so tear down here too. cleanup() is idempotent via tornDown.
+	c.cleanup("left")
 }
 
 func (c *CallState) restoreOutput(ctx context.Context) {
 	c.mu.Lock()
+	did := c.outputSwitched
 	orig := c.origOutput
 	c.mu.Unlock()
+	if !did {
+		return // never switched the system output -> nothing to restore
+	}
 	if strings.TrimSpace(orig) == "" {
+		log.Printf("[call] cannot restore output: original not captured")
 		return
 	}
 	// Use a fresh short context — the run ctx may be cancelled on leave.
@@ -279,7 +360,11 @@ func (c *CallState) restoreOutput(ctx context.Context) {
 		c.lastErr = msg
 		c.mu.Unlock()
 		log.Printf("[call] %s", msg)
+		return
 	}
+	c.mu.Lock()
+	c.outputSwitched = false
+	c.mu.Unlock()
 }
 
 // joinProbe mirrors the JSON returned by meetJoinScript.
@@ -293,6 +378,8 @@ type joinProbe struct {
 	ManualActionRequired bool     `json:"manualActionRequired"`
 	ManualActionReason   string   `json:"manualActionReason"`
 	ManualActionMessage  string   `json:"manualActionMessage"`
+	AudioRouted          bool     `json:"audioRouted"`
+	AudioDevice          string   `json:"audioDevice"`
 	Title                string   `json:"title"`
 	URL                  string   `json:"url"`
 	Notes                []string `json:"notes"`
@@ -324,11 +411,14 @@ func isMeetURL(s string) bool {
 }
 
 // meetJoinScript — idempotent Meet join probe, listen-mode (mic + camera OFF,
-// guest name "Mia"). Ported from OpenClaw google-meet meetStatusScript. An
-// EXPRESSION (called IIFE) returning a plain object; the Playwright worker
-// JSON-stringifies it. Re-running is safe: it only clicks join/mute/camera
-// when the corresponding control is present and in the wrong state.
-const meetJoinScript = `(() => {
+// guest name "Mia"). Ported from OpenClaw google-meet meetStatusScript. A
+// called ASYNC IIFE returning a plain object (the routing step is async);
+// the Playwright worker awaits + JSON-stringifies it. Re-running is safe: it
+// only clicks join/mute/camera when the control is in the wrong state, and
+// once in-call it routes Meet's own <audio>/<video> output to BlackHole via
+// setSinkId so the speakers never carry the call (no echo, Screen-Sharing
+// safe) while the BlackHole-input capture still gets it.
+const meetJoinScript = `(async () => {
   const text = (n) => ((n && (n.innerText || n.textContent)) || "").trim();
   const buttons = [...document.querySelectorAll('button')];
   const label = (b) => [b.getAttribute("aria-label"), b.getAttribute("data-tooltip"), text(b)].filter(Boolean).join(" ");
@@ -385,6 +475,33 @@ const meetJoinScript = `(() => {
   const inCall = buttons.some((b) => /leave call/i.test(b.getAttribute('aria-label') || text(b)));
   const lobbyWaiting = !inCall && /asking to be let in|you.?ll join when someone lets you in|waiting to be let in/i.test(pageText);
 
+  // Route Meet's media output to BlackHole (per-element setSinkId) so the
+  // call audio reaches the BlackHole-input capture WITHOUT touching the
+  // system default output -> no speaker echo, immune to Screen Sharing.
+  // Re-applied every tick because Meet adds an element per speaker.
+  let audioRouted = false, audioDevice = "";
+  if (inCall && navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+    try {
+      const els = [...document.querySelectorAll('audio, video')].filter((e) => typeof e.setSinkId === 'function');
+      if (els.length) {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        if (!devices.length) notes.push("enumerateDevices empty");
+        else if (!devices.some((d) => d.kind === 'audiooutput')) notes.push("no audiooutput devices (mic perm?)");
+        const bh = devices.find((d) => d.kind === 'audiooutput' && /\bBlackHole\s+2ch\b/i.test(d.label || ''))
+                || devices.find((d) => d.kind === 'audiooutput' && /\bBlackHole\b/i.test(d.label || ''));
+        if (bh && bh.deviceId) {
+          for (const e of els) {
+            if (e.sinkId !== bh.deviceId) { try { await e.setSinkId(bh.deviceId); } catch (_) {} }
+          }
+          audioRouted = els.some((e) => e.sinkId === bh.deviceId);
+          audioDevice = bh.label || "BlackHole 2ch";
+        } else if (devices.some((d) => d.kind === 'audiooutput' && d.label)) {
+          notes.push("BlackHole output not visible to Meet");
+        }
+      }
+    } catch (e) { notes.push("route err: " + (e && e.message || e)); }
+  }
+
   let reason, message;
   if (!inCall && (host === "accounts.google.com" || /use your google account|to continue to google meet|choose an account|sign in to (join|continue)/i.test(pageText))) {
     reason = "google-login-required";
@@ -407,6 +524,8 @@ const meetJoinScript = `(() => {
     manualActionRequired: Boolean(reason),
     manualActionReason: reason,
     manualActionMessage: message,
+    audioRouted,
+    audioDevice,
     title: document.title,
     url: location.href,
     notes
