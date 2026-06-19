@@ -80,12 +80,13 @@ func main() {
 	tools.RegisterReminders()
 	tools.RegisterContacts()
 	tools.RegisterMessages()
-	tools.RegisterBrowser()
+	tools.RegisterBrowser() // general CDP browser (page browsing/viewing). Meeting joins still go through the synth Recall join_call, not Chrome.
 	tools.RegisterFlights()
 	tools.RegisterSubagent()
 	tools.RegisterYtDlp()
-	// Browser-based call-join removed: cloud calls go through the synth's
-	// Recall.ai integration (join_call tool), not the Mac Chrome path.
+	// Browser-based call-join (RegisterCallTools / chrome_join) stays unregistered:
+	// cloud calls go through the synth's Recall.ai integration (join_call tool),
+	// not the Mac Chrome path. The general browser above is back for page viewing.
 
 	client := &daemon.Client{}
 
