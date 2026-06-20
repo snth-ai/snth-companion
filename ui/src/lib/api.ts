@@ -538,6 +538,42 @@ const synthGet = <T = unknown>(path: string): Promise<T> =>
     return r.body
   })
 
+const synthPost = <T = unknown>(path: string, body: unknown): Promise<T> =>
+  synthFetch<T>(path, "POST", body).then((r) => {
+    if (!r.ok) throw new Error(`synth HTTP ${r.status}`)
+    return r.body
+  })
+
+// --- Real-Time tool allowlist (which tools she may use in live voice/calls) ---
+
+export type RealtimeTool = {
+  name: string
+  description: string
+  default_voice: boolean
+  enabled: boolean
+}
+export type RealtimeSettings = {
+  customized: boolean
+  enabled_tools: string[]
+  tools: RealtimeTool[]
+}
+export const fetchRealtimeSettings = (): Promise<RealtimeSettings> =>
+  synthGet(`/api/realtime/settings`)
+export const saveRealtimeSettings = (
+  enabled: string[],
+): Promise<{ ok: boolean }> => synthPost(`/api/realtime/settings`, { enabled_tools: enabled })
+
+// --- Integrations: Recall.ai meeting-bot key ---
+
+export type RecallConfig = { configured: boolean; region_host: string }
+export const fetchRecallConfig = (): Promise<RecallConfig> =>
+  synthGet(`/api/integrations/recall`)
+export const saveRecallConfig = (
+  api_key: string,
+  region_host: string,
+): Promise<{ ok: boolean }> =>
+  synthPost(`/api/integrations/recall`, { api_key, region_host })
+
 export const fetchWikiList = (
   opts: {
     type?: string

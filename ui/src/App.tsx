@@ -30,6 +30,8 @@ import { MCPPage } from "@/pages/MCP"
 import { CodingToolsPage } from "@/pages/CodingTools"
 import { ProjectsV2Page } from "@/pages/ProjectsV2"
 import { SkillsPage } from "@/pages/Skills"
+import { IntegrationsPage } from "@/pages/Integrations"
+import { RealtimePage } from "@/pages/Realtime"
 import { Toaster } from "@/components/ui/sonner"
 
 // HashRouter (not BrowserRouter) so in-page navigation never triggers
@@ -71,6 +73,8 @@ export default function App() {
             <Route path="mcp" element={<MCPPage />} />
             <Route path="coding-tools" element={<CodingToolsPage />} />
             <Route path="projects-v2" element={<ProjectsV2Page />} />
+            <Route path="integrations" element={<IntegrationsPage />} />
+            <Route path="realtime" element={<RealtimePage />} />
             <Route path="skills" element={<SkillsPage />} />
           </Route>
         </Routes>
