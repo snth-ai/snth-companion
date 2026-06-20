@@ -587,6 +587,8 @@ export type CallSettings = {
   openai_voice: string
   openai_model: string
   brain_model: string
+  brain_effort: string
+  brain_fast: boolean
   engines: string[]
   elevenlabs_voice: string
   elevenlabs_key_set: boolean
@@ -601,6 +603,8 @@ export const saveCallSettings = (cfg: {
   openai_voice: string
   openai_model: string
   brain_model: string
+  brain_effort: string
+  brain_fast: boolean
 }): Promise<{ ok: boolean }> => synthPost(`/api/call/settings`, cfg)
 
 export const fetchWikiList = (

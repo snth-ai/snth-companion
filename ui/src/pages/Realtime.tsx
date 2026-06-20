@@ -44,6 +44,8 @@ export function RealtimePage() {
   const [oaVoice, setOaVoice] = useState("marin")
   const [oaModel, setOaModel] = useState("gpt-realtime-2")
   const [brainModel, setBrainModel] = useState("")
+  const [brainEffort, setBrainEffort] = useState("")
+  const [brainFast, setBrainFast] = useState(false)
 
   const load = async () => {
     setErr(null)
@@ -56,6 +58,8 @@ export function RealtimePage() {
       setOaVoice(c.openai_voice || "marin")
       setOaModel(c.openai_model || "gpt-realtime-2")
       setBrainModel(c.brain_model || "")
+      setBrainEffort(c.brain_effort || "")
+      setBrainFast(!!c.brain_fast)
       setTools(t)
       setEnabled(new Set(t.tools.filter((x) => x.enabled).map((x) => x.name)))
     } catch (e) {
@@ -78,6 +82,8 @@ export function RealtimePage() {
         openai_voice: oaVoice.trim(),
         openai_model: oaModel.trim(),
         brain_model: brainModel.trim(),
+        brain_effort: brainEffort,
+        brain_fast: brainFast,
       })
       toast.success("Call settings saved — applies on the next call")
       await load()
@@ -186,8 +192,35 @@ export function RealtimePage() {
               />
               <p className="text-xs text-muted-foreground">
                 The model that thinks for her in calls. <code>main</code> = your chat
-                model. A faster model (e.g. a flash) cuts per-turn latency. GPT Realtime
-                uses its own model (above), not this.
+                model. A faster model (e.g. <code>codex:gpt-5.5</code>) cuts per-turn
+                latency. GPT Realtime uses its own model (above), not this.
+              </p>
+
+              {/* effort + speed (apply to a specific brain model, not "main") */}
+              <div className="flex flex-wrap items-center gap-4 pt-1">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-muted-foreground">Effort</span>
+                  {["", "minimal", "low", "medium", "high"].map((e) => (
+                    <button
+                      key={e || "auto"}
+                      onClick={() => setBrainEffort(e)}
+                      className={cn(
+                        "rounded px-2 py-0.5 text-xs border transition-colors",
+                        brainEffort === e ? "border-primary bg-primary/10" : "border-border hover:bg-muted/50",
+                      )}
+                    >
+                      {e || "auto"}
+                    </button>
+                  ))}
+                </div>
+                <label className="flex items-center gap-2 text-xs">
+                  <Switch checked={brainFast} onCheckedChange={setBrainFast} />
+                  <span>Fast (accelerated tier)</span>
+                </label>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Effort + Fast apply to a specific brain model (e.g. <code>codex:gpt-5.5</code> +
+                low + fast), not <code>main</code>. Lower effort = faster.
               </p>
             </div>
           ) : null}
