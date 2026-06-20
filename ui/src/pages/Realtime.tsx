@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import { Radio, Loader2, Save, Search, Sparkles, Mic, Cpu, Zap } from "lucide-react"
+import { Radio, Loader2, Save, Search, Sparkles, Mic, Cpu, Zap, Ear } from "lucide-react"
 import { toast } from "sonner"
 import {
   Card,
@@ -27,6 +27,7 @@ const ENGINES: { id: string; label: string; hint: string; icon: typeof Mic }[] =
   { id: "convai", label: "ElevenLabs", hint: "Her real voice + her brain. Natural turn-taking. Higher latency.", icon: Mic },
   { id: "openai", label: "GPT Realtime", hint: "OpenAI voice + GPT brain. Lowest latency, native barge-in.", icon: Zap },
   { id: "cascade", label: "Cascade", hint: "Our own STT → brain → TTS. Fallback / debug.", icon: Cpu },
+  { id: "listen", label: "Listen only", hint: "Whisper transcription → memory. No brain, no voice. The dictaphone: joins, listens, remembers.", icon: Ear },
 ]
 
 export function RealtimePage() {
@@ -180,8 +181,16 @@ export function RealtimePage() {
             <Switch checked={speak} onCheckedChange={setSpeak} />
           </div>
 
+          {engine === "listen" ? (
+            <div className="rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground">
+              Listen-only: she joins muted, transcribes the call with Whisper, and
+              stores the transcript to call memory. No brain, no voice — speak &amp;
+              brain settings don&apos;t apply. Retrieve later with call_search / call_open.
+            </div>
+          ) : null}
+
           {/* Call brain model — applies to engines that use her brain (convai/cascade) */}
-          {engine !== "openai" ? (
+          {engine !== "openai" && engine !== "listen" ? (
             <div className="grid gap-1.5">
               <Label htmlFor="brain">Call brain model</Label>
               <Input
