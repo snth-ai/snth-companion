@@ -24,6 +24,7 @@ export function IntegrationsPage() {
   const [recall, setRecall] = useState<RecallConfig | null>(null)
   const [key, setKey] = useState("")
   const [region, setRegion] = useState(DEFAULT_REGION)
+  const [lang, setLang] = useState("auto")
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
@@ -33,6 +34,7 @@ export function IntegrationsPage() {
       const c = await fetchRecallConfig()
       setRecall(c)
       if (c.region_host) setRegion(c.region_host)
+      if (c.language_code) setLang(c.language_code)
     } catch (e) {
       setErr(String((e as Error).message ?? e))
     }
@@ -46,7 +48,11 @@ export function IntegrationsPage() {
     setBusy(true)
     setErr(null)
     try {
-      await saveRecallConfig(key.trim(), region.trim())
+      await saveRecallConfig({
+        api_key: key.trim(),
+        region_host: region.trim(),
+        language_code: lang.trim(),
+      })
       toast.success("Recall integration saved")
       setKey("")
       await load()
@@ -113,6 +119,19 @@ export function IntegrationsPage() {
             <p className="text-xs text-muted-foreground">
               The key is region-bound. Wrong region returns 401. Default:{" "}
               <code>ap-northeast-1</code>.
+            </p>
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="recall-lang">Transcription language</Label>
+            <Input
+              id="recall-lang"
+              placeholder="auto"
+              value={lang}
+              onChange={(e) => setLang(e.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">
+              <code>auto</code> = multilingual (recommended), or a code like{" "}
+              <code>ru</code>. Used by the post-call transcript &amp; cascade STT.
             </p>
           </div>
           <div className="flex items-center gap-3">

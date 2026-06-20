@@ -565,14 +565,41 @@ export const saveRealtimeSettings = (
 
 // --- Integrations: Recall.ai meeting-bot key ---
 
-export type RecallConfig = { configured: boolean; region_host: string }
+export type RecallConfig = {
+  configured: boolean
+  region_host: string
+  language_code: string
+}
 export const fetchRecallConfig = (): Promise<RecallConfig> =>
   synthGet(`/api/integrations/recall`)
-export const saveRecallConfig = (
-  api_key: string,
-  region_host: string,
-): Promise<{ ok: boolean }> =>
-  synthPost(`/api/integrations/recall`, { api_key, region_host })
+export const saveRecallConfig = (cfg: {
+  api_key: string
+  region_host: string
+  language_code: string
+}): Promise<{ ok: boolean }> => synthPost(`/api/integrations/recall`, cfg)
+
+// --- Call settings: engine / speak / agent / voice (companion-editable) ---
+
+export type CallSettings = {
+  engine: string // "convai" | "openai" | "cascade"
+  speak: boolean
+  convai_agent_id: string
+  openai_voice: string
+  openai_model: string
+  engines: string[]
+  elevenlabs_voice: string
+  elevenlabs_key_set: boolean
+  openai_key_set: boolean
+}
+export const fetchCallSettings = (): Promise<CallSettings> =>
+  synthGet(`/api/call/settings`)
+export const saveCallSettings = (cfg: {
+  engine: string
+  speak: boolean
+  convai_agent_id: string
+  openai_voice: string
+  openai_model: string
+}): Promise<{ ok: boolean }> => synthPost(`/api/call/settings`, cfg)
 
 export const fetchWikiList = (
   opts: {
