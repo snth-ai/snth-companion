@@ -43,6 +43,7 @@ export function RealtimePage() {
   const [agentId, setAgentId] = useState("")
   const [oaVoice, setOaVoice] = useState("marin")
   const [oaModel, setOaModel] = useState("gpt-realtime-2")
+  const [brainModel, setBrainModel] = useState("")
 
   const load = async () => {
     setErr(null)
@@ -54,6 +55,7 @@ export function RealtimePage() {
       setAgentId(c.convai_agent_id || "")
       setOaVoice(c.openai_voice || "marin")
       setOaModel(c.openai_model || "gpt-realtime-2")
+      setBrainModel(c.brain_model || "")
       setTools(t)
       setEnabled(new Set(t.tools.filter((x) => x.enabled).map((x) => x.name)))
     } catch (e) {
@@ -75,6 +77,7 @@ export function RealtimePage() {
         convai_agent_id: agentId.trim(),
         openai_voice: oaVoice.trim(),
         openai_model: oaModel.trim(),
+        brain_model: brainModel.trim(),
       })
       toast.success("Call settings saved — applies on the next call")
       await load()
@@ -170,6 +173,24 @@ export function RealtimePage() {
             </div>
             <Switch checked={speak} onCheckedChange={setSpeak} />
           </div>
+
+          {/* Call brain model — applies to engines that use her brain (convai/cascade) */}
+          {engine !== "openai" ? (
+            <div className="grid gap-1.5">
+              <Label htmlFor="brain">Call brain model</Label>
+              <Input
+                id="brain"
+                placeholder="main (or provider:model, e.g. openrouter:google/gemini-2.5-flash)"
+                value={brainModel}
+                onChange={(e) => setBrainModel(e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                The model that thinks for her in calls. <code>main</code> = your chat
+                model. A faster model (e.g. a flash) cuts per-turn latency. GPT Realtime
+                uses its own model (above), not this.
+              </p>
+            </div>
+          ) : null}
 
           {/* Engine-specific config */}
           {engine === "convai" ? (
