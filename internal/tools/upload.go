@@ -20,7 +20,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/snth-ai/snth-companion/internal/config"
@@ -72,9 +74,78 @@ func uploadHandler(ctx context.Context, args json.RawMessage) (any, error) {
 		return nil, fmt.Errorf("file is %d bytes, over the synth's %d-byte cap", fi.Size(), a.MaxBytes)
 	}
 
+	journalAdd(a)
 	go streamUpload(base, cfg.CompanionToken, a, fi.Size())
 
 	return map[string]any{"started": true, "total_size": fi.Size()}, nil
+}
+
+// --- crash-resume journal -------------------------------------------
+//
+// Active uploads persist to uploads.json next to the config; on boot
+// ResumeUploads re-drives each one from the synth's bytes_received (the
+// strict-offset contract makes this exact). Keeps the TZ acceptance
+// "survives a mid-transfer companion restart": launchd KeepAlive brings
+// us back within seconds, well inside the synth's 60s stall window.
+
+var journalMu sync.Mutex
+
+func journalPath() string {
+	return filepath.Join(filepath.Dir(config.Path()), "uploads.json")
+}
+
+func journalLoad() map[string]uploadArgs {
+	m := map[string]uploadArgs{}
+	raw, err := os.ReadFile(journalPath())
+	if err == nil {
+		_ = json.Unmarshal(raw, &m)
+	}
+	return m
+}
+
+func journalSave(m map[string]uploadArgs) {
+	raw, _ := json.Marshal(m)
+	_ = os.WriteFile(journalPath(), raw, 0644)
+}
+
+func journalAdd(a uploadArgs) {
+	journalMu.Lock()
+	defer journalMu.Unlock()
+	m := journalLoad()
+	m[a.UploadID] = a
+	journalSave(m)
+}
+
+func journalRemove(id string) {
+	journalMu.Lock()
+	defer journalMu.Unlock()
+	m := journalLoad()
+	delete(m, id)
+	journalSave(m)
+}
+
+// ResumeUploads re-drives journaled uploads after a restart. Call once
+// from main after config load.
+func ResumeUploads() {
+	m := journalLoad()
+	if len(m) == 0 {
+		return
+	}
+	cfg := config.Get()
+	base := strings.TrimRight(cfg.PairedSynthURL, "/")
+	if base == "" || cfg.CompanionToken == "" {
+		return
+	}
+	for id, a := range m {
+		fi, err := os.Stat(a.Path)
+		if err != nil {
+			log.Printf("[upload] resume %s: source gone (%v), dropping", id, err)
+			journalRemove(id)
+			continue
+		}
+		log.Printf("[upload] resuming %s after restart (%s)", id, a.Path)
+		go streamUpload(base, cfg.CompanionToken, a, fi.Size())
+	}
 }
 
 // streamUpload runs detached: chunk loop with strict-offset resume, then
@@ -83,6 +154,8 @@ func uploadHandler(ctx context.Context, args json.RawMessage) (any, error) {
 func streamUpload(base, token string, a uploadArgs, total int64) {
 	url := base + "/api/companion/upload/" + a.UploadID
 	client := &http.Client{Timeout: 5 * time.Minute}
+
+	defer journalRemove(a.UploadID)
 
 	f, err := os.Open(a.Path)
 	if err != nil {
@@ -109,6 +182,11 @@ func streamUpload(base, token string, a uploadArgs, total int64) {
 		}
 		offset = target
 		return true
+	}
+	if br, ok := fetchBytesReceived(client, url, token); ok && br > 0 {
+		if rehashTo(br) {
+			log.Printf("[upload] %s starting from %d (server already has a prefix)", a.UploadID, br)
+		}
 	}
 
 	for offset < total {
@@ -183,6 +261,29 @@ func streamUpload(base, token string, a uploadArgs, total int64) {
 			return // size/hash mismatch — synth marked it failed
 		}
 	}
+}
+
+// fetchBytesReceived asks the synth how much of the upload it already
+// has (resume seed). ok=false on any error — caller starts at 0 and the
+// strict-offset 409 corrects it anyway.
+func fetchBytesReceived(client *http.Client, url, token string) (int64, bool) {
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, false
+	}
+	var st struct {
+		BytesReceived int64 `json:"bytes_received"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&st) != nil {
+		return 0, false
+	}
+	return st.BytesReceived, true
 }
 
 func fileBase(p string) string {

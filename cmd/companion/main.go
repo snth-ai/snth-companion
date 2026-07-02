@@ -73,6 +73,7 @@ func main() {
 	tools.RegisterBash()
 	tools.RegisterFS()
 	tools.RegisterUpload()
+	tools.ResumeUploads() // re-drive uploads interrupted by a restart (#130)
 	tools.RegisterShortcut()
 	tools.RegisterCalendar()
 	tools.RegisterNotes()
