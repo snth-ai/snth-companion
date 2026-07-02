@@ -72,6 +72,7 @@ func main() {
 	// client connects, so the hello frame advertises them correctly.
 	tools.RegisterBash()
 	tools.RegisterFS()
+	tools.RegisterUpload()
 	tools.RegisterShortcut()
 	tools.RegisterCalendar()
 	tools.RegisterNotes()
