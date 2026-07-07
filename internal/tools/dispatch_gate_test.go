@@ -149,10 +149,20 @@ func TestDispatchDeniedYtDlpNoExec(t *testing.T) {
 	}
 }
 
-// concurrency smoke: the gate must be safe under parallel Dispatch.
+// concurrency smoke: the gate + descriptor lookup must be race-free under
+// parallel Dispatch. Registers a safe tool with a race-free handler (no
+// shared-write) so the -race detector only exercises the registry/gate
+// paths, not the test's own bookkeeping.
 func TestDispatchGateConcurrent(t *testing.T) {
-	var ran bool
-	registerFake(t, "fake_concurrent", "safe", nil, &ran)
+	Register(Descriptor{Name: "fake_concurrent", DangerLevel: "safe"}, func(ctx context.Context, _ json.RawMessage) (any, error) {
+		return "ok", nil
+	})
+	t.Cleanup(func() {
+		mu.Lock()
+		delete(handlers, "fake_concurrent")
+		delete(descs, "fake_concurrent")
+		mu.Unlock()
+	})
 	var wg sync.WaitGroup
 	for i := 0; i < 32; i++ {
 		wg.Add(1)
