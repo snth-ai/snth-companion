@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/snth-ai/snth-companion/internal/approval"
 )
 
 // subagent.go — delegate a concrete coding mission to a local AI CLI
@@ -40,9 +38,10 @@ const (
 
 func RegisterSubagent() {
 	Register(Descriptor{
-		Name:        "remote_subagent",
-		Description: "Delegate a coding mission to Claude Code (claude) or Codex (codex) CLI on the user's Mac. Blocks synchronously until the sub-agent completes the task, then returns full transcript + git diff stat. Intended for concrete missions (e.g. 'refactor package X', 'implement feature Y', 'fix bug Z'), not for chat. Long-running — up to 60 minutes. ALWAYS prompts user approval before spawning.",
-		DangerLevel: "always-prompt",
+		Name:            "remote_subagent",
+		Description:     "Delegate a coding mission to Claude Code (claude) or Codex (codex) CLI on the user's Mac. Blocks synchronously until the sub-agent completes the task, then returns full transcript + git diff stat. Intended for concrete missions (e.g. 'refactor package X', 'implement feature Y', 'fix bug Z'), not for chat. Long-running — up to 60 minutes. ALWAYS prompts user approval before spawning.",
+		DangerLevel:     "always-prompt",
+		ApprovalSummary: subagentSummary,
 	}, subagentHandler)
 }
 
@@ -105,23 +104,8 @@ func subagentHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 		return nil, fmt.Errorf("%s CLI not found in PATH on the paired Mac — install it first (claude: `brew install claude-code` or npm; codex: `brew install codex`)", bin)
 	}
 
-	// Approval is always required — blast radius is too big.
-	preview := a.Task
-	if len(preview) > 300 {
-		preview = preview[:300] + "…"
-	}
-	summary := fmt.Sprintf(
-		"Spawn %s sub-agent in %s\n\nTask:\n    %s\n\nThe sub-agent runs with --dangerously-skip-permissions and can read/write any file inside cwd (and possibly outside). Timeout ~%d min.",
-		a.Agent, a.Cwd, strings.ReplaceAll(preview, "\n", "\n    "),
-		int(subagentDefaultTimeout/time.Minute),
-	)
-	ok, err := approval.Request(ctx, approval.Request_{Tool: "subagent", Summary: summary, Danger: "always-prompt"})
-	if err != nil {
-		return nil, fmt.Errorf("approval: %w", err)
-	}
-	if !ok {
-		return nil, fmt.Errorf("user denied")
-	}
+	// Approval is enforced by the central gate (always-prompt); blast
+	// radius is too big to auto-approve.
 
 	// Build the command. Claude Code and Codex have different flag shapes.
 	var cmd *exec.Cmd
@@ -217,4 +201,26 @@ func clampDuration(ms int, def, max time.Duration) time.Duration {
 		return max
 	}
 	return d
+}
+
+// subagentSummary renders the approval dialog text for remote_subagent.
+func subagentSummary(raw json.RawMessage) (string, string) {
+	var a subagentArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return "", ""
+	}
+	agent := strings.ToLower(strings.TrimSpace(a.Agent))
+	if agent == "" {
+		agent = "claude"
+	}
+	preview := strings.TrimSpace(a.Task)
+	if len(preview) > 300 {
+		preview = preview[:300] + "…"
+	}
+	summary := fmt.Sprintf(
+		"Spawn %s sub-agent in %s\n\nTask:\n    %s\n\nThe sub-agent runs with --dangerously-skip-permissions and can read/write any file inside cwd (and possibly outside). Timeout ~%d min.",
+		agent, strings.TrimSpace(a.Cwd), strings.ReplaceAll(preview, "\n", "\n    "),
+		int(subagentDefaultTimeout/time.Minute),
+	)
+	return summary, ""
 }

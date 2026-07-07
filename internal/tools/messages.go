@@ -12,8 +12,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/snth-ai/snth-companion/internal/approval"
 )
 
 // messages.go — Apple Messages (iMessage/SMS) via two paths.
@@ -37,14 +35,16 @@ import (
 
 func RegisterMessages() {
 	Register(Descriptor{
-		Name:        "remote_messages_send",
-		Description: "Send an iMessage or SMS from the paired Mac via the Messages app. `to` is a phone number (E.164) or iMessage email. Prompts for user approval on every send (messages are visible externally).",
-		DangerLevel: "always-prompt",
+		Name:            "remote_messages_send",
+		Description:     "Send an iMessage or SMS from the paired Mac via the Messages app. `to` is a phone number (E.164) or iMessage email. Prompts for user approval on every send (messages are visible externally).",
+		DangerLevel:     "always-prompt",
+		ApprovalSummary: messagesSendSummary,
 	}, messagesSendHandler)
 	Register(Descriptor{
-		Name:        "remote_messages_recent",
-		Description: "Read recent messages from the paired Mac's Messages history. Requires Full Disk Access granted to the shell/app that launched the companion. Prompts for user approval.",
-		DangerLevel: "always-prompt",
+		Name:            "remote_messages_recent",
+		Description:     "Read recent messages from the paired Mac's Messages history. Requires Full Disk Access granted to the shell/app that launched the companion. Prompts for user approval.",
+		DangerLevel:     "always-prompt",
+		ApprovalSummary: messagesRecentSummary,
 	}, messagesRecentHandler)
 }
 
@@ -68,19 +68,6 @@ func messagesSendHandler(ctx context.Context, raw json.RawMessage) (any, error) 
 	a.Text = strings.TrimRight(a.Text, "\n")
 	if a.To == "" || a.Text == "" {
 		return nil, fmt.Errorf("to and text are required")
-	}
-
-	preview := a.Text
-	if len(preview) > 180 {
-		preview = preview[:180] + "…"
-	}
-	summary := fmt.Sprintf("Send iMessage to %s:\n    %s", a.To, preview)
-	ok, err := approval.Request(ctx, approval.Request_{Tool: "messages_send", Summary: summary, Danger: "always-prompt"})
-	if err != nil {
-		return nil, fmt.Errorf("approval: %w", err)
-	}
-	if !ok {
-		return nil, fmt.Errorf("user denied")
 	}
 
 	service := `"iMessage"`
@@ -132,18 +119,6 @@ func messagesRecentHandler(ctx context.Context, raw json.RawMessage) (any, error
 	}
 	if a.Limit <= 0 || a.Limit > 200 {
 		a.Limit = 50
-	}
-
-	summary := fmt.Sprintf("Read %d recent messages from Messages.app history", a.Limit)
-	if a.Chat != "" {
-		summary += " (chat: " + a.Chat + ")"
-	}
-	ok, err := approval.Request(ctx, approval.Request_{Tool: "messages_recent", Summary: summary, Danger: "always-prompt"})
-	if err != nil {
-		return nil, fmt.Errorf("approval: %w", err)
-	}
-	if !ok {
-		return nil, fmt.Errorf("user denied")
 	}
 
 	home, err := os.UserHomeDir()
@@ -220,4 +195,35 @@ LIMIT %d;
 // / handle inputs (alphanumeric + '+ @ . _' in practice).
 func sqlQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+// messagesSendSummary renders the approval dialog text for remote_messages_send.
+func messagesSendSummary(raw json.RawMessage) (string, string) {
+	var a messagesSendArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return "", ""
+	}
+	to := strings.TrimSpace(a.To)
+	preview := strings.TrimRight(a.Text, "\n")
+	if len(preview) > 180 {
+		preview = preview[:180] + "…"
+	}
+	return fmt.Sprintf("Send iMessage to %s:\n    %s", to, preview), ""
+}
+
+// messagesRecentSummary renders the approval dialog text for remote_messages_recent.
+func messagesRecentSummary(raw json.RawMessage) (string, string) {
+	var a messagesRecentArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return "", ""
+	}
+	limit := a.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	summary := fmt.Sprintf("Read %d recent messages from Messages.app history", limit)
+	if a.Chat != "" {
+		summary += " (chat: " + a.Chat + ")"
+	}
+	return summary, ""
 }

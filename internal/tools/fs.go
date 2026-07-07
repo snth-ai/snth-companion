@@ -12,7 +12,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/snth-ai/snth-companion/internal/approval"
 	"github.com/snth-ai/snth-companion/internal/config"
 	"github.com/snth-ai/snth-companion/internal/sandbox"
 )
@@ -22,14 +21,18 @@ import (
 // in one place.
 func RegisterFS() {
 	Register(Descriptor{
-		Name:        "remote_fs_read",
-		Description: "Read a file on the paired Mac. Binary files are returned base64-encoded.",
-		DangerLevel: "prompt",
+		Name:            "remote_fs_read",
+		Description:     "Read a file on the paired Mac. Binary files are returned base64-encoded.",
+		DangerLevel:     "prompt",
+		GatePolicy:      fsReadGatePolicy,
+		ApprovalSummary: fsReadSummary,
 	}, fsReadHandler)
 	Register(Descriptor{
-		Name:        "remote_fs_write",
-		Description: "Write a file on the paired Mac. Creates parent dirs if missing. Overwrites existing files.",
-		DangerLevel: "prompt",
+		Name:            "remote_fs_write",
+		Description:     "Write a file on the paired Mac. Creates parent dirs if missing. Overwrites existing files.",
+		DangerLevel:     "prompt",
+		GatePolicy:      fsWriteGatePolicy,
+		ApprovalSummary: fsWriteSummary,
 	}, fsWriteHandler)
 	Register(Descriptor{
 		Name:        "remote_fs_list",
@@ -316,41 +319,92 @@ func fsListHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 
 // --- shared ------------------------------------------------------------------
 
-// resolveAndCheck normalizes path, enforces sandbox containment, and on
-// out-of-sandbox access pops the approval dialog. "write" = whether the
-// dialog copy should warn about a write (vs a read/list).
+// resolveAndCheck normalizes + resolves path and enforces sandbox
+// containment. Approval for out-of-sandbox access is handled by the
+// central Dispatch gate (fsReadGatePolicy / fsWriteGatePolicy), so this
+// helper now only resolves the path — by the time a handler runs, the
+// gate has already approved (or the call was inside the sandbox). The
+// `action` / `write` args are retained for call-site clarity but no
+// longer drive a prompt here.
 func resolveAndCheck(ctx context.Context, path, action string, write bool) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("path is required")
 	}
-	cfg := config.Get()
 	resolved, err := sandbox.Resolve(path)
 	if err != nil {
 		return "", fmt.Errorf("resolve: %w", err)
 	}
-	if sandbox.InsideAny(cfg.SandboxRoots, resolved) {
-		return resolved, nil
-	}
-	danger := "always-prompt"
-	summary := fmt.Sprintf("%s outside sandbox:\n    %s", action, resolved)
-	if write {
-		summary = fmt.Sprintf("%s OUTSIDE SANDBOX (writable):\n    %s", action, resolved)
-	}
-	tool := "remote_fs_read"
-	if write {
-		tool = "remote_fs_write"
-	}
-	ok, err := approval.Request(ctx, approval.Request_{
-		Tool:    tool,
-		Summary: summary,
-		Danger:  danger,
-		Path:    resolved,
-	})
-	if err != nil {
-		return "", fmt.Errorf("approval: %w", err)
-	}
-	if !ok {
-		return "", fmt.Errorf("user denied")
-	}
 	return resolved, nil
+}
+
+// fsResolveInside resolves a path and reports whether it lies inside a
+// sandbox root. Shared by the fs gate policies + summaries.
+func fsResolveInside(path string) (resolved string, inside bool, err error) {
+	if path == "" {
+		return "", false, fmt.Errorf("path is required")
+	}
+	resolved, err = sandbox.Resolve(path)
+	if err != nil {
+		return "", false, err
+	}
+	cfg := config.Get()
+	return resolved, sandbox.InsideAny(cfg.SandboxRoots, resolved), nil
+}
+
+// fsGatePolicy is the shared gate decision for fs_read/fs_write: inside
+// the sandbox → GateSkip, outside → GateAlwaysPrompt. Fails closed
+// (GateAlwaysPrompt) on bad args or a resolve error.
+func fsGatePolicy(raw json.RawMessage) GateDecision {
+	var probe struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return GateAlwaysPrompt
+	}
+	_, inside, err := fsResolveInside(probe.Path)
+	if err != nil {
+		return GateAlwaysPrompt
+	}
+	if inside {
+		return GateSkip
+	}
+	return GateAlwaysPrompt
+}
+
+func fsReadGatePolicy(raw json.RawMessage) GateDecision  { return fsGatePolicy(raw) }
+func fsWriteGatePolicy(raw json.RawMessage) GateDecision { return fsGatePolicy(raw) }
+
+// fsReadSummary renders the approval dialog text for an out-of-sandbox
+// remote_fs_read. Returns the resolved path so the trust store can gate
+// on AllowedWriteRoots.
+func fsReadSummary(raw json.RawMessage) (string, string) {
+	var a fsReadArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return "", ""
+	}
+	resolved, _, err := fsResolveInside(a.Path)
+	if err != nil {
+		resolved = a.Path
+	}
+	return fmt.Sprintf("Read file outside sandbox:\n    %s", resolved), resolved
+}
+
+// fsWriteSummary renders the approval dialog text for an out-of-sandbox
+// remote_fs_write, warning that the target is writable.
+func fsWriteSummary(raw json.RawMessage) (string, string) {
+	var a fsWriteArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return "", ""
+	}
+	resolved, _, err := fsResolveInside(a.Path)
+	if err != nil {
+		resolved = a.Path
+	}
+	n := len(a.Content)
+	if a.Encoding == "base64" {
+		if b, derr := base64.StdEncoding.DecodeString(a.Content); derr == nil {
+			n = len(b)
+		}
+	}
+	return fmt.Sprintf("Write %d bytes to file OUTSIDE SANDBOX (writable):\n    %s", n, resolved), resolved
 }

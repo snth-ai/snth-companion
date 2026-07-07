@@ -139,6 +139,13 @@ func Path() string {
 	return filepath.Join(dir(), "config.json")
 }
 
+// DownloadDir is the companion-managed directory that yt-dlp (and other
+// download tools) are confined to. Lives under the support dir so it is
+// isolated from the user's own filesystem. Created 0700 on demand.
+func DownloadDir() string {
+	return filepath.Join(dir(), "downloads")
+}
+
 func dir() string {
 	if runtime.GOOS == "darwin" {
 		home, err := os.UserHomeDir()

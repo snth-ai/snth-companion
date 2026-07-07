@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/snth-ai/snth-companion/internal/approval"
 )
 
 // calendar.go — Apple Calendar via AppleScript.
@@ -31,9 +29,10 @@ func RegisterCalendar() {
 		DangerLevel: "safe",
 	}, calendarListHandler)
 	Register(Descriptor{
-		Name:        "remote_calendar_create",
-		Description: "Create a new event in Apple Calendar on the paired Mac. Prompts for user approval.",
-		DangerLevel: "prompt",
+		Name:            "remote_calendar_create",
+		Description:     "Create a new event in Apple Calendar on the paired Mac. Prompts for user approval.",
+		DangerLevel:     "prompt",
+		ApprovalSummary: calendarCreateSummary,
 	}, calendarCreateHandler)
 	Register(Descriptor{
 		Name:        "remote_calendar_search",
@@ -235,19 +234,6 @@ func calendarCreateHandler(ctx context.Context, raw json.RawMessage) (any, error
 		return nil, fmt.Errorf("end must be after start")
 	}
 
-	summary := fmt.Sprintf("Create calendar event %q\n    %s — %s", a.Title,
-		start.Format("2006-01-02 15:04"), end.Format("2006-01-02 15:04"))
-	if a.Calendar != "" {
-		summary += "\n    in calendar: " + a.Calendar
-	}
-	ok, err := approval.Request(ctx, approval.Request_{Tool: "calendar_create", Summary: summary, Danger: "prompt"})
-	if err != nil {
-		return nil, fmt.Errorf("approval: %w", err)
-	}
-	if !ok {
-		return nil, fmt.Errorf("user denied")
-	}
-
 	calRef := `first calendar whose writable is true`
 	if a.Calendar != "" {
 		calRef = fmt.Sprintf(`first calendar whose name is %s`, EscapeAppleScriptString(a.Calendar))
@@ -362,4 +348,24 @@ func boolAS(b bool) string {
 func mustMarshal(v any) json.RawMessage {
 	raw, _ := json.Marshal(v)
 	return raw
+}
+
+// calendarCreateSummary renders the approval dialog text for remote_calendar_create.
+func calendarCreateSummary(raw json.RawMessage) (string, string) {
+	var a calendarCreateArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return "", ""
+	}
+	a.Title = strings.TrimSpace(a.Title)
+	summary := fmt.Sprintf("Create calendar event %q", a.Title)
+	start, sErr := time.Parse(time.RFC3339, a.Start)
+	end, eErr := time.Parse(time.RFC3339, a.End)
+	if sErr == nil && eErr == nil {
+		summary += fmt.Sprintf("\n    %s — %s",
+			start.Format("2006-01-02 15:04"), end.Format("2006-01-02 15:04"))
+	}
+	if a.Calendar != "" {
+		summary += "\n    in calendar: " + a.Calendar
+	}
+	return summary, ""
 }
