@@ -51,10 +51,16 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	log.SetPrefix("[companion] ")
 
-	if _, err := config.Load(); err != nil {
+	cfg, err := config.Load()
+	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
 	log.Printf("config at %s", config.Path())
+
+	// Durable audit log (H5): persist every RPC + approval decision to a
+	// rotating JSONL under the shared support dir, pruned by
+	// LogRetentionDays. <=0 disables persistence (ring only).
+	daemon.InitAuditPersistence(cfg.LogRetentionDays)
 
 	// Trust store + approval audit hook (Privacy Center, v0.5+).
 	// Trust state lives at ~/Library/Application Support/SNTH Companion/trust.json.

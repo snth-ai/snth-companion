@@ -1,9 +1,9 @@
-// Ring buffer of recent RPCs. Every tool_call → tool_result pair on the
-// WS writes one entry when it resolves. In-memory only — on restart the
-// log is empty. A persistent audit log would be nice but requires
-// thinking about rotation, size caps, and what to redact; this ring is
-// enough to answer "what did the synth just try to do on my machine?"
-// which is the actual UX need.
+// Ring buffer of recent RPCs. Every tool_call -> tool_result pair on the
+// WS writes one entry when it resolves. The ring is in-memory (wiped on
+// restart) and backs the Privacy UI, answering "what did the synth just
+// try to do on my machine?". Since H5, RecordAudit ALSO mirrors every
+// entry to a durable, rotating JSONL trail on disk (audit_persist.go),
+// pruned by config.LogRetentionDays, which survives restarts.
 package daemon
 
 import (
@@ -42,13 +42,17 @@ var (
 // full. Cheap — one lock, one slice shift.
 func RecordAudit(e AuditEntry) {
 	auditMu.Lock()
-	defer auditMu.Unlock()
 	if len(auditBuf) >= auditBufSize {
 		// Drop oldest. copy+slice is O(n) but n≤500 so it's nothing.
 		copy(auditBuf, auditBuf[1:])
 		auditBuf = auditBuf[:auditBufSize-1]
 	}
 	auditBuf = append(auditBuf, e)
+	auditMu.Unlock()
+
+	// Durable trail (H5). Best-effort; no-op when persistence is disabled.
+	// Kept OUTSIDE auditMu so a slow disk never serializes the ring.
+	persistAudit(e)
 }
 
 // RecordAuditApproval is the approval-time hook. Records each {Trust|

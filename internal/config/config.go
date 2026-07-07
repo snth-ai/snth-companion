@@ -146,6 +146,12 @@ func DownloadDir() string {
 	return filepath.Join(dir(), "downloads")
 }
 
+// Dir returns the companion's support directory (the SINGLE
+// "Application Support/snth-companion" dir that config, downloads, tasks,
+// trust, and the audit log all share). Exported so other packages
+// (daemon audit, trust) resolve the same root instead of recomputing it.
+func Dir() string { return dir() }
+
 func dir() string {
 	if runtime.GOOS == "darwin" {
 		home, err := os.UserHomeDir()
