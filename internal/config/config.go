@@ -56,9 +56,9 @@ const (
 // SynthPair is one paired synth — its connection coordinates, role, and
 // freeform tags. Stored in Config.Synths.
 type SynthPair struct {
-	ID         string    `json:"id"`             // synth instance_id, also display key
-	URL        string    `json:"url"`            // wss://<synth>/api/companion/ws base
-	Token      string    `json:"token"`          // bearer
+	ID         string    `json:"id"`    // synth instance_id, also display key
+	URL        string    `json:"url"`   // wss://<synth>/api/companion/ws base
+	Token      string    `json:"token"` // bearer
 	HubURL     string    `json:"hub_url,omitempty"`
 	Label      string    `json:"label,omitempty"` // human-friendly name override
 	Role       SynthRole `json:"role"`
@@ -197,15 +197,22 @@ func Get() *Config {
 }
 
 // Save writes the current config to disk atomically (temp + rename).
+//
+// E3: syncLegacyFromActive MUTATES the struct, and MarshalIndent reads
+// every field — both must run under the write lock or they race a
+// concurrent Update(). We snapshot-marshal under the lock (holding it for
+// the whole sync+marshal), then do the file I/O outside the lock so a slow
+// disk doesn't serialize every reader.
 func Save() error {
-	mu.RLock()
+	mu.Lock()
 	cfg := current
-	mu.RUnlock()
 	if cfg == nil {
+		mu.Unlock()
 		return fmt.Errorf("config not loaded")
 	}
 	cfg.syncLegacyFromActive()
 	raw, err := json.MarshalIndent(cfg, "", "  ")
+	mu.Unlock()
 	if err != nil {
 		return err
 	}
@@ -330,18 +337,16 @@ func (c *Config) migrateFromLegacy() {
 // scalars so existing callers (DefaultSandboxRoot, ws client, hub keys
 // page) keep working until each is refactored to read ActivePair().
 //
-// When Synths is empty, leaves legacy fields alone — caller may have
-// just written legacy fields directly via the deprecated path, and
-// the next migrateFromLegacy() round (next Load) will promote them.
+// E1: when there is no active pair we CLEAR the legacy scalars. Previously
+// this early-returned on len(Synths)==0, which left the just-unpaired
+// synth's URL/token in the scalars — the WS client would then reconnect to
+// a synth the user removed. The pairs list is the source of truth; legacy
+// fields are always a projection of it. Callers that want to seed a NEW
+// pair go through AddOrUpdatePair (which sets an active pair), never by
+// writing the scalars directly.
 func (c *Config) syncLegacyFromActive() {
 	a := c.ActivePair()
 	if a == nil {
-		// Only wipe when ActiveSynthID was non-empty but the pair is
-		// gone (post-RemovePair scenario). When Synths is just empty
-		// from the start, don't touch legacy fields.
-		if c.ActiveSynthID == "" && len(c.Synths) == 0 {
-			return
-		}
 		c.PairedSynthURL = ""
 		c.PairedSynthID = ""
 		c.CompanionToken = ""

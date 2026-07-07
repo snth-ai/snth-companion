@@ -324,9 +324,17 @@ func (s *UIServer) handlePairSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := config.Update(func(c *config.Config) {
-		c.PairedSynthURL = synthURL
-		c.CompanionToken = token
-		c.PairedSynthID = synthID
+		// E2: write into the pairs list (source of truth) + make it active,
+		// so syncLegacyFromActive propagates FROM this pair. Writing only
+		// the legacy scalars used to be silently clobbered by the sync copy
+		// from the (unchanged) active pair on the next Save.
+		c.AddOrUpdatePair(config.SynthPair{
+			ID:    synthID,
+			URL:   synthURL,
+			Token: token,
+			Role:  config.SynthRolePrimary,
+		})
+		_ = c.SetActive(synthID)
 		// Seed default sandbox root for the new synth if user hadn't
 		// overridden. ensureDefaults takes care of the append-if-missing.
 		c.SandboxRoots = append(c.SandboxRoots[:0], c.SandboxRoots...)
@@ -411,10 +419,15 @@ func (s *UIServer) handlePairClaim(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := config.Update(func(c *config.Config) {
-		c.PairedSynthURL = hubResp.SynthURL
-		c.PairedSynthID = hubResp.SynthID
-		c.CompanionToken = hubResp.CompanionToken
-		c.HubURL = hubURL
+		// E2: write into the pairs list + make active (see handlePairSave).
+		c.AddOrUpdatePair(config.SynthPair{
+			ID:     hubResp.SynthID,
+			URL:    hubResp.SynthURL,
+			Token:  hubResp.CompanionToken,
+			HubURL: hubURL,
+			Role:   config.SynthRolePrimary,
+		})
+		_ = c.SetActive(hubResp.SynthID)
 		c.SandboxRoots = append(c.SandboxRoots[:0], c.SandboxRoots...)
 	}); err != nil {
 		s.renderPairError(w, "Save config: "+err.Error())
@@ -447,9 +460,16 @@ func (s *UIServer) handleUnpair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = config.Update(func(c *config.Config) {
-		c.PairedSynthURL = ""
-		c.CompanionToken = ""
-		c.PairedSynthID = ""
+		// E2: actually remove the active pair. Clearing only the legacy
+		// scalars was a no-op — syncLegacyFromActive re-copied them from the
+		// still-present active pair on the next Save.
+		id := c.ActiveSynthID
+		if id == "" {
+			id = c.PairedSynthID
+		}
+		if id != "" {
+			c.RemovePair(id)
+		}
 	})
 	s.Client.Stop()
 	s.Client.Start()
