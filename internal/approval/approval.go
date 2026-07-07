@@ -16,7 +16,6 @@ package approval
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -54,13 +53,12 @@ var (
 	// concurrent RPCs queue behind each other.
 	mu sync.Mutex
 
-	// bypass — legacy dev escape hatch, retained for CI.
-	// SNTH_COMPANION_BYPASS_APPROVAL=1 still auto-approves everything
-	// without going through the trust store. The new owner-facing
-	// path is the Privacy UI's Master toggle, which writes to the
-	// trust store and shows up in audit. bypass leaves no audit trail
-	// for incident-response purposes — keep off in shipped builds.
-	bypass = os.Getenv("SNTH_COMPANION_BYPASS_APPROVAL") == "1"
+	// bypass — the legacy dev escape hatch. Its VALUE is decided at
+	// COMPILE time: in a release build (no `dev` build tag) bypassValue is
+	// the constant false, so SNTH_COMPANION_BYPASS_APPROVAL is inert even
+	// if it leaks into a shipped plist / inherited env (A7). Only a
+	// dev-tagged build reads the env. See bypass_release.go / bypass_dev.go.
+	bypass = bypassValue
 
 	// trustStore is set once at boot via SetTrustStore. nil-safe — when
 	// nil, all decisions fall through to the legacy prompt path (no
@@ -68,6 +66,10 @@ var (
 	trustStore *trust.Store
 	trustMu    sync.RWMutex
 )
+
+// BypassActive reports whether the compiled-in approval bypass is on.
+// Always false in release builds (built without `-tags dev`).
+func BypassActive() bool { return bypassActive() }
 
 // SetTrustStore wires the package-global trust store. Called once at
 // boot from cmd/companion/main. Subsequent calls replace.
