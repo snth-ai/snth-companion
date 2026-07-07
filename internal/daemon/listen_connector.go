@@ -42,6 +42,12 @@ type ListenConnector struct {
 	finals    []string
 	partial   string
 	startedAt time.Time
+	// gen is bumped on every Start/Stop transition (F4). A run() captures
+	// its gen at launch and only mutates shared session state (running,
+	// status) when the current gen still matches — so a Start() that races
+	// the old run's unwind can't have its fresh session clobbered by the
+	// old run's deferred cleanup.
+	gen uint64
 }
 
 var GlobalListen = &ListenConnector{status: "idle", device: defaultListenDevice}
@@ -85,6 +91,8 @@ func (l *ListenConnector) Start(device string) error {
 		l.device = strings.TrimSpace(device)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	l.gen++
+	gen := l.gen
 	l.cancel = cancel
 	l.running = true
 	l.status = "starting"
@@ -95,12 +103,13 @@ func (l *ListenConnector) Start(device string) error {
 	dev, token := l.device, cfg.CompanionToken
 	l.mu.Unlock()
 
-	go l.run(ctx, dev, token)
+	go l.run(ctx, gen, dev, token)
 	return nil
 }
 
 func (l *ListenConnector) Stop() {
 	l.mu.Lock()
+	l.gen++ // invalidate the current run's session (F4)
 	c := l.cancel
 	l.cancel = nil
 	l.running = false
@@ -111,28 +120,40 @@ func (l *ListenConnector) Stop() {
 	}
 }
 
-func (l *ListenConnector) setStatus(st, errMsg string) {
+// setStatus updates status/lastErr only when gen still matches the caller's
+// run generation — a stale run must not overwrite a newer session's status.
+func (l *ListenConnector) setStatus(gen uint64, st, errMsg string) {
 	l.mu.Lock()
-	l.status = st
-	if errMsg != "" {
-		l.lastErr = errMsg
+	if l.gen == gen {
+		l.status = st
+		if errMsg != "" {
+			l.lastErr = errMsg
+		}
 	}
 	l.mu.Unlock()
 }
 
-func (l *ListenConnector) run(ctx context.Context, device, token string) {
-	defer func() {
-		l.mu.Lock()
+// finishRun performs a run's deferred cleanup. F4: it clears session state
+// ONLY when this run still owns the current generation. A Start() (or
+// Stop()+Start()) that raced this run's unwind bumped gen, so an unguarded
+// cleanup would stomp the new session's running=true / status.
+func (l *ListenConnector) finishRun(gen uint64) {
+	l.mu.Lock()
+	if l.gen == gen {
 		l.running = false
 		if l.status == "listening" || l.status == "starting" {
 			l.status = "stopped"
 		}
-		l.mu.Unlock()
-	}()
+	}
+	l.mu.Unlock()
+}
+
+func (l *ListenConnector) run(ctx context.Context, gen uint64, device, token string) {
+	defer l.finishRun(gen)
 
 	idx, err := avfoundationAudioIndex(device)
 	if err != nil {
-		l.setStatus("error", "device: "+err.Error())
+		l.setStatus(gen, "error", "device: "+err.Error())
 		return
 	}
 
@@ -145,7 +166,7 @@ func (l *ListenConnector) run(ctx context.Context, device, token string) {
 	dialer.HandshakeTimeout = 15 * time.Second
 	conn, _, err := dialer.Dial(wsURL, hdr)
 	if err != nil {
-		l.setStatus("error", "hub dial: "+err.Error())
+		l.setStatus(gen, "error", "hub dial: "+err.Error())
 		return
 	}
 	defer conn.Close()
@@ -156,11 +177,11 @@ func (l *ListenConnector) run(ctx context.Context, device, token string) {
 		"-f", "s16le", "-ar", "24000", "-ac", "1", "-")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		l.setStatus("error", "ffmpeg pipe: "+err.Error())
+		l.setStatus(gen, "error", "ffmpeg pipe: "+err.Error())
 		return
 	}
 	if err := cmd.Start(); err != nil {
-		l.setStatus("error", "ffmpeg start: "+err.Error())
+		l.setStatus(gen, "error", "ffmpeg start: "+err.Error())
 		return
 	}
 	defer func() {
@@ -170,7 +191,7 @@ func (l *ListenConnector) run(ctx context.Context, device, token string) {
 		_ = cmd.Wait()
 	}()
 
-	l.setStatus("listening", "")
+	l.setStatus(gen, "listening", "")
 	log.Printf("[listen] streaming %q (avf:%s) -> %s", device, idx, wsURL)
 
 	// Reader: hub frames -> transcript.
@@ -185,13 +206,17 @@ func (l *ListenConnector) run(ctx context.Context, device, token string) {
 				text, _ := ev["text"].(string)
 				final, _ := ev["final"].(bool)
 				l.mu.Lock()
-				if final {
-					if strings.TrimSpace(text) != "" {
-						l.finals = append(l.finals, text)
+				// F4: a stale run's reader must not append to a newer
+				// session's transcript.
+				if l.gen == gen {
+					if final {
+						if strings.TrimSpace(text) != "" {
+							l.finals = append(l.finals, text)
+						}
+						l.partial = ""
+					} else {
+						l.partial = text
 					}
-					l.partial = ""
-				} else {
-					l.partial = text
 				}
 				l.mu.Unlock()
 			case "error":
@@ -219,7 +244,7 @@ func (l *ListenConnector) run(ctx context.Context, device, token string) {
 			})
 			_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if werr := conn.WriteMessage(websocket.TextMessage, frame); werr != nil {
-				l.setStatus("error", "ws write: "+werr.Error())
+				l.setStatus(gen, "error", "ws write: "+werr.Error())
 				return
 			}
 		}
@@ -227,7 +252,7 @@ func (l *ListenConnector) run(ctx context.Context, device, token string) {
 			if rerr == io.EOF || rerr == io.ErrUnexpectedEOF {
 				return
 			}
-			l.setStatus("error", "ffmpeg read: "+rerr.Error())
+			l.setStatus(gen, "error", "ffmpeg read: "+rerr.Error())
 			return
 		}
 	}
