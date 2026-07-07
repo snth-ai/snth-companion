@@ -249,6 +249,13 @@ func sanitizeYtDlpArgs(in []string) ([]string, error) {
 				}
 				val = confined
 			}
+			if name == "--cookies" {
+				confined, err := confineYtDlpCookies(val, dlDir)
+				if err != nil {
+					return nil, err
+				}
+				val = confined
+			}
 			out = append(out, name, val)
 			continue
 		}
@@ -283,6 +290,47 @@ func confineYtDlpOutput(tmpl, dlDir string) (string, error) {
 	base := filepath.Base(tmpl)
 	if base == "" || base == "." || base == string(filepath.Separator) {
 		base = "%(title)s.%(ext)s"
+	}
+	return filepath.Join(dlDir, base), nil
+}
+
+// confineYtDlpCookies confines a --cookies value to the companion's managed
+// download dir. yt-dlp opens the value as a Netscape cookie jar, so an
+// unconfined value (e.g. /etc/passwd, ~/.ssh/known_hosts) would let a
+// compromised synth make yt-dlp open ANY local file (F4). No exec/write/
+// exfil results (yt-dlp doesn't echo the jar back), but we still close the
+// residual arbitrary-open.
+//
+// NOTE on the login_site flow: the synth's cloud-cookie file is created
+// on the SYNTH host (openpaw tools/cloud_cookies.go: os.CreateTemp("",
+// "ytck-*.txt")) and its path is passed verbatim in the argv — that path
+// does NOT exist on the companion's Mac, so the "--cookies <synth-tmp>"
+// flow was already a no-op over the companion runner (yt-dlp can't open a
+// file that isn't there). Confining to DownloadDir therefore breaks no
+// working flow; a real companion-side cookie jar must live under the
+// managed dir. `..` escapes are rejected exactly like -o/--output.
+func confineYtDlpCookies(val, dlDir string) (string, error) {
+	if val == "" {
+		return "", fmt.Errorf("empty --cookies path")
+	}
+	if strings.Contains(val, "..") {
+		return "", fmt.Errorf("--cookies path %q must not contain '..'", val)
+	}
+	// Already under the managed dir → keep verbatim.
+	clean := filepath.Clean(val)
+	if clean == dlDir || strings.HasPrefix(clean, dlDir+string(filepath.Separator)) {
+		return clean, nil
+	}
+	// Anything else (an absolute path elsewhere, e.g. the synth-side
+	// /synthtmp/cookies.txt that doesn't exist on the Mac, or a relative
+	// path) is re-rooted under the managed dir by its final component,
+	// exactly like -o/--output. This keeps the synth's login_site argv
+	// flowing (fail-open, not a hard error that aborts the whole download)
+	// while making it impossible for yt-dlp to open a file OUTSIDE the
+	// managed dir as a cookie jar.
+	base := filepath.Base(val)
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		return "", fmt.Errorf("--cookies path %q is not a file", val)
 	}
 	return filepath.Join(dlDir, base), nil
 }
