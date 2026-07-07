@@ -63,8 +63,10 @@ func main() {
 	daemon.InitAuditPersistence(cfg.LogRetentionDays)
 
 	// Trust store + approval audit hook (Privacy Center, v0.5+).
-	// Trust state lives at ~/Library/Application Support/SNTH Companion/trust.json.
-	// approval.Request consults it before popping the osascript dialog.
+	// Trust state lives at ~/Library/Application Support/snth-companion/trust.json
+	// (the shared support dir; NewStore migrates a legacy "SNTH Companion"
+	// trust.json on first boot, H7). approval.Request consults it before
+	// popping the osascript dialog.
 	trustStore, err := trust.NewStore("")
 	if err != nil {
 		log.Fatalf("trust: %v", err)

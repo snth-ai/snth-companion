@@ -3,7 +3,11 @@
 // I auto-approve, auto-deny, or ask the user?"
 //
 // State is JSON-persisted at
-// `~/Library/Application Support/SNTH Companion/trust.json`. The schema
+// `~/Library/Application Support/snth-companion/trust.json` (the SINGLE
+// support dir shared with config, downloads, tasks, and the audit log).
+// Earlier builds used a second dir `SNTH Companion` (space + caps); on
+// boot NewStore migrates a legacy trust.json from there into the shared
+// dir so existing users keep their trust state (H7). The schema
 // is small on purpose — per-tool tri-state, a master switch, an
 // optional global expiry, and a list of write-roots that fs_write
 // honors even when its per-tool state is `trusted`.
@@ -18,11 +22,14 @@ package trust
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/snth-ai/snth-companion/internal/config"
 )
 
 // Decision is what Get returns. Callers translate Prompt into the real
@@ -108,25 +115,84 @@ type Store struct {
 }
 
 // NewStore loads or initializes state at supportDir/trust.json.
-// supportDir is "" → defaults to ~/Library/Application Support/SNTH Companion.
+// supportDir is "" → defaults to the shared companion support dir
+// (config.Dir(), i.e. ~/Library/Application Support/snth-companion).
 // On first boot the file is missing → in-memory zero State (everything
 // prompt-mode), file written on first Save().
+//
+// H7 migration: earlier builds kept trust.json under a SECOND dir
+// `~/Library/Application Support/SNTH Companion` (space + caps). When the
+// default dir is used and no trust.json exists there yet but the legacy
+// one does, we migrate it (copy + remove) so existing users keep their
+// trust state instead of silently resetting to prompt-everything. An
+// existing new-dir file is never clobbered by a stale legacy file.
 func NewStore(supportDir string) (*Store, error) {
+	migrate := false
 	if supportDir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("homedir: %w", err)
-		}
-		supportDir = filepath.Join(home, "Library", "Application Support", "SNTH Companion")
+		supportDir = config.Dir()
+		migrate = true
 	}
 	if err := os.MkdirAll(supportDir, 0o700); err != nil {
 		return nil, fmt.Errorf("mkdir support: %w", err)
 	}
-	s := &Store{path: filepath.Join(supportDir, "trust.json")}
+	newPath := filepath.Join(supportDir, "trust.json")
+	if migrate {
+		migrateLegacyTrust(newPath)
+	}
+	s := &Store{path: newPath}
 	if err := s.load(); err != nil {
 		return nil, err
 	}
 	return s, nil
+}
+
+// legacyTrustPath is the pre-H7 location (separate "SNTH Companion" dir).
+func legacyTrustPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, "Library", "Application Support", "SNTH Companion", "trust.json")
+}
+
+// migrateLegacyTrust moves an old trust.json into newPath IFF newPath does
+// not already exist and the legacy file does. Best-effort: any error just
+// leaves the new dir empty (fresh-install semantics) rather than failing
+// boot. Never overwrites an existing new-dir file.
+func migrateLegacyTrust(newPath string) {
+	if _, err := os.Stat(newPath); err == nil {
+		return // new file already present — do not clobber
+	}
+	oldPath := legacyTrustPath()
+	if oldPath == "" || oldPath == newPath {
+		return
+	}
+	src, err := os.Open(oldPath)
+	if err != nil {
+		return // no legacy file (fresh install) or unreadable
+	}
+	defer src.Close()
+	tmp := newPath + ".migrate.tmp"
+	dst, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		_ = dst.Close()
+		_ = os.Remove(tmp)
+		return
+	}
+	if err := dst.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return
+	}
+	if err := os.Rename(tmp, newPath); err != nil {
+		_ = os.Remove(tmp)
+		return
+	}
+	// Migration committed — remove the legacy copy so uninstall/reset only
+	// has one dir to worry about. Best-effort.
+	_ = os.Remove(oldPath)
 }
 
 func (s *Store) load() error {
