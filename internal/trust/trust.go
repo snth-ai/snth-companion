@@ -62,15 +62,16 @@ const (
 // Per-tool override still works: if the user explicitly flips one of these
 // to ModeTrusted, that's their call.
 var AlwaysPromptTools = map[string]bool{
-	"remote_subagent":         true, // 60-min CLI delegation, arbitrary code, costs $$$
-	"remote_messages_send":    true, // sends from the user's iMessage
-	"remote_messages_recent":  true, // full iMessage history exfiltration
-	"remote_bash":             true, // arbitrary shell on the Mac
-	"remote_fs_write":         true, // arbitrary file write
-	"remote_browser":          true, // drives the user's real Chrome session
-	"remote_contacts_search":  true, // full address-book dump
-	"remote_yt_dlp":           true, // shells out to yt-dlp
-	"companion_ssh":           true, // remote shell (if/when registered)
+	"remote_subagent":        true, // 60-min CLI delegation, arbitrary code, costs $$$
+	"remote_messages_send":   true, // sends from the user's iMessage
+	"remote_messages_recent": true, // full iMessage history exfiltration
+	"remote_bash":            true, // arbitrary shell on the Mac
+	"remote_fs_read":         true, // arbitrary file read (~/.ssh, keychains, cookies)
+	"remote_fs_write":        true, // arbitrary file write
+	"remote_browser":         true, // drives the user's real Chrome session
+	"remote_contacts_search": true, // full address-book dump
+	"remote_yt_dlp":          true, // shells out to yt-dlp
+	"companion_ssh":          true, // remote shell (if/when registered)
 }
 
 // State is the on-disk schema. Backwards-compat: missing fields are
@@ -251,6 +252,21 @@ func (s *Store) RemoveWriteRoot(root string) error {
 // trusted falls back to Prompt (the user explicitly didn't opt in for
 // that location).
 func (s *Store) Get(tool, path string) Decision {
+	return s.GetDanger(tool, path, false)
+}
+
+// GetDanger is Get plus a caller-supplied `alwaysPrompt` flag. When true,
+// the invocation is treated as if `tool` were in AlwaysPromptTools: the
+// master auto-approve path is bypassed so master-trust can NEVER silently
+// approve it. This is how the central Dispatch gate makes GateAlwaysPrompt
+// meaningful for CONDITIONAL tools whose danger is a function of their args
+// (out-of-sandbox remote_fs_read/write/bash/browser) rather than a fixed
+// property of the tool name.
+//
+// An EXPLICIT per-tool override still wins (the user is the source of
+// truth): ModeDenied auto-denies, ModeTrusted (inside AllowedWriteRoots)
+// auto-approves. alwaysPrompt only closes the MASTER auto-approve door.
+func (s *Store) GetDanger(tool, path string, alwaysPrompt bool) Decision {
 	s.mu.RLock()
 	st := s.st
 	s.mu.RUnlock()
@@ -269,14 +285,14 @@ func (s *Store) Get(tool, path string) Decision {
 	}
 
 	// Master only fires when not expired and tool isn't in the
-	// always-prompt safety set.
+	// always-prompt safety set (static name-based OR caller-declared).
 	if !st.Master {
 		return DecisionPrompt
 	}
 	if st.MasterExpires != nil && !time.Now().Before(*st.MasterExpires) {
 		return DecisionPrompt
 	}
-	if AlwaysPromptTools[tool] {
+	if alwaysPrompt || AlwaysPromptTools[tool] {
 		return DecisionPrompt
 	}
 	if !inAllowedRoot(path, st.AllowedWriteRoots) {

@@ -123,9 +123,21 @@ func Request(ctx context.Context, r Request_) (bool, error) {
 	// Trust evaluation. Empty Tool → legacy path (treats every call
 	// as prompt-required) preserving the old behavior for tools that
 	// haven't yet been updated to pass Tool.
+	//
+	// alwaysPrompt: the CALLER/gate declared this specific invocation
+	// always-prompt (e.g. the Dispatch gate escalated an out-of-sandbox
+	// remote_fs_read/write/bash/browser to GateAlwaysPrompt). That must
+	// defeat the master auto-approve exactly as if the tool NAME were in
+	// trust.AlwaysPromptTools — otherwise a conditional tool whose name is
+	// not hardcoded in that set (remote_fs_read out-of-sandbox, etc.)
+	// would be silently auto-approved under master-trust, defeating the
+	// gate's escalation. Only an EXPLICIT per-tool ModeTrusted override
+	// (the user opting in for that tool) may still auto-approve silently;
+	// trust.Get already honors that ahead of the master path.
+	alwaysPrompt := r.Danger == "always-prompt"
 	if r.Tool != "" {
 		if ts := currentTrust(); ts != nil {
-			switch ts.Get(r.Tool, r.Path) {
+			switch ts.GetDanger(r.Tool, r.Path, alwaysPrompt) {
 			case trust.DecisionTrusted:
 				emitAudit(r.Tool, r.Summary, "approved", "trusted", "")
 				return true, nil
