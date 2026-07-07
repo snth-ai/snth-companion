@@ -187,10 +187,14 @@ func (s *Store) Save(next State) error {
 }
 
 // SetTool flips one tool's mode without touching the rest of state.
+//
+// F3: Snapshot() DEEP-COPIES the Tools map, so the mutate below touches a
+// private copy — not the map shared with the live s.st that Get()/GetDanger()
+// read under RLock. The old `st := s.st` shallow copy shared the map, so
+// mutating it here raced a concurrent Get => `concurrent map read and map
+// write` fatal.
 func (s *Store) SetTool(name string, mode ToolMode) error {
-	s.mu.Lock()
-	st := s.st
-	s.mu.Unlock()
+	st := s.Snapshot()
 	if st.Tools == nil {
 		st.Tools = map[string]ToolMode{}
 	}
