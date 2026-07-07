@@ -135,54 +135,54 @@ func ytDlpHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 
 // ytDlpBoolFlags are allowlisted flags that take NO value.
 var ytDlpBoolFlags = map[string]bool{
-	"--write-auto-sub":       true,
-	"--write-auto-subs":      true,
-	"--write-sub":            true,
-	"--write-subs":           true,
-	"--skip-download":        true,
-	"--no-playlist":          true,
+	"--write-auto-sub":        true,
+	"--write-auto-subs":       true,
+	"--write-sub":             true,
+	"--write-subs":            true,
+	"--skip-download":         true,
+	"--no-playlist":           true,
 	"--no-check-certificates": true,
-	"--quiet":                true,
-	"--no-warnings":          true,
-	"--get-title":            true,
-	"--dump-json":            true,
-	"--no-download":          true,
-	"-x":                     true,
-	"--extract-audio":        true,
+	"--quiet":                 true,
+	"--no-warnings":           true,
+	"--get-title":             true,
+	"--dump-json":             true,
+	"--no-download":           true,
+	"-x":                      true,
+	"--extract-audio":         true,
 }
 
 // ytDlpValueFlags are allowlisted flags that consume the NEXT token as
 // their value (space-separated form). The "=" form is handled too.
 var ytDlpValueFlags = map[string]bool{
-	"--sub-lang":             true,
-	"--sub-langs":            true,
-	"--convert-subs":         true,
-	"-o":                     true,
-	"--output":               true,
-	"-f":                     true,
-	"--format":               true,
-	"--audio-format":         true,
-	"--merge-output-format":  true,
-	"--cookies":              true,
+	"--sub-lang":            true,
+	"--sub-langs":           true,
+	"--convert-subs":        true,
+	"-o":                    true,
+	"--output":              true,
+	"-f":                    true,
+	"--format":              true,
+	"--audio-format":        true,
+	"--merge-output-format": true,
+	"--cookies":             true,
 }
 
 // ytDlpRejectedFlags are explicitly refused even though the allowlist
 // would already drop them — a defense-in-depth list so the error is
 // specific and the intent is documented.
 var ytDlpRejectedFlags = map[string]bool{
-	"--exec":                true,
+	"--exec":                 true,
 	"--exec-before-download": true,
-	"--paths":               true,
-	"-P":                    true,
-	"--batch-file":          true,
-	"-a":                    true,
-	"--load-info-json":      true,
-	"--load-info":           true,
-	"--postprocessor-args":  true,
-	"--ppa":                 true,
+	"--paths":                true,
+	"-P":                     true,
+	"--batch-file":           true,
+	"-a":                     true,
+	"--load-info-json":       true,
+	"--load-info":            true,
+	"--postprocessor-args":   true,
+	"--ppa":                  true,
 	"--external-downloader":  true,
-	"--downloader":          true,
-	"--proxy":               true,
+	"--downloader":           true,
+	"--proxy":                true,
 }
 
 // sanitizeYtDlpArgs validates argv against the allowlist and returns a

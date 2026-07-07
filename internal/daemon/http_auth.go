@@ -245,6 +245,6 @@ type bufferingWriter struct {
 	body   *bytes.Buffer
 }
 
-func (b *bufferingWriter) Header() http.Header { return b.header }
-func (b *bufferingWriter) WriteHeader(code int) { b.status = code }
+func (b *bufferingWriter) Header() http.Header         { return b.header }
+func (b *bufferingWriter) WriteHeader(code int)        { b.status = code }
 func (b *bufferingWriter) Write(p []byte) (int, error) { return b.body.Write(p) }
