@@ -26,14 +26,61 @@ import (
 	"time"
 
 	"github.com/snth-ai/snth-companion/internal/config"
+	"github.com/snth-ai/snth-companion/internal/sandbox"
 )
 
 func RegisterUpload() {
 	Register(Descriptor{
 		Name:        "upload_to_synth",
 		Description: "Stream a local file to the synth workspace over HTTPS (resumable, GB-scale). Called by the synth's companion:// send flow.",
-		DangerLevel: "safe", // read-only on the Mac; destination is the synth's own workspace
+		// "read-only on the Mac" was the F5 hole: this ships the file's
+		// BYTES off the Mac to the synth, so a compromised/prompt-injected
+		// synth can exfiltrate ~/.ssh/id_rsa, Chrome cookies, /etc/* with
+		// zero approval. Same containment posture as remote_fs_read now:
+		// inside the sandbox (the normal workspace/media #130 flow) →
+		// GateSkip, out-of-sandbox → GateAlwaysPrompt (master-trust cannot
+		// silently auto-approve after F2).
+		DangerLevel:     "prompt",
+		GatePolicy:      uploadGatePolicy,
+		ApprovalSummary: uploadSummary,
 	}, uploadHandler)
+}
+
+// uploadGatePolicy reuses the shared fs sandbox check (fsResolveInside):
+// inside the sandbox → GateSkip, out-of-sandbox → GateAlwaysPrompt. The
+// upload args differ from fs ({path, upload_id, chunk_size, max_bytes}),
+// so we probe just the "path" field. Fails closed (GateAlwaysPrompt) on
+// bad args or a resolve error.
+func uploadGatePolicy(raw json.RawMessage) GateDecision {
+	var probe struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return GateAlwaysPrompt
+	}
+	_, inside, err := fsResolveInside(probe.Path)
+	if err != nil {
+		return GateAlwaysPrompt
+	}
+	if inside {
+		return GateSkip
+	}
+	return GateAlwaysPrompt
+}
+
+// uploadSummary renders the approval dialog text for an out-of-sandbox
+// upload_to_synth, spelling out that the file will be SHIPPED to the
+// synth. Returns the resolved path so the trust store gates on it.
+func uploadSummary(raw json.RawMessage) (summary string, path string) {
+	var a uploadArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return "", ""
+	}
+	resolved, _, err := fsResolveInside(a.Path)
+	if err != nil {
+		resolved = a.Path
+	}
+	return fmt.Sprintf("Upload file to the synth (ships the file's bytes OFF this Mac):\n    %s", resolved), resolved
 }
 
 type uploadArgs struct {
@@ -53,6 +100,16 @@ func uploadHandler(ctx context.Context, args json.RawMessage) (any, error) {
 	}
 	if a.ChunkSize <= 0 {
 		a.ChunkSize = 8 << 20
+	}
+
+	// Defense-in-depth: normalize the path the same way the fs handlers do
+	// (symlink/`..` resolution), so even a GateSkip (inside-sandbox) call
+	// operates on a canonical path, never a crafted one that resolved
+	// elsewhere. The gate already ran in Dispatch on the RAW "path" arg,
+	// but fsResolveInside resolves identically, so an inside-sandbox
+	// verdict maps to the same canonical file we open here.
+	if resolved, err := sandbox.Resolve(a.Path); err == nil {
+		a.Path = resolved
 	}
 
 	cfg := config.Get()
