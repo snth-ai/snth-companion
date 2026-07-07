@@ -23,6 +23,16 @@ import (
 type UIServer struct {
 	Listener net.Listener
 	Client   *Client
+
+	// Token is a per-launch random secret the served UI embeds (meta tag +
+	// same-origin cookie). Every state-changing request must carry it
+	// (header X-Companion-UI-Token, hidden form field _ui_token, or the
+	// cookie). Blocks local non-browser processes + cross-site CSRF against
+	// loopback (B1).
+	Token string
+	// Addr is the server's own host:port ("127.0.0.1:NNNNN"), used to
+	// validate the Origin/Referer of mutating requests (same-origin only).
+	Addr string
 }
 
 func StartUIServer(client *Client) (*UIServer, string, error) {
@@ -30,7 +40,11 @@ func StartUIServer(client *Client) (*UIServer, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("bind ui server: %w", err)
 	}
-	s := &UIServer{Listener: ln, Client: client}
+	tok, err := newUIToken()
+	if err != nil {
+		return nil, "", fmt.Errorf("mint ui token: %w", err)
+	}
+	s := &UIServer{Listener: ln, Client: client, Token: tok, Addr: ln.Addr().String()}
 	go func() {
 		srv := &http.Server{
 			Handler:      s.routes(),
@@ -83,23 +97,12 @@ func (s *UIServer) routes() http.Handler {
 	s.registerTrustAPIs(mux)
 	// React SPA — served at /ui/*. Legacy server-rendered pages
 	// stay at their old paths during the porting transition; the
-	// React router links back to them via Placeholder cards.
-	mux.Handle("/ui/", http.StripPrefix("/ui", ui.Handler()))
-	return localhostOnly(mux)
-}
-
-func localhostOnly(h http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			host = r.RemoteAddr
-		}
-		if host != "127.0.0.1" && host != "::1" && host != "localhost" {
-			http.Error(w, "localhost only", http.StatusForbidden)
-			return
-		}
-		h.ServeHTTP(w, r)
-	})
+	// React router links back to them via Placeholder cards. The SPA
+	// index is served through a wrapper that injects the UI token as a
+	// meta tag so the SPA's fetch calls carry it (via the cookie the
+	// guard sets on GET).
+	mux.Handle("/ui/", http.StripPrefix("/ui", s.spaHandler(ui.Handler())))
+	return s.guard(mux)
 }
 
 // --- shared layout ----------------------------------------------------------
@@ -149,13 +152,17 @@ func (s *UIServer) layout(w http.ResponseWriter, active, title, body string) {
 		}
 		return fmt.Sprintf(`<a href="%s"%s>%s</a>`, path, cls, label)
 	}
-	fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><title>SNTH Companion — %s</title><style>%s</style></head>
+	// Inject the hidden UI-token field into every legacy POST form so
+	// form submissions carry the token (belt-and-suspenders alongside the
+	// same-origin cookie the guard sets on GET).
+	body = s.injectFormToken(body)
+	fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8">%s<title>SNTH Companion — %s</title><style>%s</style></head>
 <body><div class="wrap">
 <header><h1>SNTH Companion</h1><span class="label mono">v%s</span></header>
 <nav>%s %s %s %s %s %s %s %s %s</nav>
 %s
 </div></body></html>`,
-		title, layoutCSS, Version,
+		s.tokenMetaTag(), title, layoutCSS, Version,
 		nav("/", "Status"),
 		nav("/pair", "Pair"),
 		nav("/channels", "Channels"),
