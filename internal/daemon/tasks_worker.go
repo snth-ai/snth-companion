@@ -42,6 +42,7 @@ import (
 
 	"github.com/osteele/liquid"
 
+	"github.com/snth-ai/snth-companion/internal/approval"
 	"github.com/snth-ai/snth-companion/internal/config"
 )
 
@@ -52,6 +53,10 @@ type TasksWorker struct {
 
 	mu      sync.Mutex
 	running map[string]*localRun // task_id → run
+	// approved tracks task ids the user has approved to run this session,
+	// so the approval prompt fires once per task (not on every tick /
+	// reattach). Guarded by mu.
+	approved map[string]bool
 
 	stopCh chan struct{}
 	once   sync.Once
@@ -136,6 +141,7 @@ func StartTasksWorker(ctx context.Context) *TasksWorker {
 		HTTP:         &http.Client{Timeout: 30 * time.Second},
 		PollInterval: 10 * time.Second,
 		running:      make(map[string]*localRun),
+		approved:     make(map[string]bool),
 		stopCh:       make(chan struct{}),
 	}
 	curWorker = w
@@ -392,13 +398,6 @@ func (w *TasksWorker) spawn(ctx context.Context, t taskRow) {
 		hookTimeout = defaultHookTimeoutMS
 	}
 
-	// --- after_create hook (only on fresh workspace, fatal on failure) ---
-	if freshlyCreated && hooks.AfterCreate != "" {
-		if err := w.runHook("after_create", hooks.AfterCreate, ws, hookTimeout, true); err != nil {
-			w.failSpawn(t.ID, "hook_failed: "+err.Error(), ws)
-			return
-		}
-	}
 	// Sub-agent kind: task wins, then config, then "claude".
 	kind := strings.TrimSpace(t.SubAgentKind)
 	if kind == "" {
@@ -408,6 +407,39 @@ func (w *TasksWorker) spawn(ctx context.Context, t taskRow) {
 	}
 	if kind == "" {
 		kind = "claude"
+	}
+
+	// --- approval gate (P0.7/A2) ---
+	// The task template's hooks run `bash -lc <hook>` with the user's full
+	// env, and the sub-agent runs `claude -p --dangerously-skip-permissions`
+	// (or codex/gemini). A compromised hub or anyone who can author a
+	// template would otherwise get local code execution with NO prompt.
+	// Gate the FIRST run of a task template behind an explicit approval
+	// (once per task id per session); a denial reports the task declined
+	// and executes nothing.
+	if !w.taskApproved(t.ID) {
+		ok, err := taskApprovalRequest(ctx, approval.Request_{
+			Tool:    "task_run",
+			Danger:  "always-prompt",
+			Summary: taskApprovalSummary(t, kind, hooks),
+		})
+		if err != nil {
+			w.failSpawn(t.ID, "task_approval_error: "+err.Error(), ws)
+			return
+		}
+		if !ok {
+			w.declineTask(t.ID, ws)
+			return
+		}
+		w.rememberTaskApproval(t.ID)
+	}
+
+	// --- after_create hook (only on fresh workspace, fatal on failure) ---
+	if freshlyCreated && hooks.AfterCreate != "" {
+		if err := w.runHook("after_create", hooks.AfterCreate, ws, hookTimeout, true); err != nil {
+			w.failSpawn(t.ID, "hook_failed: "+err.Error(), ws)
+			return
+		}
 	}
 
 	// --- render prompt ---
@@ -578,6 +610,75 @@ func (w *TasksWorker) resolveAgentConfig(t taskRow) map[string]any {
 		}
 	}
 	return merged
+}
+
+// taskApprovalRequest is the approval primitive the tasks worker gate
+// calls. Indirected through a var so tests can stub it deterministically
+// (the real approval.Request pops an osascript dialog).
+var taskApprovalRequest = approval.Request
+
+// taskApproved reports whether the user already approved this task this
+// session.
+func (w *TasksWorker) taskApproved(id string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.approved[id]
+}
+
+// rememberTaskApproval records a task approval so it doesn't re-prompt.
+func (w *TasksWorker) rememberTaskApproval(id string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.approved[id] = true
+}
+
+// declineTask reports a user-declined task to the hub as declined and
+// releases the reserved run slot WITHOUT executing any hook or sub-agent.
+func (w *TasksWorker) declineTask(taskID, ws string) {
+	log.Printf("[tasks-worker] task=%s declined by user at approval gate", taskID)
+	w.mu.Lock()
+	delete(w.running, taskID)
+	w.mu.Unlock()
+	runtime := map[string]any{
+		"error_text":     "user declined the task at the companion approval prompt",
+		"error_category": "declined",
+	}
+	if ws != "" {
+		runtime["workspace_path"] = ws
+	}
+	_ = w.postEvent(taskID, "subagent_failed",
+		map[string]any{"reason": "declined", "message": "user declined"},
+		runtime,
+		"error",
+	)
+}
+
+// taskApprovalSummary builds the approval dialog text for a task template
+// run: template/agent/cwd + a preview of every hook script that will run.
+func taskApprovalSummary(t taskRow, kind string, hooks hooksConfig) string {
+	title := strings.TrimSpace(t.Title)
+	if title == "" {
+		title = t.ID
+	}
+	tmpl := "(none)"
+	if t.TemplateID != nil && *t.TemplateID != "" {
+		tmpl = *t.TemplateID
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Run task %q on your Mac\n", title)
+	fmt.Fprintf(&sb, "    agent: %s   template: %s\n", kind, tmpl)
+	fmt.Fprintf(&sb, "    workspace: %s\n", workspaceFor(t.ID))
+	fmt.Fprintf(&sb, "\nThe sub-agent runs with --dangerously-skip-permissions and can read/write files + run shell commands on your Mac.")
+	addHook := func(name, script string) {
+		if strings.TrimSpace(script) == "" {
+			return
+		}
+		fmt.Fprintf(&sb, "\n\n%s hook (bash):\n    %s", name, truncate(strings.ReplaceAll(script, "\n", " "), 200))
+	}
+	addHook("after_create", hooks.AfterCreate)
+	addHook("before_run", hooks.BeforeRun)
+	addHook("after_run", hooks.AfterRun)
+	return sb.String()
 }
 
 // failSpawn emits subagent_failed and transitions to error. msg may
