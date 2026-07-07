@@ -2,17 +2,18 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <!-- Hardened Runtime: required by Apple notarization (Nov 2019+). -->
-
-  <!-- We shell out to osascript/pbcopy/pbpaste via os/exec. Allowing
-       unsigned child executables keeps that working without embedding
-       notarized copies in the bundle. -->
-  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
-  <true/>
-  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
-  <true/>
-  <key>com.apple.security.cs.disable-library-validation</key>
-  <true/>
+  <!-- Hardened Runtime: required by Apple notarization (Nov 2019+).
+       We keep the MINIMAL set. The three cs.* relaxations that used to be
+       here (allow-unsigned-executable-memory, allow-dyld-environment-
+       variables, disable-library-validation) were removed 2026-07-07:
+       os/exec children (osascript/pbcopy/yt-dlp/ffmpeg) are NOT constrained
+       by the parent's hardened runtime, and we neither JIT nor load
+       third-party dylibs, so none of the three were actually needed and
+       each only weakened the posture. WKWebView (control-panel window)
+       runs its JS out-of-process in Apple's own WebContent service, so it
+       needs no JIT entitlement here. VALIDATE on the first signed build:
+       launch the app, open the control panel (webview) — if it fails to
+       render, add back ONLY the specific entitlement it names. -->
 
   <!-- Apple events: required to drive Calendar/Notes/Reminders/etc.
        via osascript. The user still gets the TCC approval prompt on
