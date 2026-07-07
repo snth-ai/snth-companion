@@ -48,16 +48,29 @@ const (
 	ModeDenied  ToolMode = "denied"
 )
 
-// AlwaysPromptTools — never auto-approved by the master toggle. Listed
-// here because spawning a 60-min coding sub-agent or sending a message
-// from the user's phone is the kind of action you DO want a confirm
-// click for, even if you're "fully trusted" mode for everything else.
+// AlwaysPromptTools — never auto-approved by the master toggle. These are
+// the high-impact read/exfiltration + write + code-exec verbs that
+// master-trust must never silently auto-approve, even in "trust
+// everything" mode.
 //
-// Per-tool override still works: if the user explicitly flips one of
-// these to ModeTrusted, that's their call.
+// IMPORTANT: keys are the descriptor NAMES (the `remote_*` ids), because
+// the central Dispatch gate (P0.1) passes the descriptor Name into
+// approval.Request -> trust.Get. An entry that doesn't match the Name is
+// dead. (The old short keys "subagent"/"messages_send" never matched the
+// gate and were a silent no-op.)
+//
+// Per-tool override still works: if the user explicitly flips one of these
+// to ModeTrusted, that's their call.
 var AlwaysPromptTools = map[string]bool{
-	"subagent":      true, // 60-min CLI delegation, costs $$$
-	"messages_send": true, // sends from the user's iMessage
+	"remote_subagent":         true, // 60-min CLI delegation, arbitrary code, costs $$$
+	"remote_messages_send":    true, // sends from the user's iMessage
+	"remote_messages_recent":  true, // full iMessage history exfiltration
+	"remote_bash":             true, // arbitrary shell on the Mac
+	"remote_fs_write":         true, // arbitrary file write
+	"remote_browser":          true, // drives the user's real Chrome session
+	"remote_contacts_search":  true, // full address-book dump
+	"remote_yt_dlp":           true, // shells out to yt-dlp
+	"companion_ssh":           true, // remote shell (if/when registered)
 }
 
 // State is the on-disk schema. Backwards-compat: missing fields are
