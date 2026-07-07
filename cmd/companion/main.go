@@ -68,6 +68,19 @@ func main() {
 	daemon.SetTrustStore(trustStore)
 	log.Printf("trust state at %s", trustStore.Path())
 
+	// Central approval gate (P0.1). Dispatch calls this BEFORE running any
+	// prompt/always-prompt tool handler; if unset the registry is
+	// deny-closed. Bridged to approval.Request here so the tools package
+	// does not import internal/approval (import-cycle avoidance).
+	tools.SetApprovalFn(func(ctx context.Context, tool, summary, danger, path string) (bool, error) {
+		return approval.Request(ctx, approval.Request_{
+			Tool:    tool,
+			Summary: summary,
+			Danger:  danger,
+			Path:    path,
+		})
+	})
+
 	// Register all tools. They're already in the catalog before the WS
 	// client connects, so the hello frame advertises them correctly.
 	tools.RegisterBash()

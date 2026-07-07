@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/snth-ai/snth-companion/internal/approval"
 	"github.com/snth-ai/snth-companion/internal/browser"
 )
 
@@ -105,8 +104,71 @@ func RegisterBrowser() {
 			"dialog). snapshot / screenshot / tabs / version are read-only and silent. If the same " +
 			"companion has master-trust on, all of these auto-approve.\n\n" +
 			"Re-snapshot after any navigation — refs are tied to the most recent snapshot.",
-		DangerLevel: "prompt",
+		DangerLevel:     "prompt",
+		GatePolicy:      browserGatePolicy,
+		ApprovalSummary: browserSummary,
 	}, browserHandler)
+}
+
+// browserMutatingAction reports whether an action touches the user's live
+// session and therefore needs approval. Read-only actions (snapshot,
+// screenshot, tabs, version) are silent. `wait` is mutating ONLY when it
+// carries a JS predicate (arbitrary JS in the user's Chrome — the A4 hole
+// that previously ran ungated); a plain URL-pattern wait is passive.
+func browserMutatingAction(a browserArgs) bool {
+	switch strings.ToLower(strings.TrimSpace(a.Action)) {
+	case "navigate", "click", "type", "press", "eval":
+		return true
+	case "wait":
+		return strings.TrimSpace(a.Predicate) != ""
+	default:
+		return false
+	}
+}
+
+// browserGatePolicy gates mutating browser actions at always-prompt (the
+// browser touches a real user session), and skips read-only actions.
+func browserGatePolicy(raw json.RawMessage) GateDecision {
+	var a browserArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return GateAlwaysPrompt
+	}
+	if browserMutatingAction(a) {
+		return GateAlwaysPrompt
+	}
+	return GateSkip
+}
+
+// browserSummary renders the per-action approval dialog text.
+func browserSummary(raw json.RawMessage) (string, string) {
+	var a browserArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return "", ""
+	}
+	switch strings.ToLower(strings.TrimSpace(a.Action)) {
+	case "navigate":
+		return fmt.Sprintf("Navigate Chrome to:\n    %s", a.URL), ""
+	case "click":
+		return fmt.Sprintf("Click browser element #%d", a.Ref), ""
+	case "type":
+		preview := a.Text
+		if len(preview) > 80 {
+			preview = preview[:80] + "…"
+		}
+		return fmt.Sprintf("Type into browser element #%d:\n    %s", a.Ref, preview), ""
+	case "press":
+		return fmt.Sprintf("Press browser key: %s", a.Key), ""
+	case "eval":
+		return "Eval arbitrary JS in active tab", ""
+	case "wait":
+		preview := a.Predicate
+		if len(preview) > 120 {
+			preview = preview[:120] + "…"
+		}
+		return "Wait on JS predicate in active tab:\n    " + preview, ""
+	default:
+		return "", ""
+	}
 }
 
 type browserArgs struct {
@@ -204,9 +266,6 @@ func browserHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 		if a.URL == "" {
 			return nil, fmt.Errorf("url required for navigate")
 		}
-		if err := browserApprove(ctx, fmt.Sprintf("Navigate Chrome to:\n    %s", a.URL)); err != nil {
-			return nil, err
-		}
 		if pw {
 			final, err := browser.PWNavigate(ctx, a.URL)
 			if err != nil {
@@ -228,9 +287,6 @@ func browserHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 		// ref 0 is valid (page-agent numbers from 0). The ref-resolver
 		// returns NOT_FOUND if the snapshot doesn't have that index.
 		_ = a.Ref
-		if err := browserApprove(ctx, fmt.Sprintf("Click browser element #%d", a.Ref)); err != nil {
-			return nil, err
-		}
 		if pw {
 			if err := browser.PWClick(ctx, a.Ref); err != nil {
 				return nil, err
@@ -248,13 +304,6 @@ func browserHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 
 	case "type":
 		_ = a.Ref // ref=0 valid; resolver validates
-		preview := a.Text
-		if len(preview) > 80 {
-			preview = preview[:80] + "…"
-		}
-		if err := browserApprove(ctx, fmt.Sprintf("Type into browser element #%d:\n    %s", a.Ref, preview)); err != nil {
-			return nil, err
-		}
 		if pw {
 			if err := browser.PWType(ctx, a.Ref, a.Text); err != nil {
 				return nil, err
@@ -273,9 +322,6 @@ func browserHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 	case "press":
 		if a.Key == "" {
 			return nil, fmt.Errorf("key required for press")
-		}
-		if err := browserApprove(ctx, fmt.Sprintf("Press browser key: %s", a.Key)); err != nil {
-			return nil, err
 		}
 		if pw {
 			if err := browser.PWPress(ctx, a.Key); err != nil {
@@ -350,9 +396,6 @@ func browserHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 		if a.Expr == "" {
 			return nil, fmt.Errorf("expr required for eval")
 		}
-		if err := browserApprove(ctx, "Eval arbitrary JS in active tab"); err != nil {
-			return nil, err
-		}
 		if pw {
 			out, err := browser.PWEval(ctx, a.Expr)
 			if err != nil {
@@ -375,16 +418,3 @@ func browserHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 	}
 }
 
-// browserApprove wraps the approval helper with a shorter
-// always-prompt variant — browser actions touch the user's real
-// session so we default to always prompting.
-func browserApprove(ctx context.Context, summary string) error {
-	ok, err := approval.Request(ctx, approval.Request_{Tool: "remote_browser", Summary: summary, Danger: "always-prompt"})
-	if err != nil {
-		return fmt.Errorf("approval: %w", err)
-	}
-	if !ok {
-		return fmt.Errorf("user denied")
-	}
-	return nil
-}

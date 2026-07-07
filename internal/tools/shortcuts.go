@@ -13,8 +13,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/snth-ai/snth-companion/internal/approval"
 )
 
 // shortcut.go — macOS-only bridge to Apple Shortcuts.
@@ -47,6 +45,11 @@ func RegisterShortcut() {
 		Name:        "remote_shortcut",
 		Description: "Run a user-configured Apple Shortcut on the paired Mac. The user sets up Shortcuts in Apple's Shortcuts app; `name` is the shortcut's exact title. Optional `input` is piped as stdin and forwarded with --input-path. Output is returned as a string (up to 256 KiB).",
 		DangerLevel: "prompt",
+		// Session-cache: the central gate prompts once per shortcut name
+		// per session, then GateSkip on subsequent calls (approval is
+		// recorded by the handler after a successful gated run).
+		GatePolicy:      shortcutGatePolicy,
+		ApprovalSummary: shortcutSummary,
 	}, shortcutHandler)
 }
 
@@ -76,20 +79,11 @@ func shortcutHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 		return nil, fmt.Errorf("input too large: %d bytes (max %d)", len(a.Input), shortcutMaxInput)
 	}
 
-	if !shortcutApproved(a.Name) {
-		summary := fmt.Sprintf("Run shortcut %q", a.Name)
-		if a.Input != "" {
-			summary += "\nwith input:\n    " + truncate(a.Input, 120)
-		}
-		ok, err := approval.Request(ctx, approval.Request_{Tool: "shortcut_run", Summary: summary, Danger: "prompt"})
-		if err != nil {
-			return nil, fmt.Errorf("approval: %w", err)
-		}
-		if !ok {
-			return nil, fmt.Errorf("user denied")
-		}
-		rememberShortcutApproval(a.Name)
-	}
+	// Reaching the handler means the central gate already approved (or
+	// GateSkip'd) this call. Record the approval so subsequent calls to
+	// the same shortcut this session skip the prompt (preserves the old
+	// per-session cache behavior; GatePolicy reads it).
+	rememberShortcutApproval(a.Name)
 
 	// Materialize input as a temp file (shortcuts run prefers file input
 	// over stdin).
@@ -178,4 +172,30 @@ func rememberShortcutApproval(name string) {
 	shortcutApprovalsMu.Lock()
 	defer shortcutApprovalsMu.Unlock()
 	shortcutApprovals[name] = struct{}{}
+}
+
+// shortcutGatePolicy skips the prompt when this shortcut name was already
+// approved earlier in the session; otherwise it requires a prompt.
+func shortcutGatePolicy(raw json.RawMessage) GateDecision {
+	var a shortcutArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return GatePrompt
+	}
+	if shortcutApproved(strings.TrimSpace(a.Name)) {
+		return GateSkip
+	}
+	return GatePrompt
+}
+
+// shortcutSummary renders the approval dialog text for remote_shortcut.
+func shortcutSummary(raw json.RawMessage) (string, string) {
+	var a shortcutArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return "", ""
+	}
+	summary := fmt.Sprintf("Run shortcut %q", strings.TrimSpace(a.Name))
+	if a.Input != "" {
+		summary += "\nwith input:\n    " + truncate(a.Input, 120)
+	}
+	return summary, ""
 }

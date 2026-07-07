@@ -8,8 +8,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/snth-ai/snth-companion/internal/config"
 )
 
 // remote_yt_dlp — the synth's transparent yt-dlp escape hatch.
@@ -45,12 +48,32 @@ type ytDlpResult struct {
 const ytDlpTimeout = 5 * time.Minute
 
 // RegisterYtDlp wires remote_yt_dlp into the tool registry.
+//
+// Reclassified safe → prompt (A1): yt-dlp natively supports --exec
+// (arbitrary shell) and -o /abs/path (arbitrary write). The old handler
+// only blocked --proxy, so a compromised synth had de-facto RCE. Now the
+// argv is validated against an ALLOWLIST (sanitizeYtDlpArgs) AND every
+// invocation prompts the user.
 func RegisterYtDlp() {
 	Register(Descriptor{
-		Name:        "remote_yt_dlp",
-		Description: "Run yt-dlp on the paired Mac to download/inspect YouTube content using the user's residential IP. Synth-side dj / media_download / youtube_transcript route through this transparently.",
-		DangerLevel: "safe",
+		Name:            "remote_yt_dlp",
+		Description:     "Run yt-dlp on the paired Mac to download/inspect YouTube content using the user's residential IP. Synth-side dj / media_download / youtube_transcript route through this transparently.",
+		DangerLevel:     "prompt",
+		ApprovalSummary: ytDlpSummary,
 	}, ytDlpHandler)
+}
+
+// ytDlpSummary renders the approval dialog text for remote_yt_dlp.
+func ytDlpSummary(raw json.RawMessage) (string, string) {
+	var a ytDlpArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return "", ""
+	}
+	joined := strings.Join(a.Args, " ")
+	if len(joined) > 200 {
+		joined = joined[:200] + "…"
+	}
+	return "Run yt-dlp on your Mac:\n    yt-dlp " + joined, ""
 }
 
 func ytDlpHandler(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -61,19 +84,16 @@ func ytDlpHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 	if len(args.Args) == 0 {
 		return nil, errors.New("args is required")
 	}
-	for _, a := range args.Args {
-		if a == "--proxy" || strings.HasPrefix(a, "--proxy=") {
-			// Synth side promised it wouldn't pass --proxy when routing
-			// via companion. Belt-and-suspenders check so a stale build
-			// doesn't quietly burn a residential proxy slot.
-			return nil, errors.New("companion path forbids --proxy in yt-dlp args")
-		}
+
+	safeArgs, err := sanitizeYtDlpArgs(args.Args)
+	if err != nil {
+		return nil, err
 	}
 
 	cctx, cancel := context.WithTimeout(ctx, ytDlpTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(cctx, "yt-dlp", args.Args...)
+	cmd := exec.CommandContext(cctx, "yt-dlp", safeArgs...)
 	cmd.Env = augmentPATH(os.Environ())
 
 	var stdout, stderr bytes.Buffer
@@ -102,6 +122,169 @@ func ytDlpHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 	}
 
 	return ytDlpResult{Output: string(out)}, nil
+}
+
+// --- argv allowlist (A1 / P0.2) ---------------------------------------------
+//
+// yt-dlp's flag surface includes remote-code-exec (--exec) and
+// arbitrary-write (-o /abs) knobs. Rather than blocklist the dangerous
+// ones (unbounded — new ones ship every release), we ALLOWLIST the exact
+// read/inspect + controlled-download flags the synth actually emits
+// (dj.go / media_download.go / youtube_transcript.go) plus their obvious
+// aliases, and confine -o/--output to the companion download dir.
+
+// ytDlpBoolFlags are allowlisted flags that take NO value.
+var ytDlpBoolFlags = map[string]bool{
+	"--write-auto-sub":       true,
+	"--write-auto-subs":      true,
+	"--write-sub":            true,
+	"--write-subs":           true,
+	"--skip-download":        true,
+	"--no-playlist":          true,
+	"--no-check-certificates": true,
+	"--quiet":                true,
+	"--no-warnings":          true,
+	"--get-title":            true,
+	"--dump-json":            true,
+	"--no-download":          true,
+	"-x":                     true,
+	"--extract-audio":        true,
+}
+
+// ytDlpValueFlags are allowlisted flags that consume the NEXT token as
+// their value (space-separated form). The "=" form is handled too.
+var ytDlpValueFlags = map[string]bool{
+	"--sub-lang":             true,
+	"--sub-langs":            true,
+	"--convert-subs":         true,
+	"-o":                     true,
+	"--output":               true,
+	"-f":                     true,
+	"--format":               true,
+	"--audio-format":         true,
+	"--merge-output-format":  true,
+	"--cookies":              true,
+}
+
+// ytDlpRejectedFlags are explicitly refused even though the allowlist
+// would already drop them — a defense-in-depth list so the error is
+// specific and the intent is documented.
+var ytDlpRejectedFlags = map[string]bool{
+	"--exec":                true,
+	"--exec-before-download": true,
+	"--paths":               true,
+	"-P":                    true,
+	"--batch-file":          true,
+	"-a":                    true,
+	"--load-info-json":      true,
+	"--load-info":           true,
+	"--postprocessor-args":  true,
+	"--ppa":                 true,
+	"--external-downloader":  true,
+	"--downloader":          true,
+	"--proxy":               true,
+}
+
+// sanitizeYtDlpArgs validates argv against the allowlist and returns a
+// safe argv with -o/--output confined to the companion download dir. Any
+// flag not in the allowlist (or any rejected flag) fails closed.
+func sanitizeYtDlpArgs(in []string) ([]string, error) {
+	dlDir := config.DownloadDir()
+	if err := os.MkdirAll(dlDir, 0o700); err != nil {
+		return nil, fmt.Errorf("prepare download dir: %w", err)
+	}
+
+	out := make([]string, 0, len(in))
+	for i := 0; i < len(in); i++ {
+		tok := in[i]
+
+		// Split "--flag=value" into name/value for uniform handling.
+		name := tok
+		inlineVal := ""
+		hasInline := false
+		if strings.HasPrefix(tok, "-") {
+			if eq := strings.IndexByte(tok, '='); eq >= 0 {
+				name = tok[:eq]
+				inlineVal = tok[eq+1:]
+				hasInline = true
+			}
+		}
+
+		// Positional (URL / ytsearch:...): anything not starting with '-'.
+		if !strings.HasPrefix(tok, "-") {
+			if err := validateYtDlpPositional(tok); err != nil {
+				return nil, err
+			}
+			out = append(out, tok)
+			continue
+		}
+
+		if ytDlpRejectedFlags[name] {
+			return nil, fmt.Errorf("yt-dlp flag %q is not allowed via the companion", name)
+		}
+
+		if ytDlpBoolFlags[name] {
+			if hasInline {
+				return nil, fmt.Errorf("yt-dlp flag %q does not take a value", name)
+			}
+			out = append(out, name)
+			continue
+		}
+
+		if ytDlpValueFlags[name] {
+			var val string
+			if hasInline {
+				val = inlineVal
+			} else {
+				if i+1 >= len(in) {
+					return nil, fmt.Errorf("yt-dlp flag %q requires a value", name)
+				}
+				i++
+				val = in[i]
+			}
+			if name == "-o" || name == "--output" {
+				confined, err := confineYtDlpOutput(val, dlDir)
+				if err != nil {
+					return nil, err
+				}
+				val = confined
+			}
+			out = append(out, name, val)
+			continue
+		}
+
+		return nil, fmt.Errorf("yt-dlp flag %q is not on the companion allowlist", name)
+	}
+	return out, nil
+}
+
+// validateYtDlpPositional rejects a positional argument that looks like a
+// local file path escape. URLs and ytsearch/scheme targets pass.
+func validateYtDlpPositional(tok string) error {
+	if strings.Contains(tok, "..") && (strings.Contains(tok, "/") || strings.Contains(tok, "\\")) {
+		return fmt.Errorf("yt-dlp positional %q looks like a path escape", tok)
+	}
+	return nil
+}
+
+// confineYtDlpOutput rewrites an -o/--output template so it lands under
+// the companion download dir. It keeps the caller's filename template
+// (e.g. "%(id)s.%(ext)s") but forces the directory to dlDir. Templates
+// containing ".." are rejected.
+func confineYtDlpOutput(tmpl, dlDir string) (string, error) {
+	if tmpl == "" {
+		return "", fmt.Errorf("empty -o template")
+	}
+	if strings.Contains(tmpl, "..") {
+		return "", fmt.Errorf("-o template %q must not contain '..'", tmpl)
+	}
+	// Take only the final path component (the filename template); discard
+	// any directory the caller tried to steer to (absolute or relative).
+	base := filepath.Base(tmpl)
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		base = "%(title)s.%(ext)s"
+	}
+	return filepath.Join(dlDir, base), nil
 }
 
 // augmentPATH prepends common Mac binary locations to the inherited
