@@ -46,15 +46,40 @@ func Resolve(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve abs: %w", err)
 	}
-	// EvalSymlinks would be ideal but fails on paths that don't exist yet
-	// (e.g. fs_write to a new file). We fall back to Clean which at least
-	// removes "..".
-	if _, err := os.Lstat(abs); err == nil {
-		if real, err := filepath.EvalSymlinks(abs); err == nil {
-			abs = real
-		}
+	abs = filepath.Clean(abs)
+
+	// Resolve symlinks. EvalSymlinks fails on a path whose leaf doesn't
+	// exist yet (the fs_write create case) — previously we skipped
+	// resolution entirely there, so `<root>/link -> /etc` + `.../link/x`
+	// wrote outside the sandbox with no prompt (A8). Fix: resolve the
+	// LONGEST EXISTING ANCESTOR (which may itself be or contain a
+	// symlink), then re-attach the missing tail. Containment is re-checked
+	// by the caller AFTER this resolution, so a symlinked ancestor that
+	// points out of the root is caught.
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		return real, nil
 	}
-	return filepath.Clean(abs), nil
+	existing := abs
+	var tail []string
+	for {
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			// Reached the root ("/" or a volume) without finding an
+			// existing ancestor — nothing to resolve, return the clean abs.
+			break
+		}
+		if _, statErr := os.Lstat(existing); statErr == nil {
+			// `existing` exists — resolve its symlinks and rejoin the tail.
+			if real, evErr := filepath.EvalSymlinks(existing); evErr == nil {
+				parts := append([]string{real}, tail...)
+				return filepath.Clean(filepath.Join(parts...)), nil
+			}
+			break
+		}
+		tail = append([]string{filepath.Base(existing)}, tail...)
+		existing = parent
+	}
+	return abs, nil
 }
 
 // Contains reports whether path is inside root (exact or descendant).
