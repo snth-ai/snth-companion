@@ -59,6 +59,12 @@ type pwResponse struct {
 	Error  string          `json:"error,omitempty"`
 }
 
+// readLine is one line off the worker's stdout, or the terminal read error.
+type readLine struct {
+	line []byte
+	err  error
+}
+
 // PWWorker is the long-lived Node child process. Zero-value invalid;
 // use DefaultPWWorker.
 type PWWorker struct {
@@ -67,6 +73,32 @@ type PWWorker struct {
 	stdin   io.WriteCloser
 	stdoutR *bufio.Reader
 	bootErr error
+
+	// lines is fed by ONE long-lived reader goroutine (readLoop). F2: the
+	// old code spawned a fresh goroutine on the shared bufio.Reader per
+	// call and abandoned it on timeout — the next call then had TWO
+	// goroutines racing ReadBytes on the same Reader (data race + a late
+	// response stolen by the wrong caller). A single reader owns the
+	// Reader; callers select on this channel with a timeout, so a late
+	// line is still consumed here (by the next call's read) rather than
+	// leaking a blocked goroutine.
+	lines   chan readLine
+	readErr error // sticky terminal read error (set by readLoop)
+}
+
+// readLoop is the SOLE reader of stdoutR. It runs for the life of the
+// worker, pushing every line (and the final error) onto w.lines.
+func (w *PWWorker) readLoop() {
+	for {
+		line, err := w.stdoutR.ReadBytes('\n')
+		if len(line) > 0 {
+			w.lines <- readLine{line: line}
+		}
+		if err != nil {
+			w.lines <- readLine{err: err}
+			return
+		}
+	}
 }
 
 var (
@@ -160,7 +192,9 @@ func newPWWorker() (*PWWorker, error) {
 		cmd:     cmd,
 		stdin:   stdin,
 		stdoutR: bufio.NewReaderSize(stdout, 4<<20), // 4MB — screenshots can be big
+		lines:   make(chan readLine, 8),
 	}
+	go w.readLoop()
 
 	// Wait for the "ready" greeting.
 	resp, err := w.readResponse(20 * time.Second)
@@ -193,32 +227,44 @@ func (w *PWWorker) call(action string, args map[string]any, timeout time.Duratio
 		return nil, fmt.Errorf("write stdin: %w", err)
 	}
 
-	resp, err := w.readResponse(timeout)
-	if err != nil {
-		return nil, err
+	// Read until we see the response for THIS request. A previous call that
+	// timed out may have left its (late) response queued on w.lines; skip
+	// those stale IDs instead of failing on a mismatch or, worse, returning
+	// another call's data. Bounded by the overall timeout via a deadline.
+	deadline := time.Now().Add(timeout)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, fmt.Errorf("worker timeout after %s", timeout)
+		}
+		resp, err := w.readResponse(remaining)
+		if err != nil {
+			return nil, err
+		}
+		if resp.ID != id {
+			// Stale response from an earlier timed-out call — drop it.
+			continue
+		}
+		if !resp.OK {
+			return nil, errors.New(resp.Error)
+		}
+		return resp.Result, nil
 	}
-	if resp.ID != id {
-		return nil, fmt.Errorf("worker id mismatch: want %s got %s", id, resp.ID)
-	}
-	if !resp.OK {
-		return nil, errors.New(resp.Error)
-	}
-	return resp.Result, nil
 }
 
+// readResponse waits up to timeout for the next line from the shared
+// reader goroutine. On timeout it returns WITHOUT leaking a goroutine —
+// the reader keeps running and the (late) line will be delivered to the
+// next readResponse caller. Callers hold w.mu, so at most one readResponse
+// is in flight, guaranteeing the late line reaches the right owner.
 func (w *PWWorker) readResponse(timeout time.Duration) (*pwResponse, error) {
-	type result struct {
-		line []byte
-		err  error
+	if w.readErr != nil {
+		return nil, fmt.Errorf("worker closed: %w", w.readErr)
 	}
-	ch := make(chan result, 1)
-	go func() {
-		line, err := w.stdoutR.ReadBytes('\n')
-		ch <- result{line, err}
-	}()
 	select {
-	case got := <-ch:
+	case got := <-w.lines:
 		if got.err != nil {
+			w.readErr = got.err
 			return nil, fmt.Errorf("read stdout: %w", got.err)
 		}
 		var resp pwResponse
@@ -316,14 +362,31 @@ func PWNavigate(ctx context.Context, url string) (string, error) {
 	return out.FinalURL, nil
 }
 
-// PWClick re-uses the same JS path as the CDP backend — resolves the
-// ref via window.__snth_tree.map[N].ref and dispatches a click on the
-// resolved DOM node. The snapshot must have happened first to populate
-// the tree.
+// pwFindByHighlightJS builds a JS snippet that scans window.__snth_tree.map
+// for the node whose highlightIndex === n and binds it to `node`, returning
+// "NOT_FOUND" when absent. F1: the map is keyed by sequential DOM ids over
+// ALL nodes (incl. text nodes), NOT by highlightIndex — so map[N] was the
+// wrong node (or a text node with no .ref). We must scan for the
+// highlightIndex the same way the CDP backend does (actions.go:270).
+func pwFindByHighlightJS(n int) string {
+	return fmt.Sprintf(`
+  let node = null;
+  const __tree = window.__snth_tree;
+  if (__tree && __tree.map) {
+    for (const __id of Object.keys(__tree.map)) {
+      const __n = __tree.map[__id];
+      if (__n && __n.highlightIndex === %d) { node = __n.ref; break; }
+    }
+  }`, n)
+}
+
+// PWClick re-uses the same highlightIndex scan as the CDP backend to
+// resolve the ref, then dispatches a click on the resolved DOM node. The
+// snapshot must have happened first to populate the tree.
 func PWClick(ctx context.Context, ref int) error {
 	expr := fmt.Sprintf(
-		`(() => { const n = window.__snth_tree && window.__snth_tree.map && window.__snth_tree.map[%d] && window.__snth_tree.map[%d].ref; if (!n) return "NOT_FOUND"; n.scrollIntoView({block:"center",inline:"center"}); n.click(); return "OK"; })()`,
-		ref, ref,
+		`(() => {%s if (!node) return "NOT_FOUND"; node.scrollIntoView({block:"center",inline:"center"}); node.click(); return "OK"; })()`,
+		pwFindByHighlightJS(ref),
 	)
 	r, err := pwEval(ctx, expr)
 	if err != nil {
@@ -341,8 +404,7 @@ func PWClick(ctx context.Context, ref int) error {
 func PWType(ctx context.Context, ref int, text string) error {
 	// Embed the text via JSON encoding so quotes/backslashes are safe.
 	textJSON, _ := json.Marshal(text)
-	expr := fmt.Sprintf(`(() => {
-  const node = window.__snth_tree && window.__snth_tree.map && window.__snth_tree.map[%d] && window.__snth_tree.map[%d].ref;
+	expr := fmt.Sprintf(`(() => {%s
   if (!node) return "NOT_FOUND";
   node.focus();
   if (node.tagName === "INPUT" || node.tagName === "TEXTAREA") {
@@ -359,7 +421,7 @@ func PWType(ctx context.Context, ref int, text string) error {
     return "NOT_AN_INPUT";
   }
   return "OK";
-})()`, ref, ref, string(textJSON), string(textJSON), string(textJSON))
+})()`, pwFindByHighlightJS(ref), string(textJSON), string(textJSON), string(textJSON))
 	r, err := pwEval(ctx, expr)
 	if err != nil {
 		return err
