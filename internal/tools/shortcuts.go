@@ -5,6 +5,8 @@ package tools
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -81,9 +83,11 @@ func shortcutHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 
 	// Reaching the handler means the central gate already approved (or
 	// GateSkip'd) this call. Record the approval so subsequent calls to
-	// the same shortcut this session skip the prompt (preserves the old
-	// per-session cache behavior; GatePolicy reads it).
-	rememberShortcutApproval(a.Name)
+	// the SAME shortcut WITH THE SAME INPUT this session skip the prompt.
+	// The cache is keyed on name + input hash, NOT name alone: a
+	// Run-Shell-Script shortcut executes its stdin, so approving "X" once
+	// must NOT bless "X" with arbitrary different attacker input (F3).
+	rememberShortcutApproval(a.Name, a.Input)
 
 	// Materialize input as a temp file (shortcuts run prefers file input
 	// over stdin).
@@ -161,27 +165,37 @@ var (
 	shortcutApprovals   = map[string]struct{}{}
 )
 
-func shortcutApproved(name string) bool {
+// shortcutCacheKey is the session-cache key: shortcut name + a hash of the
+// exact input. Two calls to the same shortcut with different input produce
+// different keys, so an approval for one input never blesses another (F3).
+func shortcutCacheKey(name, input string) string {
+	sum := sha256.Sum256([]byte(input))
+	return name + "\x00" + hex.EncodeToString(sum[:])
+}
+
+func shortcutApproved(name, input string) bool {
 	shortcutApprovalsMu.Lock()
 	defer shortcutApprovalsMu.Unlock()
-	_, ok := shortcutApprovals[name]
+	_, ok := shortcutApprovals[shortcutCacheKey(name, input)]
 	return ok
 }
 
-func rememberShortcutApproval(name string) {
+func rememberShortcutApproval(name, input string) {
 	shortcutApprovalsMu.Lock()
 	defer shortcutApprovalsMu.Unlock()
-	shortcutApprovals[name] = struct{}{}
+	shortcutApprovals[shortcutCacheKey(name, input)] = struct{}{}
 }
 
 // shortcutGatePolicy skips the prompt when this shortcut name was already
-// approved earlier in the session; otherwise it requires a prompt.
+// approved earlier in the session WITH THE SAME INPUT; otherwise it
+// requires a prompt. Keying on name+input means re-invoking an approved
+// shortcut with different (attacker-chosen) input re-prompts.
 func shortcutGatePolicy(raw json.RawMessage) GateDecision {
 	var a shortcutArgs
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return GatePrompt
 	}
-	if shortcutApproved(strings.TrimSpace(a.Name)) {
+	if shortcutApproved(strings.TrimSpace(a.Name), a.Input) {
 		return GateSkip
 	}
 	return GatePrompt
