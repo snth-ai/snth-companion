@@ -37,7 +37,13 @@ func RegisterFS() {
 	Register(Descriptor{
 		Name:        "remote_fs_list",
 		Description: "List the entries of a directory on the paired Mac.",
-		DangerLevel: "safe",
+		// Same containment posture as remote_fs_read: listing a directory
+		// leaks its filenames (~/.ssh, /etc, Chrome profile), so it is
+		// prompt-gated and the shared fs gate policy auto-approves only
+		// inside the sandbox, escalating to always-prompt outside.
+		DangerLevel:     "prompt",
+		GatePolicy:      fsReadGatePolicy,
+		ApprovalSummary: fsListSummary,
 	}, fsListHandler)
 }
 
@@ -387,6 +393,21 @@ func fsReadSummary(raw json.RawMessage) (string, string) {
 		resolved = a.Path
 	}
 	return fmt.Sprintf("Read file outside sandbox:\n    %s", resolved), resolved
+}
+
+// fsListSummary renders the approval dialog text for an out-of-sandbox
+// remote_fs_list. Returns the resolved path so the trust store can gate
+// on AllowedWriteRoots.
+func fsListSummary(raw json.RawMessage) (string, string) {
+	var a fsListArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return "", ""
+	}
+	resolved, _, err := fsResolveInside(a.Path)
+	if err != nil {
+		resolved = a.Path
+	}
+	return fmt.Sprintf("List directory outside sandbox:\n    %s", resolved), resolved
 }
 
 // fsWriteSummary renders the approval dialog text for an out-of-sandbox
