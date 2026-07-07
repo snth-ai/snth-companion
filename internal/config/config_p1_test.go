@@ -17,6 +17,14 @@ func isolate(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 	t.Setenv("XDG_CONFIG_HOME", tmp)
+	// H8: never touch the real login Keychain from tests. Install an
+	// in-memory fake so Save/Load exercise the marker+hydrate path without
+	// popping a `security` auth prompt or hanging on a headless box. Tests
+	// that want to inspect the backend call withFakeKeychain themselves,
+	// which overrides this and restores it on cleanup.
+	prev := kc
+	kc = newFakeKeychain()
+	t.Cleanup(func() { kc = prev })
 	ResetForTest()
 	t.Cleanup(ResetForTest)
 }

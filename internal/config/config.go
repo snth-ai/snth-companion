@@ -188,11 +188,42 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("parse config: %w", err)
 		}
 	}
+	// H8: re-hydrate any token stored in the Keychain (JSON value is the
+	// marker / empty) BEFORE migrateFromLegacy, which copies the legacy
+	// scalar into a pair and would otherwise carry the marker forward.
+	cfg.hydrateTokensFromKeychain()
 	cfg.migrateFromLegacy()
 	cfg.ensureDefaults()
 	cfg.syncLegacyFromActive()
 	current = cfg
 	return cfg, nil
+}
+
+// hydrateTokensFromKeychain fills in tokens whose on-disk JSON value is the
+// keychainMarker (or empty with a matching Keychain entry) from the
+// Keychain. A token already present in plaintext (Keychain-unavailable
+// fallback) is left as-is. Also seeds the managed-account tracker so a
+// later Save can prune stale entries. Best-effort: a Keychain miss / error
+// leaves the token empty (the caller then sees "not paired" for that pair,
+// which is the safe outcome — better than a stale token).
+func (c *Config) hydrateTokensFromKeychain() {
+	for i := range c.Synths {
+		if !isMarker(c.Synths[i].Token) {
+			// Plaintext already in JSON (fallback path) — track + keep.
+			rememberManagedAccount(c.Synths[i].ID)
+			continue
+		}
+		if v, err := kc.Get(c.Synths[i].ID); err == nil {
+			c.Synths[i].Token = v
+			rememberManagedAccount(c.Synths[i].ID)
+		}
+	}
+	if !isMarker(c.CompanionToken) {
+		rememberManagedAccount(legacyKeychainAccount)
+	} else if v, err := kc.Get(legacyKeychainAccount); err == nil {
+		c.CompanionToken = v
+		rememberManagedAccount(legacyKeychainAccount)
+	}
 }
 
 // Get returns the cached config. Load must have been called first.
@@ -209,6 +240,13 @@ func Get() *Config {
 // concurrent Update(). We snapshot-marshal under the lock (holding it for
 // the whole sync+marshal), then do the file I/O outside the lock so a slow
 // disk doesn't serialize every reader.
+//
+// H8: the bearer token(s) go to the Keychain, not the JSON. Under the lock
+// we build a REDACTED copy of the struct (tokens -> keychainMarker) to
+// marshal, plus a snapshot of the real {account: token} map. The Keychain
+// I/O runs OUTSIDE the lock (a slow `security` exec must not serialize
+// readers, preserving E3). If a Keychain write is unavailable, that token
+// is written PLAINTEXT into the JSON instead (fallback), so nothing breaks.
 func Save() error {
 	mu.Lock()
 	cfg := current
@@ -217,8 +255,68 @@ func Save() error {
 		return fmt.Errorf("config not loaded")
 	}
 	cfg.syncLegacyFromActive()
-	raw, err := json.MarshalIndent(cfg, "", "  ")
+
+	// Snapshot the real tokens to store, and the set of live accounts, then
+	// marshal a redacted copy. The in-memory struct keeps its real tokens.
+	tokens := map[string]string{} // account -> real token
+	for i := range cfg.Synths {
+		if t := cfg.Synths[i].Token; t != "" && !isMarker(t) {
+			tokens[cfg.Synths[i].ID] = t
+		}
+	}
+	if cfg.CompanionToken != "" && !isMarker(cfg.CompanionToken) {
+		tokens[legacyKeychainAccount] = cfg.CompanionToken
+	}
+	live := map[string]bool{}
+	for i := range cfg.Synths {
+		live[cfg.Synths[i].ID] = true
+	}
+	if cfg.CompanionToken != "" {
+		live[legacyKeychainAccount] = true
+	}
+
+	// Persist tokens to the Keychain first so we know which succeeded; a
+	// failed (unavailable) write stays plaintext in the redacted copy.
+	// Done under the lock only to read; the exec itself is fine here because
+	// Save already serializes on mu for its whole body pre-H8 — but to honor
+	// E3 (no slow exec under the lock) we defer the exec to after Unlock.
+	// So: capture what we need, Unlock, do Keychain I/O, THEN marshal.
+	redacted := *cfg
+	redacted.Synths = append([]SynthPair(nil), cfg.Synths...)
+	knownAccts := append([]string(nil), managedAccountsSnapshotLocked()...)
 	mu.Unlock()
+
+	// Keychain writes (outside the lock).
+	plaintext := map[string]bool{} // accounts that must stay plaintext (fallback)
+	for acct, tok := range tokens {
+		if err := kc.Set(acct, tok); err != nil {
+			plaintext[acct] = true // fall back to JSON plaintext
+		} else {
+			rememberManagedAccount(acct)
+		}
+	}
+	// Delete Keychain entries for accounts we previously managed but that
+	// are no longer live (unpaired synths, last-pair removal, E1).
+	for _, acct := range knownAccts {
+		if !live[acct] {
+			_ = kc.Delete(acct)
+			forgetManagedAccount(acct)
+		}
+	}
+
+	// Now redact: for every token that made it into the Keychain, swap the
+	// JSON value to the marker. Fallback accounts keep the plaintext.
+	for i := range redacted.Synths {
+		id := redacted.Synths[i].ID
+		if _, hadToken := tokens[id]; hadToken && !plaintext[id] {
+			redacted.Synths[i].Token = keychainMarker
+		}
+	}
+	if _, hadLegacy := tokens[legacyKeychainAccount]; hadLegacy && !plaintext[legacyKeychainAccount] {
+		redacted.CompanionToken = keychainMarker
+	}
+
+	raw, err := json.MarshalIndent(&redacted, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -230,6 +328,49 @@ func Save() error {
 		return err
 	}
 	return os.Rename(tmp, Path())
+}
+
+// --- managed-account tracking (H8) ---
+//
+// We track which Keychain accounts this process has written so Save can
+// delete stale ones (unpaired synths) without enumerating the whole
+// Keychain. Seeded on Load from the pairs present on disk.
+
+var (
+	managedMu   sync.Mutex
+	managedAccts = map[string]bool{}
+)
+
+func rememberManagedAccount(acct string) {
+	managedMu.Lock()
+	managedAccts[acct] = true
+	managedMu.Unlock()
+}
+
+func forgetManagedAccount(acct string) {
+	managedMu.Lock()
+	delete(managedAccts, acct)
+	managedMu.Unlock()
+}
+
+// managedAccountsSnapshotLocked returns the tracked accounts. Named
+// "Locked" because Save calls it while holding mu, but it uses its own
+// managedMu — safe either way.
+func managedAccountsSnapshotLocked() []string {
+	managedMu.Lock()
+	defer managedMu.Unlock()
+	out := make([]string, 0, len(managedAccts))
+	for a := range managedAccts {
+		out = append(out, a)
+	}
+	return out
+}
+
+// resetManagedAccountsForTest clears the tracker (test-only helper).
+func resetManagedAccountsForTest() {
+	managedMu.Lock()
+	managedAccts = map[string]bool{}
+	managedMu.Unlock()
 }
 
 // Update applies a mutation under the lock and persists.

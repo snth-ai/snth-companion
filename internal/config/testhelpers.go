@@ -24,6 +24,7 @@ func SeedForTest(cfg *Config) {
 // from disk. Intended for tests only.
 func ResetForTest() {
 	mu.Lock()
-	defer mu.Unlock()
 	current = nil
+	mu.Unlock()
+	resetManagedAccountsForTest()
 }
