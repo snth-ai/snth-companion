@@ -1496,7 +1496,7 @@ export type PendingOutbound = {
   source_session_id?: string
   source_turn_trace?: string
   reason?: string
-  status: "pending" | "approved" | "rejected" | "sent" | "expired"
+  status: "pending" | "approved" | "rejected" | "sent" | "expired" | "failed"
   final_text?: string
   approver?: string
   approved_at?: string
@@ -1504,6 +1504,16 @@ export type PendingOutbound = {
   rejection_reason?: string
   expires_at?: string
   created_at: string
+  /**
+   * Set when the dispatcher tried to deliver the row to Telegram and
+   * the call returned an error (status moves to "failed", failed_at is
+   * stamped). last_error is the raw Telegram (or transport) message,
+   * truncated to 500 chars. Surface it next to the failed row so the
+   * operator sees WHY the post did not go out instead of staring at a
+   * silent green queue. Mia outbound silent-fail incident 2026-05-25.
+   */
+  last_error?: string
+  failed_at?: string
 }
 
 /**
