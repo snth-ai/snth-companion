@@ -143,6 +143,10 @@ func main() {
 	// reports events back to hub. No-ops gracefully when no pair set.
 	workerCtx, cancelWorker := context.WithCancel(context.Background())
 	daemon.StartTasksWorker(workerCtx)
+	// Account-level Work Runs use a separate, fail-closed worker. It only
+	// starts when SNTH_WORK_RUNNER_ENABLED=true and all node credentials are
+	// present; see internal/daemon/work_runs_worker.go.
+	daemon.StartWorkRunsWorkerFromEnv(workerCtx)
 	defer cancelWorker()
 
 	if *headless || runtime.GOOS != "darwin" {
