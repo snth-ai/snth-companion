@@ -56,6 +56,12 @@ fallback exists only for migration and local contract tests.
   revision. A mismatch fails before execution; selected context is never
   silently dropped. Context blocks are explicitly marked as untrusted data in
   the executor prompt.
+- If Codex cannot finish without an owner decision, it may end its owner-facing
+  output with one strict `SNTH_INPUT_REQUEST` JSON envelope. The worker validates
+  `question` versus `approval`, publishes a typed `run.needs_input` event, and
+  does not mark the attempt complete. A later claim includes Hub-recorded input
+  resolutions in the prompt as authoritative owner context. Ordinary output or
+  malformed envelopes cannot silently become questions.
 
 The final permission point deliberately makes this checkpoint useful for
 read-only task/context analysis while keeping broader agent work unavailable
@@ -80,5 +86,6 @@ before enabling the worker on a real node.
    signed per-Run grant and add artifact-safe binary extraction where needed.
 3. Parse preserved ACP NDJSON into typed progress/tool/artifact events while
    retaining the raw transcript.
-4. Enforce step/cost budgets and introduce explicit approval/answer actions.
+4. Enforce step/cost budgets and replace the response marker with native ACP
+   question/permission events when the adapter exposes a stable typed contract.
 5. Add artifact sealing and terminal controls independently of Run scheduling.

@@ -19,6 +19,7 @@ type fakeWorkExecutor struct {
 	executeErr   error
 	executed     bool
 	input        workRunExecution
+	output       string
 }
 
 func (f *fakeWorkExecutor) Available(context.Context) error { return f.availableErr }
@@ -26,7 +27,11 @@ func (f *fakeWorkExecutor) Available(context.Context) error { return f.available
 func (f *fakeWorkExecutor) Execute(_ context.Context, in workRunExecution, emit func(string) error) error {
 	f.executed = true
 	f.input = in
-	if err := emit(`{"type":"agent_message","text":"bounded result"}`); err != nil {
+	output := f.output
+	if output == "" {
+		output = `{"type":"agent_message","text":"bounded result"}`
+	}
+	if err := emit(output); err != nil {
 		return err
 	}
 	return f.executeErr
@@ -180,6 +185,47 @@ func TestWorkRunsWorkerUsesFrozenAgentInstructions(t *testing.T) {
 	}
 	if !executor.executed || !strings.Contains(executor.input.Prompt, "FROZEN AGENT WORKFLOW") || !strings.Contains(executor.input.Prompt, "Produce a cited morning brief.") {
 		t.Fatalf("frozen Agent instructions did not reach the bounded prompt: executed=%v prompt=%q", executor.executed, executor.input.Prompt)
+	}
+}
+
+func TestWorkRunsWorkerRequestsTypedOwnerInput(t *testing.T) {
+	fixture := &workHubFixture{t: t, token: "secret", lease: testWorkLease()}
+	server := httptest.NewServer(fixture)
+	defer server.Close()
+	executor := &fakeWorkExecutor{output: "I cannot choose the cohort safely.\nSNTH_INPUT_REQUEST: {\"input_kind\":\"question\",\"question\":\"Which rollout cohort should be used?\",\"choices\":[\"personal\",\"all\"]}"}
+	worker := newTestWorkWorker(server, executor, true)
+	if err := worker.claimAndRun(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	if got := strings.Join(fixture.events, ","); got != "step.started,output,run.needs_input" {
+		t.Fatalf("events = %s", got)
+	}
+}
+
+func TestWorkRunsWorkerIncludesResolvedOwnerInput(t *testing.T) {
+	lease := testWorkLease()
+	lease.Run.InputResolutions = []workRunInputResolution{{QuestionEventID: "question_1", Resolution: "answer", Answer: "personal", ResolvedBy: "owner_1"}}
+	fixture := &workHubFixture{t: t, token: "secret", lease: lease}
+	server := httptest.NewServer(fixture)
+	defer server.Close()
+	executor := &fakeWorkExecutor{}
+	worker := newTestWorkWorker(server, executor, true)
+	if err := worker.claimAndRun(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(executor.input.Prompt, "OWNER INPUT FROM EARLIER ATTEMPTS") || !strings.Contains(executor.input.Prompt, "question_1: answer — personal") {
+		t.Fatalf("resolved owner input missing from prompt: %q", executor.input.Prompt)
+	}
+}
+
+func TestParseWorkInputRequestRejectsInvalidEnvelope(t *testing.T) {
+	if _, ok := parseWorkInputRequest(`SNTH_INPUT_REQUEST: {"input_kind":"question"}`); ok {
+		t.Fatal("accepted request without owner-readable question")
+	}
+	if _, ok := parseWorkInputRequest(`unrelated output`); ok {
+		t.Fatal("accepted ordinary output as an input request")
 	}
 }
 
