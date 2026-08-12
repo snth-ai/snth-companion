@@ -34,7 +34,9 @@ fallback exists only for migration and local contract tests.
   in every event. Losing the lease cancels local execution.
 - Hub supplies no command string. The adapter invokes a fixed `acpx` argv with
   `--deny-all`, `--no-fs`, `--no-terminal`, and non-interactive prompts set to
-  fail.
+  fail. Codex ACP starts in `read-only` mode.
+- The child receives a small allowlisted environment instead of the Companion
+  process environment; arbitrary provider/connection secrets are not inherited.
 - The Run's duration budget becomes both the local context deadline and acpx
   timeout.
 - Workspaces live under the Companion support directory and are mode `0700`;
@@ -51,6 +53,10 @@ fallback exists only for migration and local contract tests.
 The final permission point deliberately makes this checkpoint useful for
 read-only task/context analysis while keeping broader agent work unavailable
 rather than unsafe.
+
+Raw ACP NDJSON is retained locally, but Hub receives only owner-facing agent
+message chunks in this checkpoint; initialization metadata, model inventory,
+and tool catalog frames are filtered out.
 
 ## Executor prerequisite
 

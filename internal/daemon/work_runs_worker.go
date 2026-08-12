@@ -160,10 +160,11 @@ func (e *acpxWorkRunExecutor) Execute(ctx context.Context, in workRunExecution, 
 	cmd := exec.CommandContext(ctx, e.Binary, args...)
 	cmd.Dir = in.Workspace
 	cmd.Stdin = nil
-	cmd.Env = append(os.Environ(),
-		"PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+	cmd.Env = workRunExecutorEnv(
 		"SNTH_WORK_RUN_ID="+in.Run.ID,
 		"SNTH_WORK_TASK_ID="+in.Run.TaskID,
+		"INITIAL_AGENT_MODE=read-only",
+		"NO_BROWSER=1",
 	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.WaitDelay = 5 * time.Second
@@ -220,8 +221,8 @@ func (e *acpxWorkRunExecutor) Execute(ctx context.Context, in workRunExecution, 
 			continue
 		}
 		_, _ = fmt.Fprintf(transcript, "[%s] %s\n", line.stream, line.text)
-		if emitErr == nil {
-			emitErr = emit(truncate(line.text, 4000))
+		if message, ok := acpxOwnerOutput(line.text); ok && emitErr == nil {
+			emitErr = emit(truncate(message, 4000))
 			if emitErr != nil {
 				_ = cmd.Cancel()
 			}
@@ -235,6 +236,40 @@ func (e *acpxWorkRunExecutor) Execute(ctx context.Context, in workRunExecution, 
 		return fmt.Errorf("acpx: %w", waitErr)
 	}
 	return nil
+}
+
+func workRunExecutorEnv(extra ...string) []string {
+	keys := []string{"HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "SHELL", "CODEX_HOME"}
+	env := make([]string, 0, len(keys)+len(extra)+2)
+	for _, key := range keys {
+		if value := os.Getenv(key); value != "" {
+			env = append(env, key+"="+value)
+		}
+	}
+	env = append(env, "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+	if _, err := os.Stat("/opt/homebrew/bin/codex"); err == nil {
+		env = append(env, "CODEX_PATH=/opt/homebrew/bin/codex")
+	}
+	return append(env, extra...)
+}
+
+func acpxOwnerOutput(line string) (string, bool) {
+	var envelope struct {
+		Method string `json:"method"`
+		Params struct {
+			Update struct {
+				SessionUpdate string `json:"sessionUpdate"`
+				Content       struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"update"`
+		} `json:"params"`
+	}
+	if json.Unmarshal([]byte(line), &envelope) != nil || envelope.Method != "session/update" || envelope.Params.Update.SessionUpdate != "agent_message_chunk" {
+		return "", false
+	}
+	message := strings.TrimSpace(envelope.Params.Update.Content.Text)
+	return message, message != ""
 }
 
 type WorkRunsWorker struct {

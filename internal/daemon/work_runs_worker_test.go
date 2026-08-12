@@ -219,3 +219,24 @@ func TestStartWorkRunsWorkerFromEnvFailsClosed(t *testing.T) {
 		t.Fatal("incompletely configured worker started")
 	}
 }
+
+func TestACPXOwnerOutputFiltersProtocolNoise(t *testing.T) {
+	if _, ok := acpxOwnerOutput(`{"jsonrpc":"2.0","id":0,"method":"initialize"}`); ok {
+		t.Fatal("initialize frame became owner output")
+	}
+	message, ok := acpxOwnerOutput(`{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"READY"}}}}`)
+	if !ok || message != "READY" {
+		t.Fatalf("owner output = %q ok=%v", message, ok)
+	}
+}
+
+func TestWorkRunExecutorEnvDoesNotInheritArbitrarySecrets(t *testing.T) {
+	t.Setenv("SHOULD_NOT_REACH_CODEX", "secret")
+	env := strings.Join(workRunExecutorEnv("SNTH_WORK_RUN_ID=run_1"), "\n")
+	if strings.Contains(env, "SHOULD_NOT_REACH_CODEX") || strings.Contains(env, "secret") {
+		t.Fatalf("executor inherited unrelated secret: %s", env)
+	}
+	if !strings.Contains(env, "SNTH_WORK_RUN_ID=run_1") || !strings.Contains(env, "PATH=/opt/homebrew/bin") {
+		t.Fatalf("executor env omitted bounded runtime values: %s", env)
+	}
+}
