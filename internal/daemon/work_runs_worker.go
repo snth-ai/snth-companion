@@ -161,6 +161,7 @@ func (e *acpxWorkRunExecutor) Execute(ctx context.Context, in workRunExecution, 
 	cmd.Dir = in.Workspace
 	cmd.Stdin = nil
 	cmd.Env = append(os.Environ(),
+		"PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
 		"SNTH_WORK_RUN_ID="+in.Run.ID,
 		"SNTH_WORK_TASK_ID="+in.Run.TaskID,
 	)
@@ -274,6 +275,13 @@ func StartWorkRunsWorkerFromEnv(ctx context.Context) *WorkRunsWorker {
 	if binary == "" {
 		if found, err := exec.LookPath("acpx"); err == nil {
 			binary = found
+		} else {
+			for _, candidate := range []string{"/opt/homebrew/bin/acpx", "/usr/local/bin/acpx"} {
+				if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+					binary = candidate
+					break
+				}
+			}
 		}
 	}
 	w := &WorkRunsWorker{
