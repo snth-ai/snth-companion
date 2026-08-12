@@ -43,6 +43,13 @@ fallback exists only for migration and local contract tests.
   prompt/transcript files are `0600`.
 - Runs whose manifest requests repository/workspace/network access fail before
   execution.
+- Agent-backed Runs carry the exact immutable Agent definition selected by
+  Hub. The worker verifies its identity, version, executor, and budget, then
+  places the frozen owner-authored instructions in the bounded prompt.
+- Non-empty Agent tool grants fail closed with `tool_grants_unsupported` until
+  a scoped connector grant broker exists. A definition may describe future
+  Composio or Work tools without accidentally exposing them to today's Codex
+  process.
 - After owner approval, the worker redeems its active lease for a bounded
   context bundle. Hub supplies the exact frozen Work Document revisions and
   asks the owning Node API to materialize Finder text by stable ID plus frozen

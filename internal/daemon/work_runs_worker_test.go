@@ -165,6 +165,47 @@ func TestWorkRunsWorkerMaterializesContextSources(t *testing.T) {
 	}
 }
 
+func TestWorkRunsWorkerUsesFrozenAgentInstructions(t *testing.T) {
+	lease := testWorkLease()
+	lease.Run.AgentID = "agt_1"
+	lease.Run.ExecutorProfile = "agent/agt_1/v2"
+	lease.Run.AgentDefinition = &workAgentDefinition{ID: "agd_2", AgentID: "agt_1", Version: 2, ExecutorType: "codex", Instructions: "Produce a cited morning brief.", Budget: lease.Run.Budget}
+	fixture := &workHubFixture{t: t, token: "secret", lease: lease}
+	server := httptest.NewServer(fixture)
+	defer server.Close()
+	executor := &fakeWorkExecutor{}
+	worker := newTestWorkWorker(server, executor, true)
+	if err := worker.claimAndRun(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !executor.executed || !strings.Contains(executor.input.Prompt, "FROZEN AGENT WORKFLOW") || !strings.Contains(executor.input.Prompt, "Produce a cited morning brief.") {
+		t.Fatalf("frozen Agent instructions did not reach the bounded prompt: executed=%v prompt=%q", executor.executed, executor.input.Prompt)
+	}
+}
+
+func TestWorkRunsWorkerRejectsUnbrokeredAgentTools(t *testing.T) {
+	lease := testWorkLease()
+	lease.Run.AgentID = "agt_1"
+	lease.Run.AgentDefinition = &workAgentDefinition{ID: "agd_1", AgentID: "agt_1", Version: 1, ExecutorType: "codex", Instructions: "Read the calendar.", ToolGrants: []string{"calendar.read"}, Budget: lease.Run.Budget}
+	lease.Run.PermissionManifest.ToolGrants = []string{"calendar.read"}
+	fixture := &workHubFixture{t: t, token: "secret", lease: lease}
+	server := httptest.NewServer(fixture)
+	defer server.Close()
+	executor := &fakeWorkExecutor{}
+	worker := newTestWorkWorker(server, executor, true)
+	if err := worker.claimAndRun(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if executor.executed {
+		t.Fatal("worker exposed a tool without a grant broker")
+	}
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	if got := strings.Join(fixture.events, ","); got != "run.failed" {
+		t.Fatalf("events = %s", got)
+	}
+}
+
 func TestWorkRunsWorkerApprovalDenialNeverExecutes(t *testing.T) {
 	fixture := &workHubFixture{t: t, token: "secret", lease: testWorkLease()}
 	server := httptest.NewServer(fixture)
