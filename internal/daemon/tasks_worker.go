@@ -42,6 +42,7 @@ import (
 
 	"github.com/osteele/liquid"
 
+	"github.com/snth-ai/snth-companion/internal/approval"
 	"github.com/snth-ai/snth-companion/internal/config"
 )
 
@@ -52,6 +53,10 @@ type TasksWorker struct {
 
 	mu      sync.Mutex
 	running map[string]*localRun // task_id → run
+	// approved tracks task ids the user has approved to run this session,
+	// so the approval prompt fires once per task (not on every tick /
+	// reattach). Guarded by mu.
+	approved map[string]bool
 
 	stopCh chan struct{}
 	once   sync.Once
@@ -62,11 +67,17 @@ type localRun struct {
 	taskID    string
 	workspace string
 	pid       int
-	cmd       *exec.Cmd      // nil after reattach
+	cmd       *exec.Cmd // nil after reattach
+	exitCh    chan int  // fresh runs only; nil after reattach
 	startedAt time.Time
 	exited    bool
 	cancel    context.CancelFunc
 }
+
+// exitCodeFile is the workspace-relative file the wrapper shell writes the
+// sub-agent's exit status to (C2). A reattached monitor reads it to recover
+// the true exit code across a companion restart.
+const exitCodeFile = "exit_code"
 
 // taskMeta is persisted to <workspace>/meta.json so we can reattach on
 // companion restart. Mirrors registry shape selectively.
@@ -136,6 +147,7 @@ func StartTasksWorker(ctx context.Context) *TasksWorker {
 		HTTP:         &http.Client{Timeout: 30 * time.Second},
 		PollInterval: 10 * time.Second,
 		running:      make(map[string]*localRun),
+		approved:     make(map[string]bool),
 		stopCh:       make(chan struct{}),
 	}
 	curWorker = w
@@ -202,6 +214,9 @@ func (w *TasksWorker) tick(ctx context.Context) {
 	if pair == nil || pair.Token == "" {
 		return
 	}
+	// C3: retry any terminal event whose POST failed earlier (e.g. hub was
+	// unreachable). Cheap — only touches workspaces with a pending file.
+	w.flushPendingTerminals()
 	tasks, err := w.listOwnedTasks(pair.ID)
 	if err != nil {
 		log.Printf("[tasks-worker] list tasks: %v", err)
@@ -319,6 +334,123 @@ func (w *TasksWorker) getTemplate(id string) (*taskTemplate, error) {
 	return &t, nil
 }
 
+// pendingTerminalFile is the workspace-relative file that stores a terminal
+// event whose POST failed, so it can be retried after reconnect (C3). The
+// idempotency key (task_id + terminal-state) rides in the body so a hub
+// that de-dupes can drop a double-delivery.
+const pendingTerminalFile = "pending_terminal.json"
+
+// pendingTerminal is the persisted shape of a not-yet-delivered terminal
+// event.
+type pendingTerminal struct {
+	TaskID    string         `json:"task_id"`
+	Kind      string         `json:"kind"`
+	NewState  string         `json:"new_state"`
+	Payload   map[string]any `json:"payload"`
+	Runtime   map[string]any `json:"runtime"`
+	Key       string         `json:"idempotency_key"`
+	SavedAtNS int64          `json:"saved_at_ns"`
+}
+
+// readExitCodeFile reads the wrapper-written rc file (C2). Returns
+// (code, true) when present and parseable, (0, false) otherwise.
+func readExitCodeFile(ws string) (int, bool) {
+	raw, err := os.ReadFile(filepath.Join(ws, exitCodeFile))
+	if err != nil {
+		return 0, false
+	}
+	code, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		return 0, false
+	}
+	return code, true
+}
+
+// postTerminal delivers a terminal task event with bounded retry. On
+// exhaustion it persists the event to <ws>/pending_terminal.json so a
+// later flushPendingTerminals (called each tick + on worker start) retries
+// it — guaranteeing no task is stranded 'running' on the hub because one
+// POST failed (C3). Idempotency key = task_id + terminal-state.
+func (w *TasksWorker) postTerminal(taskID, ws, newState, kind string, payload, runtime map[string]any) {
+	key := taskID + ":" + newState
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	if runtime == nil {
+		runtime = map[string]any{}
+	}
+	payload["idempotency_key"] = key
+
+	// Bounded inline retry with backoff (3 attempts) before persisting.
+	backoff := 500 * time.Millisecond
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(backoff)
+			backoff *= 2
+		}
+		if err := w.postEvent(taskID, kind, payload, runtime, newState); err == nil {
+			// Success — clear any previously-persisted copy.
+			if ws != "" {
+				_ = os.Remove(filepath.Join(ws, pendingTerminalFile))
+			}
+			return
+		} else {
+			lastErr = err
+		}
+	}
+	log.Printf("[tasks-worker] task=%s terminal post failed after retries (%v) — persisting for reconnect", taskID, lastErr)
+	if ws == "" {
+		return
+	}
+	pt := pendingTerminal{
+		TaskID:    taskID,
+		Kind:      kind,
+		NewState:  newState,
+		Payload:   payload,
+		Runtime:   runtime,
+		Key:       key,
+		SavedAtNS: time.Now().UnixNano(),
+	}
+	if raw, err := json.MarshalIndent(pt, "", "  "); err == nil {
+		tmp := filepath.Join(ws, pendingTerminalFile) + ".tmp"
+		if werr := os.WriteFile(tmp, raw, 0o644); werr == nil {
+			_ = os.Rename(tmp, filepath.Join(ws, pendingTerminalFile))
+		}
+	}
+}
+
+// flushPendingTerminals scans every task workspace for a persisted terminal
+// event and re-attempts delivery. Called on worker start (reattach) and
+// periodically from the loop, so a terminal event that failed while the hub
+// was unreachable lands once connectivity returns (C3).
+func (w *TasksWorker) flushPendingTerminals() {
+	root := tasksRoot()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		ws := filepath.Join(root, e.Name())
+		path := filepath.Join(ws, pendingTerminalFile)
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var pt pendingTerminal
+		if err := json.Unmarshal(raw, &pt); err != nil || pt.TaskID == "" {
+			continue
+		}
+		if err := w.postEvent(pt.TaskID, pt.Kind, pt.Payload, pt.Runtime, pt.NewState); err == nil {
+			_ = os.Remove(path)
+			log.Printf("[tasks-worker] task=%s pending terminal event delivered on retry", pt.TaskID)
+		}
+	}
+}
+
 func (w *TasksWorker) postEvent(taskID, kind string, payload, runtime map[string]any, newState string) error {
 	body := map[string]any{
 		"task_id": taskID,
@@ -392,13 +524,6 @@ func (w *TasksWorker) spawn(ctx context.Context, t taskRow) {
 		hookTimeout = defaultHookTimeoutMS
 	}
 
-	// --- after_create hook (only on fresh workspace, fatal on failure) ---
-	if freshlyCreated && hooks.AfterCreate != "" {
-		if err := w.runHook("after_create", hooks.AfterCreate, ws, hookTimeout, true); err != nil {
-			w.failSpawn(t.ID, "hook_failed: "+err.Error(), ws)
-			return
-		}
-	}
 	// Sub-agent kind: task wins, then config, then "claude".
 	kind := strings.TrimSpace(t.SubAgentKind)
 	if kind == "" {
@@ -408,6 +533,39 @@ func (w *TasksWorker) spawn(ctx context.Context, t taskRow) {
 	}
 	if kind == "" {
 		kind = "claude"
+	}
+
+	// --- approval gate (P0.7/A2) ---
+	// The task template's hooks run `bash -lc <hook>` with the user's full
+	// env, and the sub-agent runs `claude -p --dangerously-skip-permissions`
+	// (or codex/gemini). A compromised hub or anyone who can author a
+	// template would otherwise get local code execution with NO prompt.
+	// Gate the FIRST run of a task template behind an explicit approval
+	// (once per task id per session); a denial reports the task declined
+	// and executes nothing.
+	if !w.taskApproved(t.ID) {
+		ok, err := taskApprovalRequest(ctx, approval.Request_{
+			Tool:    "task_run",
+			Danger:  "always-prompt",
+			Summary: taskApprovalSummary(t, kind, hooks),
+		})
+		if err != nil {
+			w.failSpawn(t.ID, "task_approval_error: "+err.Error(), ws)
+			return
+		}
+		if !ok {
+			w.declineTask(t.ID, ws)
+			return
+		}
+		w.rememberTaskApproval(t.ID)
+	}
+
+	// --- after_create hook (only on fresh workspace, fatal on failure) ---
+	if freshlyCreated && hooks.AfterCreate != "" {
+		if err := w.runHook("after_create", hooks.AfterCreate, ws, hookTimeout, true); err != nil {
+			w.failSpawn(t.ID, "hook_failed: "+err.Error(), ws)
+			return
+		}
 	}
 
 	// --- render prompt ---
@@ -448,7 +606,14 @@ func (w *TasksWorker) spawn(ctx context.Context, t taskRow) {
 	}
 
 	// --- exec detached ---
-	cmd := exec.Command("bash", "-lc", cmdStr+" >> transcript.log 2>&1")
+	// C2: the shell writes the sub-agent's real exit status to an rc file
+	// (<ws>/exit_code) after it finishes, atomically (tmp + mv). This is
+	// what a REATTACHED monitor reads to recover the true exit code — a
+	// reattach has no *exec.Cmd, so without this the code stayed -1 and
+	// every reattached task was reported as an error.
+	wrapped := "{ " + cmdStr + " ; } >> transcript.log 2>&1 ; " +
+		"__rc=$? ; printf '%s' \"$__rc\" > " + exitCodeFile + ".tmp && mv " + exitCodeFile + ".tmp " + exitCodeFile
+	cmd := exec.Command("bash", "-lc", wrapped)
 	cmd.Dir = ws
 	tlog, _ := os.OpenFile(filepath.Join(ws, "transcript.log"), os.O_APPEND|os.O_WRONLY, 0o644)
 	cmd.Stdout = tlog
@@ -459,6 +624,9 @@ func (w *TasksWorker) spawn(ctx context.Context, t taskRow) {
 		"SNTH_TASK_WORKSPACE="+ws,
 	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	// Remove any stale rc file from a previous run of this workspace so a
+	// fresh spawn never reads an old exit code.
+	_ = os.Remove(filepath.Join(ws, exitCodeFile))
 	if err := cmd.Start(); err != nil {
 		w.failSpawn(t.ID, "subprocess_spawn_failed: "+err.Error(), ws)
 		return
@@ -466,6 +634,22 @@ func (w *TasksWorker) spawn(ctx context.Context, t taskRow) {
 	pid := cmd.Process.Pid
 	log.Printf("[tasks-worker] spawned task=%s pid=%d kind=%s ws=%s",
 		t.ID, pid, t.SubAgentKind, ws)
+
+	// C1: reap the child so ProcessState is populated and the REAL exit
+	// code flows. Without a Wait() the ProcessState stays nil forever and
+	// the monitor never detected a fresh run as finished. The goroutine
+	// pushes the exit code onto exitCh; the monitor selects on it.
+	exitCh := make(chan int, 1)
+	go func() {
+		werr := cmd.Wait()
+		code := 0
+		if cmd.ProcessState != nil {
+			code = cmd.ProcessState.ExitCode()
+		} else if werr != nil {
+			code = -1
+		}
+		exitCh <- code
+	}()
 
 	meta := taskMeta{
 		TaskID:       t.ID,
@@ -487,26 +671,27 @@ func (w *TasksWorker) spawn(ctx context.Context, t taskRow) {
 		pid:       pid,
 		cmd:       cmd,
 		startedAt: time.Now(),
+		exitCh:    exitCh,
 	}
 	w.mu.Unlock()
 
 	if err := w.postEvent(t.ID, "subagent_started",
 		map[string]any{"pid": pid},
 		map[string]any{
-			"workspace_path":   ws,
-			"sub_agent_pid":    pid,
-			"transcript_path":  filepath.Join(ws, "transcript.log"),
-			"started_at":       time.Now().UTC().Format(time.RFC3339),
+			"workspace_path":  ws,
+			"sub_agent_pid":   pid,
+			"transcript_path": filepath.Join(ws, "transcript.log"),
+			"started_at":      time.Now().UTC().Format(time.RFC3339),
 		},
 		"running",
 	); err != nil {
 		log.Printf("[tasks-worker] post subagent_started: %v", err)
 	}
 
-	// Detach the process from the cmd struct's Wait loop. We poll for
-	// exit ourselves via signal 0 in the monitor — that way the
-	// subprocess outlives the companion and can be reattached later.
-	go w.monitor(t.ID, ws, pid, cmd, budget, hooks)
+	// The monitor tails the transcript, enforces budgets, and reports the
+	// terminal event. It learns of exit either from exitCh (fresh run) or
+	// from a kill(pid,0) transition + the rc file (reattached run).
+	go w.monitor(t.ID, ws, pid, cmd, exitCh, budget, hooks)
 }
 
 // resolveHooks reads template.default_hooks JSON. Returns zero-value
@@ -580,6 +765,75 @@ func (w *TasksWorker) resolveAgentConfig(t taskRow) map[string]any {
 	return merged
 }
 
+// taskApprovalRequest is the approval primitive the tasks worker gate
+// calls. Indirected through a var so tests can stub it deterministically
+// (the real approval.Request pops an osascript dialog).
+var taskApprovalRequest = approval.Request
+
+// taskApproved reports whether the user already approved this task this
+// session.
+func (w *TasksWorker) taskApproved(id string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.approved[id]
+}
+
+// rememberTaskApproval records a task approval so it doesn't re-prompt.
+func (w *TasksWorker) rememberTaskApproval(id string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.approved[id] = true
+}
+
+// declineTask reports a user-declined task to the hub as declined and
+// releases the reserved run slot WITHOUT executing any hook or sub-agent.
+func (w *TasksWorker) declineTask(taskID, ws string) {
+	log.Printf("[tasks-worker] task=%s declined by user at approval gate", taskID)
+	w.mu.Lock()
+	delete(w.running, taskID)
+	w.mu.Unlock()
+	runtime := map[string]any{
+		"error_text":     "user declined the task at the companion approval prompt",
+		"error_category": "declined",
+	}
+	if ws != "" {
+		runtime["workspace_path"] = ws
+	}
+	_ = w.postEvent(taskID, "subagent_failed",
+		map[string]any{"reason": "declined", "message": "user declined"},
+		runtime,
+		"error",
+	)
+}
+
+// taskApprovalSummary builds the approval dialog text for a task template
+// run: template/agent/cwd + a preview of every hook script that will run.
+func taskApprovalSummary(t taskRow, kind string, hooks hooksConfig) string {
+	title := strings.TrimSpace(t.Title)
+	if title == "" {
+		title = t.ID
+	}
+	tmpl := "(none)"
+	if t.TemplateID != nil && *t.TemplateID != "" {
+		tmpl = *t.TemplateID
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Run task %q on your Mac\n", title)
+	fmt.Fprintf(&sb, "    agent: %s   template: %s\n", kind, tmpl)
+	fmt.Fprintf(&sb, "    workspace: %s\n", workspaceFor(t.ID))
+	fmt.Fprintf(&sb, "\nThe sub-agent runs with --dangerously-skip-permissions and can read/write files + run shell commands on your Mac.")
+	addHook := func(name, script string) {
+		if strings.TrimSpace(script) == "" {
+			return
+		}
+		fmt.Fprintf(&sb, "\n\n%s hook (bash):\n    %s", name, truncate(strings.ReplaceAll(script, "\n", " "), 200))
+	}
+	addHook("after_create", hooks.AfterCreate)
+	addHook("before_run", hooks.BeforeRun)
+	addHook("after_run", hooks.AfterRun)
+	return sb.String()
+}
+
 // failSpawn emits subagent_failed and transitions to error. msg may
 // start with a known SPEC §10.6 category prefix ("workspace_creation_failed: ...",
 // "hook_failed: ...") — we extract it as error_category for dashboards.
@@ -651,11 +905,12 @@ var liquidEngine = liquid.NewEngine()
 // strings (per SPEC: "Unknown variables/filters MUST fail rendering").
 //
 // Bindings:
-//   task.{id, title, description, sub_agent_kind, priority,
-//         retry_attempt, created_by, created_at, updated_at,
-//         workspace_path}
-//   overrides.{...}        (flattened JSON map from task.template_overrides)
-//   attempt                (alias for task.retry_attempt — Symphony idiom)
+//
+//	task.{id, title, description, sub_agent_kind, priority,
+//	      retry_attempt, created_by, created_at, updated_at,
+//	      workspace_path}
+//	overrides.{...}        (flattened JSON map from task.template_overrides)
+//	attempt                (alias for task.retry_attempt — Symphony idiom)
 //
 // If task has no template, returns description (or title) verbatim.
 func (w *TasksWorker) renderPrompt(t taskRow) (string, error) {
@@ -773,7 +1028,12 @@ func toFloat(v any) float64 {
 
 // monitor tails transcript.log every 1s, posts progress + handles
 // awaiting_input + detects exit. Owns the localRun until exit.
-func (w *TasksWorker) monitor(taskID, ws string, pid int, cmd *exec.Cmd, budget runBudget, hooks hooksConfig) {
+//
+// exitCh is non-nil for freshly-spawned runs: the reaping goroutine
+// pushes the real exit code there once cmd.Wait() returns (C1). For
+// reattached runs (cmd==nil, exitCh==nil) exit is detected via a
+// kill(pid,0) transition and the true code recovered from the rc file (C2).
+func (w *TasksWorker) monitor(taskID, ws string, pid int, cmd *exec.Cmd, exitCh <-chan int, budget runBudget, hooks hooksConfig) {
 	hookTimeout := hooks.TimeoutMS
 	if hookTimeout <= 0 {
 		hookTimeout = defaultHookTimeoutMS
@@ -803,6 +1063,8 @@ func (w *TasksWorker) monitor(taskID, ws string, pid int, cmd *exec.Cmd, budget 
 		lastNewLine  = time.Now()
 		startedAt    = time.Now()
 		awaiting     bool
+		reaped       bool // exitCh delivered (fresh run)
+		reapedCode   int
 	)
 
 	tick := time.NewTicker(1 * time.Second)
@@ -816,6 +1078,18 @@ func (w *TasksWorker) monitor(taskID, ws string, pid int, cmd *exec.Cmd, budget 
 	lastReconcile := time.Now()
 
 	for range tick.C {
+		// C1: drain the reap channel non-blockingly. Once the child is
+		// reaped we have its REAL exit code; we still do one more tick of
+		// transcript reading before reporting so trailing lines are caught.
+		if exitCh != nil && !reaped {
+			select {
+			case code := <-exitCh:
+				reaped = true
+				reapedCode = code
+			default:
+			}
+		}
+
 		// --- hub-state reconcile (cancel / blocked propagate here) ---
 		if time.Since(lastReconcile) >= reconcileEvery {
 			lastReconcile = time.Now()
@@ -917,26 +1191,30 @@ func (w *TasksWorker) monitor(taskID, ws string, pid int, cmd *exec.Cmd, budget 
 			lastProgPost = time.Now()
 		}
 
-		// Exit detection. cmd.Wait() will reap the child once; after
-		// reattach (cmd==nil) we use kill(pid, 0).
-		exited := false
-		if cmd != nil && cmd.ProcessState != nil {
-			exited = true
-		} else if err := syscall.Kill(pid, 0); err != nil {
-			exited = true
-		}
-		if cmd != nil && !exited {
-			// Non-blocking wait: only report exit after we've collected
-			// the syscall.Kill signal — avoids a race where the goroutine
-			// catches Wait() before transcript catches up.
+		// Exit detection.
+		//   Fresh run:  exitCh delivered the reaped code (reaped==true).
+		//   Reattach:   kill(pid,0) fails once the process is gone.
+		exited := reaped
+		if !exited && exitCh == nil {
+			if err := syscall.Kill(pid, 0); err != nil {
+				exited = true
+			}
 		}
 
 		if exited {
-			// Try one final read to pick up any trailing lines.
+			// Determine the true exit code:
+			//   fresh run  -> the reaped ProcessState code.
+			//   reattach   -> the rc file the wrapper wrote (C2). If it's
+			//                 not there yet (process just died / crashed
+			//                 before writing), fall back to -1.
 			finalLine := lastLine
-			exitCode := -1
-			if cmd != nil && cmd.ProcessState != nil {
-				exitCode = cmd.ProcessState.ExitCode()
+			exitCode := reapedCode
+			if !reaped {
+				if code, ok := readExitCodeFile(ws); ok {
+					exitCode = code
+				} else {
+					exitCode = -1
+				}
 			}
 			newState := "done"
 			if exitCode != 0 {
@@ -958,15 +1236,17 @@ func (w *TasksWorker) monitor(taskID, ws string, pid int, cmd *exec.Cmd, budget 
 				runtime["error_text"] = fmt.Sprintf("subagent exited with code %d", exitCode)
 				runtime["error_category"] = "subagent_nonzero_exit"
 			}
-			_ = w.postEvent(taskID, "subagent_exited",
+			// C3: terminal event MUST land — a dropped POST would leave the
+			// task 'running' on the hub forever. Retry with backoff; if it
+			// still fails, persist it for retry after reconnect.
+			w.postTerminal(taskID, ws, newState, "subagent_exited",
 				map[string]any{
-					"exit_code":          exitCode,
-					"tokens_total":       lastTokens,
-					"cost_usd_estimate":  lastCost,
-					"last_message":       truncate(finalLine, 200),
+					"exit_code":         exitCode,
+					"tokens_total":      lastTokens,
+					"cost_usd_estimate": lastCost,
+					"last_message":      truncate(finalLine, 200),
 				},
 				runtime,
-				newState,
 			)
 			log.Printf("[tasks-worker] task=%s exited code=%d tokens=%d cost=%.4f",
 				taskID, exitCode, lastTokens, lastCost)
@@ -974,30 +1254,31 @@ func (w *TasksWorker) monitor(taskID, ws string, pid int, cmd *exec.Cmd, budget 
 		}
 
 		// Stall + wall-time + cost enforcement (per-template budget).
-		if time.Since(lastNewLine) > budget.StallTimeout {
+		// C4: a run parked in awaiting_input is legitimately silent (it is
+		// waiting on the user), so exempt it from the stall timeout — else
+		// the watchdog kills a task that is correctly blocked on input.
+		if !awaiting && time.Since(lastNewLine) > budget.StallTimeout {
 			log.Printf("[tasks-worker] task=%s stalled (no transcript for %s) — killing",
 				taskID, budget.StallTimeout)
 			killProcessGroup(pid)
-			_ = w.postEvent(taskID, "subagent_failed",
+			w.postTerminal(taskID, ws, "error", "subagent_failed",
 				map[string]any{"reason": "stall_timeout"},
 				map[string]any{
 					"error_text":     "no transcript activity for " + budget.StallTimeout.String(),
 					"error_category": "stall_timeout",
 				},
-				"error",
 			)
 			return
 		}
 		if time.Since(startedAt) > budget.WallTimeout {
 			log.Printf("[tasks-worker] task=%s wall_timeout (>%s) — killing", taskID, budget.WallTimeout)
 			killProcessGroup(pid)
-			_ = w.postEvent(taskID, "subagent_failed",
+			w.postTerminal(taskID, ws, "error", "subagent_failed",
 				map[string]any{"reason": "wall_timeout"},
 				map[string]any{
 					"error_text":     "exceeded " + budget.WallTimeout.String(),
 					"error_category": "wall_timeout",
 				},
-				"error",
 			)
 			return
 		}
@@ -1005,18 +1286,17 @@ func (w *TasksWorker) monitor(taskID, ws string, pid int, cmd *exec.Cmd, budget 
 			log.Printf("[tasks-worker] task=%s over_budget ($%.4f > $%.4f cap) — killing",
 				taskID, lastCost, budget.MaxCostUSD)
 			killProcessGroup(pid)
-			_ = w.postEvent(taskID, "subagent_failed",
+			w.postTerminal(taskID, ws, "error", "subagent_failed",
 				map[string]any{
-					"reason":     "over_budget",
-					"cost_usd":   lastCost,
-					"cap_usd":    budget.MaxCostUSD,
+					"reason":   "over_budget",
+					"cost_usd": lastCost,
+					"cap_usd":  budget.MaxCostUSD,
 				},
 				map[string]any{
 					"error_text":     fmt.Sprintf("cost $%.4f exceeded cap $%.4f", lastCost, budget.MaxCostUSD),
 					"error_category": "over_budget",
 					"cost_usd":       lastCost,
 				},
-				"error",
 			)
 			return
 		}
@@ -1163,7 +1443,7 @@ func (w *TasksWorker) reattach() error {
 		// struct here just means no after_run on reattached runs.
 		// Acceptable trade-off; can be improved by persisting hooks in
 		// meta.json alongside budget.
-		go w.monitor(meta.TaskID, ws, meta.PID, nil, budget, hooksConfig{})
+		go w.monitor(meta.TaskID, ws, meta.PID, nil, nil, budget, hooksConfig{})
 	}
 	return nil
 }

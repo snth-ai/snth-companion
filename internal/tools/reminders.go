@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/snth-ai/snth-companion/internal/approval"
 )
 
 // reminders.go — Apple Reminders via AppleScript.
@@ -31,14 +29,16 @@ func RegisterReminders() {
 		DangerLevel: "safe",
 	}, remindersListHandler)
 	Register(Descriptor{
-		Name:        "remote_reminders_create",
-		Description: "Create a new reminder in Apple Reminders. Prompts for user approval.",
-		DangerLevel: "prompt",
+		Name:            "remote_reminders_create",
+		Description:     "Create a new reminder in Apple Reminders. Prompts for user approval.",
+		DangerLevel:     "prompt",
+		ApprovalSummary: remindersCreateSummary,
 	}, remindersCreateHandler)
 	Register(Descriptor{
-		Name:        "remote_reminders_complete",
-		Description: "Mark a reminder as completed by id. Prompts for user approval.",
-		DangerLevel: "prompt",
+		Name:            "remote_reminders_complete",
+		Description:     "Mark a reminder as completed by id. Prompts for user approval.",
+		DangerLevel:     "prompt",
+		ApprovalSummary: remindersCompleteSummary,
 	}, remindersCompleteHandler)
 }
 
@@ -190,21 +190,6 @@ func remindersCreateHandler(ctx context.Context, raw json.RawMessage) (any, erro
 		hasDue = true
 	}
 
-	summary := fmt.Sprintf("Create reminder %q", a.Title)
-	if hasDue {
-		summary += "\n    due: " + due.Format("2006-01-02 15:04")
-	}
-	if a.List != "" {
-		summary += "\n    list: " + a.List
-	}
-	ok, err := approval.Request(ctx, approval.Request_{Tool: "reminders_create", Summary: summary, Danger: "prompt"})
-	if err != nil {
-		return nil, fmt.Errorf("approval: %w", err)
-	}
-	if !ok {
-		return nil, fmt.Errorf("user denied")
-	}
-
 	// Build the property list. AppleScript's Reminders supports
 	// {name, body, due date}. Body is optional.
 	props := []string{
@@ -267,18 +252,6 @@ func remindersCompleteHandler(ctx context.Context, raw json.RawMessage) (any, er
 		return nil, fmt.Errorf("id is required")
 	}
 
-	ok, err := approval.Request(ctx, approval.Request_{
-		Tool:    "reminders_complete",
-		Summary: "Mark reminder " + a.ID + " as completed",
-		Danger:  "prompt",
-	})
-	if err != nil {
-		return nil, fmt.Errorf("approval: %w", err)
-	}
-	if !ok {
-		return nil, fmt.Errorf("user denied")
-	}
-
 	src := fmt.Sprintf(`
 tell application "Reminders"
     set r to reminder id %s
@@ -296,4 +269,32 @@ end tell
 		return nil, fmt.Errorf("unexpected response: %s", truncate(out, 200))
 	}
 	return map[string]any{"id": parts[0], "title": parts[1], "completed": true}, nil
+}
+
+// remindersCreateSummary renders the approval dialog text for remote_reminders_create.
+func remindersCreateSummary(raw json.RawMessage) (string, string) {
+	var a remindersCreateArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return "", ""
+	}
+	a.Title = strings.TrimSpace(a.Title)
+	summary := fmt.Sprintf("Create reminder %q", a.Title)
+	if a.Due != "" {
+		if t, err := time.Parse(time.RFC3339, a.Due); err == nil {
+			summary += "\n    due: " + t.Format("2006-01-02 15:04")
+		}
+	}
+	if a.List != "" {
+		summary += "\n    list: " + a.List
+	}
+	return summary, ""
+}
+
+// remindersCompleteSummary renders the approval dialog text for remote_reminders_complete.
+func remindersCompleteSummary(raw json.RawMessage) (string, string) {
+	var a remindersCompleteArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return "", ""
+	}
+	return "Mark reminder " + a.ID + " as completed", ""
 }

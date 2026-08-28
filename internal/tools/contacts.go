@@ -22,10 +22,23 @@ import (
 
 func RegisterContacts() {
 	Register(Descriptor{
-		Name:        "remote_contacts_search",
-		Description: "Search the paired Mac's Apple Contacts address book. Returns name, phone numbers, emails, and organization for each match. Matches first name, last name, full name, organization, emails, and phone numbers (digits only).",
-		DangerLevel: "prompt",
+		Name:            "remote_contacts_search",
+		Description:     "Search the paired Mac's Apple Contacts address book. Returns name, phone numbers, emails, and organization for each match. Matches first name, last name, full name, organization, emails, and phone numbers (digits only).",
+		DangerLevel:     "prompt",
+		ApprovalSummary: contactsSearchSummary,
 	}, contactsSearchHandler)
+}
+
+// contactsSearchSummary renders the approval dialog text for
+// remote_contacts_search. The A3 finding was that this handler never
+// called approval; the central gate (P0.1) now enforces it because the
+// descriptor is DangerLevel "prompt".
+func contactsSearchSummary(raw json.RawMessage) (string, string) {
+	var a contactsSearchArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return "", ""
+	}
+	return fmt.Sprintf("Search Apple Contacts for %q", strings.TrimSpace(a.Query)), ""
 }
 
 type contactsSearchArgs struct {

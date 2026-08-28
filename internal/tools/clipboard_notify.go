@@ -11,8 +11,6 @@ import (
 	"runtime"
 	"strings"
 	"time"
-
-	"github.com/snth-ai/snth-companion/internal/approval"
 )
 
 // Tiny tools that don't fit elsewhere:
@@ -27,14 +25,16 @@ func RegisterClipboard() {
 		return
 	}
 	Register(Descriptor{
-		Name:        "remote_clipboard_read",
-		Description: "Read the current clipboard contents on the paired Mac. Text only; rich content returns the text representation.",
-		DangerLevel: "prompt",
+		Name:            "remote_clipboard_read",
+		Description:     "Read the current clipboard contents on the paired Mac. Text only; rich content returns the text representation.",
+		DangerLevel:     "prompt",
+		ApprovalSummary: clipboardReadSummary,
 	}, clipboardReadHandler)
 	Register(Descriptor{
-		Name:        "remote_clipboard_write",
-		Description: "Write text to the clipboard on the paired Mac. Overwrites whatever is there.",
-		DangerLevel: "prompt",
+		Name:            "remote_clipboard_write",
+		Description:     "Write text to the clipboard on the paired Mac. Overwrites whatever is there.",
+		DangerLevel:     "prompt",
+		ApprovalSummary: clipboardWriteSummary,
 	}, clipboardWriteHandler)
 }
 
@@ -61,19 +61,11 @@ type clipboardReadResult struct {
 
 const clipboardMaxRead = 512 * 1024
 
-func clipboardReadHandler(ctx context.Context, _ json.RawMessage) (any, error) {
-	ok, err := approval.Request(ctx, approval.Request_{
-		Tool:    "clipboard_read",
-		Summary: "Read the clipboard contents",
-		Danger:  "prompt",
-	})
-	if err != nil {
-		return nil, fmt.Errorf("approval: %w", err)
-	}
-	if !ok {
-		return nil, fmt.Errorf("user denied")
-	}
+func clipboardReadSummary(_ json.RawMessage) (string, string) {
+	return "Read the clipboard contents", ""
+}
 
+func clipboardReadHandler(ctx context.Context, _ json.RawMessage) (any, error) {
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	var out bytes.Buffer
@@ -102,22 +94,6 @@ func clipboardWriteHandler(ctx context.Context, raw json.RawMessage) (any, error
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return nil, fmt.Errorf("bad args: %w", err)
 	}
-	preview := a.Content
-	if len(preview) > 120 {
-		preview = preview[:120] + "…"
-	}
-	ok, err := approval.Request(ctx, approval.Request_{
-		Tool:    "clipboard_write",
-		Summary: "Write to clipboard:\n    " + strings.ReplaceAll(preview, "\n", " "),
-		Danger:  "prompt",
-	})
-	if err != nil {
-		return nil, fmt.Errorf("approval: %w", err)
-	}
-	if !ok {
-		return nil, fmt.Errorf("user denied")
-	}
-
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "pbcopy")
@@ -163,4 +139,17 @@ func notifyHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 	return map[string]any{"ok": true, "title": a.Title}, nil
+}
+
+// clipboardWriteSummary renders the approval dialog text for remote_clipboard_write.
+func clipboardWriteSummary(raw json.RawMessage) (string, string) {
+	var a clipboardWriteArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return "", ""
+	}
+	preview := a.Content
+	if len(preview) > 120 {
+		preview = preview[:120] + "…"
+	}
+	return "Write to clipboard:\n    " + strings.ReplaceAll(preview, "\n", " "), ""
 }

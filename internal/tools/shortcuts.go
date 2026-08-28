@@ -5,6 +5,8 @@ package tools
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,8 +15,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/snth-ai/snth-companion/internal/approval"
 )
 
 // shortcut.go — macOS-only bridge to Apple Shortcuts.
@@ -47,6 +47,11 @@ func RegisterShortcut() {
 		Name:        "remote_shortcut",
 		Description: "Run a user-configured Apple Shortcut on the paired Mac. The user sets up Shortcuts in Apple's Shortcuts app; `name` is the shortcut's exact title. Optional `input` is piped as stdin and forwarded with --input-path. Output is returned as a string (up to 256 KiB).",
 		DangerLevel: "prompt",
+		// Session-cache: the central gate prompts once per shortcut name
+		// per session, then GateSkip on subsequent calls (approval is
+		// recorded by the handler after a successful gated run).
+		GatePolicy:      shortcutGatePolicy,
+		ApprovalSummary: shortcutSummary,
 	}, shortcutHandler)
 }
 
@@ -76,20 +81,13 @@ func shortcutHandler(ctx context.Context, raw json.RawMessage) (any, error) {
 		return nil, fmt.Errorf("input too large: %d bytes (max %d)", len(a.Input), shortcutMaxInput)
 	}
 
-	if !shortcutApproved(a.Name) {
-		summary := fmt.Sprintf("Run shortcut %q", a.Name)
-		if a.Input != "" {
-			summary += "\nwith input:\n    " + truncate(a.Input, 120)
-		}
-		ok, err := approval.Request(ctx, approval.Request_{Tool: "shortcut_run", Summary: summary, Danger: "prompt"})
-		if err != nil {
-			return nil, fmt.Errorf("approval: %w", err)
-		}
-		if !ok {
-			return nil, fmt.Errorf("user denied")
-		}
-		rememberShortcutApproval(a.Name)
-	}
+	// Reaching the handler means the central gate already approved (or
+	// GateSkip'd) this call. Record the approval so subsequent calls to
+	// the SAME shortcut WITH THE SAME INPUT this session skip the prompt.
+	// The cache is keyed on name + input hash, NOT name alone: a
+	// Run-Shell-Script shortcut executes its stdin, so approving "X" once
+	// must NOT bless "X" with arbitrary different attacker input (F3).
+	rememberShortcutApproval(a.Name, a.Input)
 
 	// Materialize input as a temp file (shortcuts run prefers file input
 	// over stdin).
@@ -167,15 +165,51 @@ var (
 	shortcutApprovals   = map[string]struct{}{}
 )
 
-func shortcutApproved(name string) bool {
+// shortcutCacheKey is the session-cache key: shortcut name + a hash of the
+// exact input. Two calls to the same shortcut with different input produce
+// different keys, so an approval for one input never blesses another (F3).
+func shortcutCacheKey(name, input string) string {
+	sum := sha256.Sum256([]byte(input))
+	return name + "\x00" + hex.EncodeToString(sum[:])
+}
+
+func shortcutApproved(name, input string) bool {
 	shortcutApprovalsMu.Lock()
 	defer shortcutApprovalsMu.Unlock()
-	_, ok := shortcutApprovals[name]
+	_, ok := shortcutApprovals[shortcutCacheKey(name, input)]
 	return ok
 }
 
-func rememberShortcutApproval(name string) {
+func rememberShortcutApproval(name, input string) {
 	shortcutApprovalsMu.Lock()
 	defer shortcutApprovalsMu.Unlock()
-	shortcutApprovals[name] = struct{}{}
+	shortcutApprovals[shortcutCacheKey(name, input)] = struct{}{}
+}
+
+// shortcutGatePolicy skips the prompt when this shortcut name was already
+// approved earlier in the session WITH THE SAME INPUT; otherwise it
+// requires a prompt. Keying on name+input means re-invoking an approved
+// shortcut with different (attacker-chosen) input re-prompts.
+func shortcutGatePolicy(raw json.RawMessage) GateDecision {
+	var a shortcutArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return GatePrompt
+	}
+	if shortcutApproved(strings.TrimSpace(a.Name), a.Input) {
+		return GateSkip
+	}
+	return GatePrompt
+}
+
+// shortcutSummary renders the approval dialog text for remote_shortcut.
+func shortcutSummary(raw json.RawMessage) (string, string) {
+	var a shortcutArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return "", ""
+	}
+	summary := fmt.Sprintf("Run shortcut %q", strings.TrimSpace(a.Name))
+	if a.Input != "" {
+		summary += "\nwith input:\n    " + truncate(a.Input, 120)
+	}
+	return summary, ""
 }

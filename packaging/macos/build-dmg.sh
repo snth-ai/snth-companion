@@ -56,15 +56,19 @@ if [[ ! -d node_modules ]]; then
 fi
 npm run build
 
-# --- compile universal binary (arm64 + amd64) ---
-echo "[1b/7] compiling Go binary (universal)…"
+# --- compile binary (arm64 only) ---
+# arm64-only for the tester round (decision 2026-07-07). CGO is REQUIRED
+# on darwin (fyne.io/systray + webview/webview_go + the Cocoa dock-icon
+# shim), so CGO_ENABLED=1 is explicit — the old amd64 cross leg built with
+# CGO off and never linked (undefined: setInternalLoop/nativeLoop), so lipo
+# never ran and no distributable existed. The Version var
+# (internal/daemon.Version, default "dev") is stamped here so the binary
+# self-reports its version in the WS User-Agent + hello frame.
+echo "[1b/7] compiling Go binary (arm64, cgo)…"
 cd "$REPO_ROOT"
-GOARCH=arm64 go build -trimpath -ldflags="-s -w" \
-  -o "$BUILD_DIR/snth-companion.arm64" ./cmd/companion
-GOARCH=amd64 go build -trimpath -ldflags="-s -w" \
-  -o "$BUILD_DIR/snth-companion.amd64" ./cmd/companion
-lipo -create -output "$APP_DIR/Contents/MacOS/snth-companion" \
-  "$BUILD_DIR/snth-companion.arm64" "$BUILD_DIR/snth-companion.amd64"
+CGO_ENABLED=1 GOARCH=arm64 go build -trimpath \
+  -ldflags="-s -w -X github.com/snth-ai/snth-companion/internal/daemon.Version=$VERSION" \
+  -o "$APP_DIR/Contents/MacOS/snth-companion" ./cmd/companion
 chmod +x "$APP_DIR/Contents/MacOS/snth-companion"
 
 # --- Info.plist with injected version ---
