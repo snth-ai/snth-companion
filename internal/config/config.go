@@ -56,9 +56,9 @@ const (
 // SynthPair is one paired synth — its connection coordinates, role, and
 // freeform tags. Stored in Config.Synths.
 type SynthPair struct {
-	ID         string    `json:"id"`             // synth instance_id, also display key
-	URL        string    `json:"url"`            // wss://<synth>/api/companion/ws base
-	Token      string    `json:"token"`          // bearer
+	ID         string    `json:"id"`    // synth instance_id, also display key
+	URL        string    `json:"url"`   // wss://<synth>/api/companion/ws base
+	Token      string    `json:"token"` // bearer
 	HubURL     string    `json:"hub_url,omitempty"`
 	Label      string    `json:"label,omitempty"` // human-friendly name override
 	Role       SynthRole `json:"role"`
@@ -187,6 +187,20 @@ func Get() *Config {
 	mu.RLock()
 	defer mu.RUnlock()
 	return current
+}
+
+// ActiveHubBinding snapshots routing and credentials together. A request must
+// never validate one active synth and then fetch another synth's token.
+func ActiveHubBinding() (synthID, hubURL, token string) {
+	mu.RLock()
+	defer mu.RUnlock()
+	if current == nil {
+		return
+	}
+	if pair := current.ActivePair(); pair != nil {
+		return pair.ID, pair.HubURL, pair.Token
+	}
+	return current.PairedSynthID, current.HubURL, current.CompanionToken
 }
 
 // Save writes the current config to disk atomically (temp + rename).

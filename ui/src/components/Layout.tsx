@@ -38,6 +38,7 @@ import { SynthSwitcher } from "@/components/SynthSwitcher"
 const navItems = [
   { to: "/", label: "Status", icon: Activity },
   { to: "/tasks", label: "Tasks", icon: KanbanSquare },
+  { to: "/processes", label: "Processes", icon: Activity },
   { to: "/task-templates", label: "Templates", icon: FileCode },
   { to: "/apps", label: "Apps", icon: LayoutGrid },
   { to: "/knowledge", label: "Knowledge", icon: Book },

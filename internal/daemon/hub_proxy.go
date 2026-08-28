@@ -68,6 +68,11 @@ func (s *UIServer) registerHubProxies(mux *http.ServeMux) {
 	// proxy keeps us out of the business of listing every action verb
 	// (cancel, claim, release, provide-input, events, poll-active).
 	proxy("/api/hub/tasks", "/api/my/tasks")
+	// Durable synth-local processes, distinct from the external Tasks worker.
+	mux.HandleFunc("/api/hub/processes", func(w http.ResponseWriter, r *http.Request) {
+		synthID, hubURL, token := config.ActiveHubBinding()
+		s.proxyProcesses(w, r, synthID, hubURL, token)
+	})
 	s.registerHubProxyPrefix(mux, "/api/hub/tasks/", "/api/my/tasks/")
 	proxy("/api/hub/task-templates", "/api/my/task-templates")
 	s.registerHubProxyPrefix(mux, "/api/hub/task-templates/", "/api/my/task-templates/")
@@ -87,6 +92,30 @@ func (s *UIServer) registerHubProxies(mux *http.ServeMux) {
 	proxy("/api/hub/skills/upsert", "/api/my/skills/upsert")
 	proxy("/api/hub/skills/delete", "/api/my/skills/delete")
 	proxy("/api/hub/skills/reload", "/api/my/skills/reload")
+}
+
+func (s *UIServer) proxyProcesses(w http.ResponseWriter, r *http.Request, synthID, hubURL, token string) {
+	w.Header().Set("Cache-Control", "private, no-store")
+	expected := r.Header.Get("X-Snth-Expected-Synth-Id")
+	if expected == "" || expected != synthID {
+		writeJSONErr(w, http.StatusConflict, "active synth changed; refresh before sending another command")
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		w.Header().Set("Allow", "GET, POST")
+		writeJSONErr(w, http.StatusMethodNotAllowed, "GET or POST required")
+		return
+	}
+	if r.Method == http.MethodPost {
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<10))
+		if err != nil {
+			writeJSONErr(w, http.StatusRequestEntityTooLarge, "invalid or oversized process command")
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+	}
+	s.proxyToHubBound(w, r, "/api/my/processes", hubURL, token)
 }
 
 // registerHubProxyPrefix wires a directory-style proxy that preserves
@@ -110,7 +139,14 @@ func (s *UIServer) proxyToHub(w http.ResponseWriter, r *http.Request, hubPath st
 		writeJSONErr(w, 400, "not paired — pair the companion first")
 		return
 	}
-	hubURL := cfg.HubURL
+	s.proxyToHubBound(w, r, hubPath, cfg.HubURL, cfg.CompanionToken)
+}
+
+func (s *UIServer) proxyToHubBound(w http.ResponseWriter, r *http.Request, hubPath, hubURL, token string) {
+	if token == "" {
+		writeJSONErr(w, 400, "not paired — pair the companion first")
+		return
+	}
 	if hubURL == "" {
 		hubURL = "https://hub.snth.ai"
 	}
@@ -125,12 +161,12 @@ func (s *UIServer) proxyToHub(w http.ResponseWriter, r *http.Request, hubPath st
 		buf, _ := io.ReadAll(r.Body)
 		body = bytes.NewReader(buf)
 	}
-	req, err := http.NewRequest(r.Method, target, body)
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, body)
 	if err != nil {
 		writeJSONErr(w, 500, "build request: "+err.Error())
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+cfg.CompanionToken)
+	req.Header.Set("Authorization", "Bearer "+token)
 	// Forward Content-Type so hub sees JSON bodies correctly.
 	if ct := r.Header.Get("Content-Type"); ct != "" {
 		req.Header.Set("Content-Type", ct)

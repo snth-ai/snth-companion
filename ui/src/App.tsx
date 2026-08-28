@@ -22,6 +22,7 @@ import { GraphPage } from "@/pages/Graph"
 import { DiagnosticsPage } from "@/pages/Diagnostics"
 import { ContextPage } from "@/pages/Context"
 import { TasksPage } from "@/pages/Tasks"
+import { ProcessesPage } from "@/pages/Processes"
 import { TaskTemplatesPage } from "@/pages/TaskTemplates"
 import { SynthSettingsPage } from "@/pages/SynthSettings"
 import { PublicPage } from "@/pages/Public"
@@ -66,6 +67,7 @@ export default function App() {
             <Route path="diagnostics" element={<DiagnosticsPage />} />
             <Route path="context" element={<ContextPage />} />
             <Route path="tasks" element={<TasksPage />} />
+            <Route path="processes" element={<ProcessesPage />} />
             <Route path="task-templates" element={<TaskTemplatesPage />} />
             <Route path="synth-settings" element={<SynthSettingsPage />} />
             <Route path="public" element={<PublicPage />} />
