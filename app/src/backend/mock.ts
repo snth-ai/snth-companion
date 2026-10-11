@@ -6,7 +6,10 @@
 //   ?screen=internet|computer|files|cookies|activity|general
 //   &state=linked|paused|connecting|offline|repair|working|empty
 //   &approval=net|cookies|computer|foreground|files|other|queue
-//   &preset=careful|balanced|full    &cua=ok|missing|noperm|unknown
+//   &preset=careful|balanced|full
+//   &cua=ready|checking|downloading|installing|verifying|failed|noperm|half
+//        (installing plays the whole automatic install; failed takes
+//         &why=offline|download|checksum|disk|verify|unsupported|timeout)
 //   &update=available|none|unconfigured|error
 //   &lang=en|ru  &theme=light|dark  &os=macos|windows|linux
 //
@@ -17,6 +20,8 @@ import type {
   ApprovalRequest,
   Backend,
   CuaStatus,
+  HelperFailCode,
+  HelperState,
   Entry,
   Grant,
   Preset,
@@ -154,7 +159,8 @@ class MockBackend implements Backend {
   private approvals: ApprovalRequest[] = [];
   private nextApproval = 1;
   private pendingCode: string | null = null;
-  private cua: CuaStatus;
+  private permissions: { accessibility: boolean | null; screen_recording: boolean | null };
+  private installTimers: number[] = [];
   private update: UpdateInfo | "error";
   private workTimer: number | undefined;
 
@@ -192,6 +198,8 @@ class MockBackend implements Backend {
       link_detail: "linked to Mia",
       needs_repair: false,
       pending: null,
+      helper: { state: "ready", version: "0.33.1" },
+      helper_retry_at: null,
       grants: [
         { capability: "cookies", scope: "youtube.com", until: 0 },
         { capability: "cookies", scope: "github.com", until: now() + 5 * 3600 },
@@ -217,10 +225,11 @@ class MockBackend implements Backend {
         metered_detection: false,
         secret_store: "system keychain",
         cua_pinned_version: "0.33.1",
-        cua_path: `${HOME}/.local/bin/cua-driver`,
+        cua_path: `${HOME}/Library/Application Support/ai.snth.connect/cua/releases/0.33.1/cua-driver`,
       },
     };
-    this.cua = { installed: true, version: "0.33.1", pinned_version: "0.33.1", accessibility: true, screen_recording: true, error: null };
+    // The two permissions exist on macOS only.
+    this.permissions = os === "macos" ? { accessibility: true, screen_recording: true } : { accessibility: null, screen_recording: null };
     this.update = { status: "up_to_date", version: null, notes: null };
     this.applyScenario();
   }
@@ -293,28 +302,36 @@ class MockBackend implements Backend {
         break;
     }
 
+    const mac = s.app.os === "macos";
     switch (params.get("cua")) {
-      case "missing":
-        this.cua = { installed: false, version: null, pinned_version: "0.33.1", accessibility: null, screen_recording: null, error: null };
-        s.core.cua_version = "";
-        s.core.cua_status = "not_installed";
+      case "checking":
+        this.setHelper({ state: "checking" }, false);
         break;
+      case "downloading":
+        // Frozen mid-way, for a still picture of the progress line.
+        this.setHelper({ state: "downloading", received: 19_600_000, total: 46_662_186 }, false);
+        break;
+      case "verifying":
+        this.setHelper({ state: "verifying" }, false);
+        break;
+      case "installing":
+      case "missing":
+      case "old":
+        // The whole automatic install, as it runs at a first launch.
+        this.setHelper({ state: "checking" }, false);
+        this.playInstall(1200);
+        break;
+      case "failed": {
+        const code = (params.get("why") ?? "offline") as HelperFailCode;
+        this.setHelper({ state: "failed", code, detail: FAIL_DETAIL[code] ?? "" }, false);
+        s.helper_retry_at = code === "unsupported" ? null : now() + 120;
+        break;
+      }
       case "noperm":
-        this.cua.accessibility = false;
-        this.cua.screen_recording = false;
+        if (mac) this.permissions = { accessibility: false, screen_recording: false };
         break;
       case "half":
-        this.cua.accessibility = true;
-        this.cua.screen_recording = false;
-        break;
-      case "old":
-        this.cua.version = "0.31.0";
-        s.core.cua_version = "0.31.0";
-        break;
-      case "unknown":
-        this.cua.accessibility = null;
-        this.cua.screen_recording = null;
-        this.cua.error = "the helper is not running";
+        if (mac) this.permissions = { accessibility: true, screen_recording: false };
         break;
     }
 
@@ -636,29 +653,83 @@ class MockBackend implements Backend {
     }
   }
 
-  cuaCheck() {
-    return this.reply(structuredClone(this.cua), 150);
+  /** Put a helper state in place, as the shell's supervisor does. */
+  private setHelper(helper: HelperState, announce = true) {
+    this.state.helper = helper;
+    const ready = helper.state === "ready";
+    this.state.core.cua_version = ready ? helper.version : "";
+    this.state.core.cua_status = ready ? "ok" : "not_installed";
+    if (ready || helper.state === "failed") {
+      if (ready) this.state.helper_retry_at = null;
+      if (announce) this.emit({ type: "state" });
+    }
+    if (announce) this.emit({ type: "helper", state: structuredClone(helper) });
+  }
+
+  /** The automatic install from start to finish: check, download with
+   * progress, unpack, verify, ready. About seven seconds. */
+  private playInstall(startAfter = 0) {
+    this.installTimers.forEach((t) => window.clearTimeout(t));
+    this.installTimers = [];
+    const total = 46_662_186;
+    const at = (ms: number, helper: HelperState) =>
+      this.installTimers.push(window.setTimeout(() => this.setHelper(helper), startAfter + ms));
+    this.state.helper_retry_at = null;
+    at(0, { state: "checking" });
+    at(500, { state: "downloading", received: 0, total });
+    for (let i = 1; i <= 20; i++) {
+      at(500 + i * 220, { state: "downloading", received: Math.round((total * i) / 20), total });
+    }
+    at(5100, { state: "installing" });
+    at(5900, { state: "verifying" });
+    this.installTimers.push(
+      window.setTimeout(() => {
+        this.setHelper({ state: "ready", version: "0.33.1" });
+        this.record("computer", "helper.install", "0.33.1", "ok");
+      }, startAfter + 6700),
+    );
+  }
+
+  cuaCheck(): Promise<CuaStatus> {
+    return this.reply(
+      {
+        helper: structuredClone(this.state.helper),
+        retry_at: this.state.helper_retry_at,
+        pinned_version: "0.33.1",
+        ...this.permissions,
+      },
+      80,
+    );
   }
 
   cuaGrantPermissions() {
-    // The real button raises the system dialogs; here the grant "lands"
+    // The real button raises the system dialogs; here the answers "land"
     // a moment later so the live status check has something to show.
+    if (this.permissions.accessibility === null) return this.reply(undefined);
     window.setTimeout(() => {
-      this.cua.accessibility = true;
+      this.permissions.accessibility = true;
     }, 2500);
     window.setTimeout(() => {
-      this.cua.screen_recording = true;
-      this.cua.error = null;
+      this.permissions.screen_recording = true;
     }, 5000);
     return this.reply(undefined);
   }
 
+  /** "Try again now". */
   cuaInstall() {
-    window.setTimeout(() => {
-      this.cua.version = this.cua.pinned_version;
-      this.state.core.cua_version = this.cua.pinned_version;
-    }, 2500);
+    const h = this.state.helper;
+    if (h.state === "failed" && h.code !== "unsupported") this.playInstall();
     return this.reply(undefined);
+  }
+
+  /** Review control: start the automatic install over, or break it. */
+  simulateHelper(what: "install" | "fail") {
+    if (what === "install") this.playInstall();
+    else {
+      this.installTimers.forEach((t) => window.clearTimeout(t));
+      this.state.helper_retry_at = now() + 120;
+      this.setHelper({ state: "failed", code: "offline", detail: FAIL_DETAIL.offline! });
+    }
   }
 
   setLanguage(language: string | null, _resolved: string) {
@@ -716,6 +787,17 @@ class MockBackend implements Backend {
     return this.reply(undefined);
   }
 }
+
+/** What the core would put into `detail` (diagnostics wording). */
+const FAIL_DETAIL: Partial<Record<HelperFailCode, string>> = {
+  offline: "github.com: Dns Failed: resolve dns name 'github.com:443'",
+  download: "the server answered HTTP 503",
+  checksum: "cua-driver-rs-0.33.1-darwin-universal-binary.tar.gz has sha256 1f0c..., expected 8bb7...",
+  disk: "move the new copy into place: No space left on device (os error 28)",
+  verify: 'the unpacked driver reports version "", expected 0.33.1',
+  unsupported: "no Cua Driver release for freebsd x86_64",
+  timeout: "not finished after 900 s",
+};
 
 function cleanDomain(raw: string): string | null {
   let d = raw.trim().toLowerCase();

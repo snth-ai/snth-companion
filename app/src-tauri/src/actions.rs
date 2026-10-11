@@ -41,6 +41,7 @@ pub fn resume(ctx: &Arc<Ctx>) {
 /// daemon if one is running, write what is batched, exit.
 pub async fn quit(ctx: &Arc<Ctx>) {
     let _ = ctx.shutdown.send(true);
+    ctx.core.cua_stop_install();
     ctx.approvals.deny_all();
     // `pause` is what stops the private Cua daemon. The pause itself is
     // not remembered: only the owner's own pause survives a relaunch.

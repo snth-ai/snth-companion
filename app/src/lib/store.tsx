@@ -58,6 +58,8 @@ export function useActiveEntry(): Entry | null {
   const now = useNow(1000);
   const last = journal[journal.length - 1];
   if (!last || state.core.paused || !state.core.paired) return null;
+  // Installing the helper is the app's own work, not the synth at work.
+  if (last.action.startsWith("helper.")) return null;
   return now / 1000 - last.time <= ACTIVE_SECONDS ? last : null;
 }
 

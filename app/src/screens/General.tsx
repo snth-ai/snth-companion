@@ -201,7 +201,14 @@ function Diagnostics() {
 
   const facts: [string, string][] = [
     [t.diagApp, `${state.app.version}${state.app.debug_build ? " (debug)" : ""}, ${state.app.os} ${state.app.arch}`],
-    [t.diagHelper, core.cua_version ? `${core.cua_version} (${core.cua_status})` : t.diagHelperNone],
+    [
+      t.diagHelper,
+      state.helper.state === "ready"
+        ? `${state.helper.version} (${core.cua_status})`
+        : state.helper.state === "failed"
+          ? `${t.diagHelperNone} (${state.helper.code})`
+          : t.diagHelperBusy,
+    ],
     [t.diagSynth, core.synth_version ?? "-"],
     [t.diagLink, state.link_detail ? `${linkText} (${state.link_detail})` : linkText],
     [t.diagAddress, hostOf(core.synth_url) || "-"],

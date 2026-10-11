@@ -58,6 +58,24 @@ export interface Snapshot {
   egress_bytes: number;
 }
 
+/** Why the helper could not be installed. */
+export type HelperFailCode =
+  | "offline"
+  | "download"
+  | "checksum"
+  | "disk"
+  | "verify"
+  | "unsupported"
+  | "timeout"
+  | "cancelled";
+
+/** The helper for computer control. The app installs it by itself. */
+export type HelperState =
+  | { state: "idle" | "checking" | "installing" | "verifying" }
+  | { state: "downloading"; received: number; total: number | null }
+  | { state: "ready"; version: string }
+  | { state: "failed"; code: HelperFailCode; detail: string };
+
 export interface Grant {
   capability: string;
   scope: string;
@@ -75,6 +93,9 @@ export interface UiState {
   link_detail: string;
   needs_repair: boolean;
   pending: Pending | null;
+  helper: HelperState;
+  /** After a failed install: when the app tries again (unix seconds). */
+  helper_retry_at: number | null;
   grants: Grant[];
   prefs: {
     onboarded: boolean;
@@ -130,13 +151,13 @@ export interface SuggestedRoot {
 }
 
 export interface CuaStatus {
-  installed: boolean;
-  version: string | null;
+  helper: HelperState;
+  /** After a failed install: when the app tries again (unix seconds). */
+  retry_at: number | null;
   pinned_version: string;
-  /** null = could not be checked. */
+  /** macOS only, null elsewhere: what the system allows this app. */
   accessibility: boolean | null;
   screen_recording: boolean | null;
-  error: string | null;
 }
 
 export interface UpdateInfo {
@@ -149,6 +170,7 @@ export type ExternalTarget = "privacy_accessibility" | "privacy_screen" | "helpe
 
 export type UiEvent =
   | { type: "state" }
+  | { type: "helper"; state: HelperState }
   | { type: "journal"; entry: Entry }
   | { type: "approval"; request: ApprovalRequest }
   | { type: "approval_closed"; id: number }
@@ -185,7 +207,9 @@ export interface Backend {
   approvalAnswer(id: number, allow: boolean, duration: AnswerDuration, hours?: number): Promise<boolean>;
 
   cuaCheck(): Promise<CuaStatus>;
+  /** macOS shows its own dialogs for the two permissions. */
   cuaGrantPermissions(): Promise<void>;
+  /** "Try again now" after a failed helper install. */
   cuaInstall(): Promise<void>;
 
   setLanguage(language: string | null, resolved: string): Promise<UiState>;

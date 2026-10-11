@@ -260,6 +260,9 @@ export function describeEntry(entry: Entry, s: Strings, lang: Lang): Omit<Line, 
       return { ...base, kind: "files", text: j.fileRead(name), note: "" };
     }
     case "computer": {
+      // The app's own doing, not the synth's: it installed its helper.
+      if (entry.action === "helper.install") return { ...base, kind: "computer", text: j.helperInstall(entry.target), note: "" };
+      if (entry.action === "helper.update") return { ...base, kind: "computer", text: j.helperUpdate(entry.target), note: "" };
       if (entry.action === "mcp.open") {
         if (ok) return { ...base, kind: "computer", text: j.taskStart, note: "" };
         if (refused) return { ...base, kind: "computer", text: j.taskRefused, note: why };

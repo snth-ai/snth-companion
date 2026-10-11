@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use connect_core::pairing::normalize_code;
-use connect_core::{Approval, Core, Duration_, Entry, Preset, Settings};
+use connect_core::{Approval, Core, Duration_, Entry, InstallState, Preset, Settings};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 use tauri_plugin_autostart::ManagerExt;
@@ -395,43 +395,34 @@ pub fn approval_answer(
 
 #[derive(Serialize)]
 pub struct CuaDto {
-    installed: bool,
-    version: Option<String>,
+    /// Checking, downloading, installing, verifying, ready or failed.
+    helper: InstallState,
+    /// After a failure: when the app tries again by itself (unix seconds).
+    retry_at: Option<i64>,
     pinned_version: &'static str,
-    /// None = could not be checked (see `error`).
+    /// macOS only (None elsewhere): what the system allows THIS app. The
+    /// embedded helper works under the app's permissions.
     accessibility: Option<bool>,
     screen_recording: Option<bool>,
-    error: Option<String>,
 }
 
-/// Is the helper installed, and does it have the two permissions it
-/// needs? Read-only: runs `--version` and `permissions status --json`.
+/// Where the helper stands and whether the app has the two macOS
+/// permissions. Read-only and cheap: no process is started, nothing is
+/// shown.
 #[tauri::command]
-pub async fn cua_check(ctx: Cx<'_>) -> Result<CuaDto, String> {
-    let d = ctx.core.cua_detect().await;
-    let mut dto = CuaDto {
-        installed: d.installed,
-        version: d.version,
+pub fn cua_check(ctx: Cx<'_>) -> CuaDto {
+    let permissions = ctx.core.computer_permissions();
+    CuaDto {
+        helper: ctx.core.cua_helper_state(),
+        retry_at: *ctx.helper_retry_at.lock().unwrap(),
         pinned_version: connect_core::cua::PINNED_VERSION,
-        accessibility: None,
-        screen_recording: None,
-        error: None,
-    };
-    if dto.installed {
-        match ctx.core.cua_permissions_status().await {
-            Ok(p) => {
-                dto.accessibility = Some(p.accessibility);
-                dto.screen_recording = Some(p.screen_recording);
-            }
-            Err(e) => dto.error = Some(e.to_string()),
-        }
+        accessibility: permissions.map(|p| p.accessibility),
+        screen_recording: permissions.map(|p| p.screen_recording),
     }
-    Ok(dto)
 }
 
-/// Run a helper command the core built, without waiting for it. Only ever
-/// called with argv from the core (`cua-driver permissions grant`,
-/// `cua-driver update --apply`); nothing from the webview reaches it.
+/// Run a helper command without waiting for it. Only ever called with a
+/// fixed argv from this file; nothing from the webview reaches it.
 fn run_detached(argv: Vec<String>) -> Result<(), String> {
     let (bin, args) = argv.split_first().ok_or("empty command")?;
     let mut child = std::process::Command::new(bin)
@@ -447,23 +438,20 @@ fn run_detached(argv: Vec<String>) -> Result<(), String> {
     Ok(())
 }
 
-/// Ask the OS for the two permissions (macOS shows its own dialogs).
+/// Ask macOS for the two permissions, as this app (its own dialogs come
+/// up). Only ever from the owner's click.
 #[tauri::command]
-pub async fn cua_grant_permissions(ctx: Cx<'_>) -> Result<(), String> {
-    if !ctx.core.cua_detect().await.installed {
-        return Err("helper_not_installed".into());
-    }
-    run_detached(ctx.core.cua_permissions_grant_argv())
+pub fn cua_grant_permissions(app: AppHandle, ctx: Cx<'_>) -> Result<(), String> {
+    let core = ctx.core.clone();
+    app.run_on_main_thread(move || core.request_computer_permissions())
+        .map_err(|e| format!("helper_failed: {e}"))
 }
 
-/// Bring an installed helper to the pinned version with its own updater.
-/// A first install is not done from here (see `open_external("helper")`).
+/// "Try again now": skip the pause before the next automatic attempt to
+/// install the helper. The install itself always runs in the background.
 #[tauri::command]
-pub async fn cua_install(ctx: Cx<'_>) -> Result<(), String> {
-    if !ctx.core.cua_detect().await.installed {
-        return Err("helper_not_installed".into());
-    }
-    run_detached(ctx.core.cua_install_argv())
+pub fn cua_install(ctx: Cx<'_>) {
+    ctx.helper_retry.notify_one();
 }
 
 // --- general ---
@@ -607,11 +595,25 @@ pub async fn diagnostics(ctx: Cx<'_>) -> Result<String, String> {
         String::new(),
         format!("Cua Driver: {} (status {}, expected {})",
             if c.cua_version.is_empty() { "not installed" } else { &c.cua_version }, c.cua_status, st.app.cua_pinned_version),
+        format!("helper install: {}", match &st.helper {
+            // The reason may name a path under the home folder: keep the
+            // promise that no folder paths leave with the diagnostics.
+            InstallState::Failed { code, detail } => format!("failed ({code:?}): {}", without_home(detail)),
+            other => format!("{other:?}"),
+        }),
         format!("stop shortcut: {} (active {})",
             if st.prefs.stop_shortcut.is_empty() { "none" } else { &st.prefs.stop_shortcut }, st.prefs.stop_shortcut_active),
         format!("launch at login: {}", on(st.prefs.autostart)),
     ];
     Ok(lines.join("\n"))
+}
+
+/// Replace the home folder in a message with `~`.
+fn without_home(text: &str) -> String {
+    match directories::BaseDirs::new() {
+        Some(dirs) => text.replace(&*dirs.home_dir().to_string_lossy(), "~"),
+        None => text.to_string(),
+    }
 }
 
 fn on(b: bool) -> &'static str {

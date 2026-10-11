@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use connect_core::{Core, LinkState, Preset, Settings, Snapshot};
+use connect_core::{Core, InstallState, LinkState, Preset, Settings, Snapshot};
 use serde::Serialize;
 use tauri::menu::MenuItem;
 use tauri::{AppHandle, Wry};
@@ -46,6 +46,11 @@ pub struct Ctx {
     pub link_detail: Mutex<(Option<LinkState>, String)>,
     /// A code from a `snth://pair` link, waiting for the UI to collect it.
     pub pair_code: Mutex<Option<String>>,
+    /// Wakes the helper supervisor: the owner clicked "try again now".
+    pub helper_retry: Notify,
+    /// When the next automatic helper install attempt is due (unix
+    /// seconds), while one is waiting.
+    pub helper_retry_at: Mutex<Option<i64>>,
     /// Wakes the link supervisor after a new pairing.
     pub relink: Notify,
     pub shutdown: watch::Sender<bool>,
@@ -129,6 +134,11 @@ pub struct UiState {
     pub needs_repair: bool,
     /// A claimed code waiting for the owner's confirmation.
     pub pending: Option<PendingDto>,
+    /// The helper for computer control: checking, downloading, ready,
+    /// failed. The app installs it by itself.
+    pub helper: InstallState,
+    /// After a failed install: when the app tries again by itself.
+    pub helper_retry_at: Option<i64>,
     pub grants: Vec<GrantDto>,
     pub prefs: PrefsDto,
     pub app: AppInfo,
@@ -148,6 +158,8 @@ pub async fn build_state(ctx: &Ctx) -> UiState {
             synth_id: p.synth_id,
             synth_url: p.synth_url,
         }),
+        helper: ctx.core.cua_helper_state(),
+        helper_retry_at: *ctx.helper_retry_at.lock().unwrap(),
         grants: ctx
             .core
             .grant_list()

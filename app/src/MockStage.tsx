@@ -110,6 +110,12 @@ export function MockStage(props: { approvalOnly?: boolean }) {
         <button type="button" className="btn small" onClick={() => mockBackend.simulateDeepLink()}>
           {s.link}
         </button>
+        <button type="button" className="btn small" onClick={() => mockBackend.simulateHelper("install")}>
+          {s.helperInstall}
+        </button>
+        <button type="button" className="btn small" onClick={() => mockBackend.simulateHelper("fail")}>
+          {s.helperFail}
+        </button>
         <button type="button" className="btn small" onClick={() => setParam("lang", params.get("lang") === "ru" ? "en" : "ru")}>
           EN / RU
         </button>

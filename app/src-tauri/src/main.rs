@@ -19,10 +19,13 @@ mod ui;
 mod windows;
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::sync::{Arc, Mutex};
 
-use connect_core::{Core, CoreConfig, CoreEvent, CuaAttach, SecretStore, UreqHubClient};
+use connect_core::{
+    Core, CoreConfig, CoreEvent, CuaAttach, FailCode, InstallState, SecretStore, UreqHubClient,
+};
 use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_deep_link::DeepLinkExt;
@@ -59,34 +62,6 @@ fn secret_store(config_dir: &Path) -> (Arc<dyn SecretStore>, &'static str) {
     )
 }
 
-/// Where the Cua Driver command line lives. A GUI app does not get the
-/// shell's PATH, so look in the places the installer uses; when it is not
-/// installed yet, settle on the installer's default so it is found after
-/// an install without restarting.
-fn cua_bin() -> String {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(dirs) = directories::BaseDirs::new() {
-        if cfg!(windows) {
-            candidates.push(dirs.data_local_dir().join("Programs/cua-driver/cua-driver.exe"));
-        } else {
-            candidates.push(dirs.home_dir().join(".local/bin/cua-driver"));
-        }
-    }
-    if cfg!(target_os = "macos") {
-        candidates.push(PathBuf::from("/Applications/CuaDriver.app/Contents/MacOS/cua-driver"));
-        candidates.push(PathBuf::from("/opt/homebrew/bin/cua-driver"));
-    }
-    if cfg!(unix) {
-        candidates.push(PathBuf::from("/usr/local/bin/cua-driver"));
-    }
-    candidates
-        .iter()
-        .find(|p| p.exists())
-        .or(candidates.first())
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| "cua-driver".to_string())
-}
-
 /// Is a real updater public key configured (not the placeholder)?
 fn updater_configured(config: &tauri::Config) -> bool {
     config
@@ -113,7 +88,6 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
 
     let approvals = Arc::new(Approvals::default());
     let (secret, secret_kind) = secret_store(&config_dir);
-    let cua_bin = cua_bin();
     let core = Core::new(CoreConfig {
         settings_path: Some(config_dir.join("settings.json")),
         journal_path: Some(data_dir.join("journal.jsonl")),
@@ -122,8 +96,12 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
         secret,
         hub: Arc::new(UreqHubClient),
         app_version: app.package_info().version.to_string(),
-        cua_bin: cua_bin.clone(),
-        // Our own private helper daemon; the owner's daemon is never touched.
+        // The helper for computer control is the app's own pinned copy in
+        // its data dir, installed by the app itself (see spawn_helper).
+        // A driver the owner installed for themselves is never used,
+        // changed or stopped, and neither is its daemon.
+        cua_bin: String::new(),
+        cua_private_root: Some(data_dir.join("cua")),
         cua_attach: CuaAttach::Private,
     });
 
@@ -137,12 +115,14 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
         offered_roots: Mutex::new(HashSet::new()),
         link_detail: Mutex::new((None, String::new())),
         pair_code: Mutex::new(None),
+        helper_retry: Notify::new(),
+        helper_retry_at: Mutex::new(None),
         relink: Notify::new(),
         shutdown,
         tray: Mutex::new(None),
         device_name: core.shared().device_name(),
         secret_store: secret_kind,
-        cua_bin,
+        cua_bin: core.cua_bin(),
         updater_ready,
         shortcut_active: Mutex::new(false),
     });
@@ -156,7 +136,8 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
 
     // Subscribe before the link starts so no event is missed.
     spawn_event_forwarder(ctx.clone());
-    spawn_link(ctx.clone(), shutdown_rx);
+    spawn_link(ctx.clone(), shutdown_rx.clone());
+    spawn_helper(ctx.clone(), shutdown_rx);
 
     tray::build(&handle, &ctx)?;
     #[cfg(target_os = "macos")]
@@ -206,6 +187,59 @@ fn spawn_link(ctx: Arc<Ctx>, mut shutdown: watch::Receiver<bool>) {
             }
             tokio::select! {
                 _ = ctx.relink.notified() => {}
+                _ = shutdown.changed() => break,
+            }
+        }
+    });
+}
+
+/// How long to wait before trying the helper install again: 30 s, 2 min,
+/// 10 min, 30 min, then every hour. A click on "try again" skips the wait.
+const HELPER_BACKOFF_SECS: [u64; 5] = [30, 120, 600, 1800, 3600];
+
+/// The helper for computer control. Checked at every launch, in the
+/// background: installed when missing, replaced when this app version pins
+/// another one. The window and the link never wait for it. A failure
+/// (offline, a broken download) is retried with a growing pause, and again
+/// at the next launch.
+fn spawn_helper(ctx: Arc<Ctx>, mut shutdown: watch::Receiver<bool>) {
+    // Every state goes to the UI as it happens (the progress line).
+    if let Some(mut states) = ctx.core.subscribe_cua_helper() {
+        let ctx = ctx.clone();
+        tauri::async_runtime::spawn(async move {
+            while states.changed().await.is_ok() {
+                let state = states.borrow().clone();
+                let settled = matches!(state, InstallState::Ready { .. } | InstallState::Failed { .. });
+                ui::emit(&ctx.app, UiEvent::Helper { state });
+                if settled {
+                    ui::emit(&ctx.app, UiEvent::State);
+                }
+            }
+        });
+    }
+
+    tauri::async_runtime::spawn(async move {
+        let mut attempt = 0usize;
+        loop {
+            *ctx.helper_retry_at.lock().unwrap() = None;
+            match ctx.core.cua_ensure().await {
+                InstallState::Ready { .. } => break,
+                // Retrying cannot help these.
+                InstallState::Failed { code: FailCode::Unsupported | FailCode::Cancelled, .. } => break,
+                _ => {}
+            }
+            let wait = HELPER_BACKOFF_SECS[attempt.min(HELPER_BACKOFF_SECS.len() - 1)];
+            attempt += 1;
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            *ctx.helper_retry_at.lock().unwrap() = Some(now + wait as i64);
+            ui::emit(&ctx.app, UiEvent::State);
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(wait)) => {}
+                // The owner clicked "try again now".
+                _ = ctx.helper_retry.notified() => attempt = 0,
                 _ = shutdown.changed() => break,
             }
         }

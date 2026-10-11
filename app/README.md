@@ -63,7 +63,7 @@ URL parameters stage a screen or a state directly:
 | `state` | `paused`, `working`, `connecting`, `offline`, `repair`, `empty`, `off`, `metered` |
 | `approval` | `net`, `cookies`, `computer`, `foreground`, `files`, `other`, `queue` (shows the approval window alone) |
 | `preset` | `careful` (default), `balanced`, `full` |
-| `cua` | `missing`, `noperm`, `half`, `old`, `unknown` (the helper app's state) |
+| `cua` | the helper: `ready` (default), `checking`, `downloading` (frozen at 42%), `installing` (plays the whole automatic install, about 7 s), `verifying`, `failed` (with `why=offline`, `download`, `checksum`, `disk`, `verify`, `unsupported`, `timeout`); the macOS permissions: `noperm`, `half` |
 | `update` | `available`, `unconfigured`, `error` |
 | `pair` | a 6-digit code: behaves as if `snth://pair?code=...` was opened |
 | `lang` | `en`, `ru` |
@@ -176,6 +176,21 @@ The workflow has never been run. Treat its first run as a test.
   refusals.
 - Pause is remembered (`shell.json`): a relaunch stays paused until the owner
   resumes.
+- The helper for computer control (Cua Driver) is the app's own pinned copy
+  in `<app data>/cua/releases/<version>/`. `spawn_helper` in `main.rs` checks
+  it at every launch, in the background, and installs it when it is missing
+  or when this app version pins another one; a failure is retried after 30 s,
+  2 min, 10 min, 30 min, then hourly, and at the next launch. The download is
+  the release's bare-binary archive from GitHub, accepted only if its SHA-256
+  equals the value compiled into `connect-core/src/cua_install.rs`. The
+  official installer is not used: it cannot install privately (see the top of
+  that file). A driver the owner installed themselves is never used, changed
+  or stopped. Raising the pin = change `cua::PINNED_VERSION` and the hash
+  table in `cua_install.rs` together.
+- macOS permissions for computer control are this app's own (the helper runs
+  embedded, as the app's child): the app checks and requests Accessibility and
+  Screen Recording itself (`connect-core/src/tcc.rs`), and they show up under
+  "SNTH Connect" in System Settings.
 - Pairing links: `snth://pair?code=XXXXXX` only brings the window up and hands
   the code to the UI, which asks the hub who the code belongs to and shows the
   confirmation screen. The token is stored and the link opened only on the
@@ -203,12 +218,14 @@ The workflow has never been run. Treat its first run as a test.
   updater are written against the Tauri 2.11 APIs and compile, nothing more.
 - No real pairing, no real link, no real approval round trip.
 - No Keychain access (token store or the browser key), no real cookie read.
-- No Cua Driver call of any kind. The permission status check and the
-  "ask for permissions" button call the core's helpers as written; whether
-  those report the right thing for our own embedded helper is open.
-- Windows and Linux builds, and the CI workflow.
-- First install of the helper app from inside the app is not implemented:
-  the button opens its download page. Updating an installed helper runs its
-  own updater.
+- The helper install was run for real once, into a temp dir, through the
+  core's installer (download, hash check, unpack, `--version`). It was never
+  run from the app, and the installed helper was never started as a daemon.
+- The macOS permission flow (the app asking for Accessibility and Screen
+  Recording itself, the embedded helper working under those grants) follows
+  the driver's embedding guide but was never exercised: it needs a launched,
+  signed app.
+- Windows and Linux builds, the helper install there (the `.zip` is unpacked
+  with the system `tar`), and the CI workflow.
 - Metered-connection detection is not implemented, so "Do not use on metered
   connections" is shown as unavailable.

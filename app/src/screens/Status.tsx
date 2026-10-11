@@ -128,7 +128,13 @@ export function Status(props: { go: (screen: Screen) => void }) {
               <span className="row-text">
                 <span className="row-title">{r.title}</span>
               </span>
-              <span className="row-value">{summarize(r.cap, settings, s)}</span>
+              <span className="row-value">
+                {r.cap === "computer" && r.on && state.helper.state !== "ready"
+                  ? state.helper.state === "failed"
+                    ? s.status.sum.helperMissing
+                    : s.status.sum.helperInstalling
+                  : summarize(r.cap, settings, s)}
+              </span>
               <IconChevron />
             </button>
           ))}
