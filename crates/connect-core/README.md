@@ -32,20 +32,20 @@ Everything on `Core` is `Send + Sync`; clone the handle freely (it is an
 
 ## Traits the host implements
 
-- **`Approver`** — `fn ask(&self, ApprovalRequest) -> ApprovalFuture`. The core
+- **`Approver`**: `fn ask(&self, ApprovalRequest) -> ApprovalFuture`. The core
   calls it; the UI shows a window and resolves the future. The core bounds
   every ask at 55 s itself (the synth's hard limit is 60 s), so an approver
   may take as long as it likes; a late answer still records a grant for the
   next attempt. `ApprovalRequest.reason` is the synth's text, already
-  sanitized (control chars stripped, length-capped) — show it as
+  sanitized (control chars stripped, length-capped); show it as
   "the synth says: …". `ApprovalRequest.summary` is app-authored and safe.
-- **`CookieSource`** — `fn get(&self, domain) -> Result<CookieRead, CookieError>`.
+- **`CookieSource`**: `fn get(&self, domain) -> Result<CookieRead, CookieError>`.
   Use `MultiReader` with the installed-browser DB paths and a `KeySource`
   (the macOS Keychain reader in prod; a fixture key in tests). Reads a COPY
   of the DB. Cookie values never hit a log or the journal.
-- **`SecretStore`** — token custody. `KeyringSecretStore` in prod,
+- **`SecretStore`**: token custody. `KeyringSecretStore` in prod,
   `FileSecretStore` headless, `MemSecretStore` for tests.
-- **`HubClient`** — `UreqHubClient` claims a code against the hub; a fake is
+- **`HubClient`**: `UreqHubClient` claims a code against the hub; a fake is
   used in tests.
 
 ## Commands (all on `Core`)
@@ -71,10 +71,10 @@ Everything on `Core` is `Send + Sync`; clone the handle freely (it is an
 
 ## Events
 
-- `subscribe() -> broadcast::Receiver<CoreEvent>` — `Link{state,detail}`,
+- `subscribe() -> broadcast::Receiver<CoreEvent>`: `Link{state,detail}`,
   `Settings{rev}`, `Paired{synth_id}`, `Unpaired`, `Paused{paused}`.
 - `subscribe_journal() -> broadcast::Receiver<Entry>` and
-  `recent_journal() -> Vec<Entry>` — the action journal (time, capability,
+  `recent_journal() -> Vec<Entry>`: the action journal (time, capability,
   action, target, outcome, bytes). No content, no cookie values, no bodies.
 
 ## Snapshot
