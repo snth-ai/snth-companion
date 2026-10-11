@@ -4,6 +4,7 @@ import { shortPath } from "../lib/format";
 import { useStore } from "../lib/store";
 import { Notice, Section, Segmented, SwitchRow } from "../ui/controls";
 import { IconFolder, IconPlus, IconX } from "../ui/icons";
+import { Remembered } from "./Remembered";
 
 /** The list of shared folders with its read / change switch. Also used in
  * onboarding. */
@@ -96,6 +97,8 @@ export function Files() {
           </div>
         </Section>
       </fieldset>
+
+      <Remembered capability="files" />
     </>
   );
 }

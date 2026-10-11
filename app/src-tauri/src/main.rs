@@ -10,6 +10,8 @@ mod approvals;
 mod browsers;
 mod commands;
 mod i18n;
+#[cfg(target_os = "macos")]
+mod menu;
 mod prefs;
 mod state;
 mod tray;
@@ -157,6 +159,8 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
     spawn_link(ctx.clone(), shutdown_rx);
 
     tray::build(&handle, &ctx)?;
+    #[cfg(target_os = "macos")]
+    menu::install(&handle)?;
 
     // Launched at login: stay in the tray, unless there is something the
     // owner has to do first (pair or finish onboarding).

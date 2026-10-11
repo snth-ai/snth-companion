@@ -14,6 +14,14 @@ if (isMock) {
   if (!params.has("approval")) mockBackend.pushApproval("cookies", false);
 }
 
+// The webview's own right-click menu (Reload, Inspect) has no place in the
+// app; text fields and selectable text keep theirs.
+if (!isMock) {
+  window.addEventListener("contextmenu", (e) => {
+    if (!(e.target as HTMLElement).closest("input, .selectable")) e.preventDefault();
+  });
+}
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     {isMock ? (

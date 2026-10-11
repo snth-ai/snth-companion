@@ -31,6 +31,7 @@ app/
     src/actions.rs     pause / resume / quit / deep link / stop shortcut
     src/windows.rs     main + approval windows, navigation guard
     src/tray.rs        tray icon and menu
+    src/menu.rs        macOS application menu (clean Cmd+Q, Edit menu)
     src/browsers.rs    where browsers keep cookies; the Chromium key source
     src/state.rs       shared context and the UiState the UI renders
     src/prefs.rs       shell.json (onboarding, language, autostart, shortcut)
@@ -188,6 +189,10 @@ The workflow has never been run. Treat its first run as a test.
   four fixed targets, never a URL. Windows refuse to navigate anywhere but
   the app's own pages, and the CSP is `default-src 'self'` plus the IPC
   endpoint.
+- macOS: `src/menu.rs` replaces the default application menu so Cmd+Q goes
+  through the same clean shutdown as the tray's Quit; `Info.plist` holds the
+  sentences macOS shows when it asks about the Desktop, Downloads, Documents
+  and the local network.
 - Files on disk: `settings.json`, `shell.json` (and `secrets.json` in a debug
   build) in the app config dir; `journal.jsonl` in the app data dir.
 

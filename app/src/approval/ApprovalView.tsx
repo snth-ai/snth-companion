@@ -171,7 +171,7 @@ export function ApprovalView() {
 
       <div className="approval-foot">
         <div className={`countdown${seconds <= 10 ? " late" : ""}`} aria-hidden="true">
-          <i style={{ width: `${(leftMs / total) * 100}%` }} />
+          <i style={{ transform: `scaleX(${Math.min(1, leftMs / total)})` }} />
         </div>
         <p className="countdown-text" role="timer">
           {t.countdown(seconds)}

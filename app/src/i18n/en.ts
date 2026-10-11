@@ -228,6 +228,12 @@ export const en = {
     browsersWindows: "On Windows only Firefox can be read for now.",
   },
 
+  remembered: {
+    title: "Answers you asked to remember",
+    task: "Start a task without asking",
+    screen: (what: string) => `Take over the screen without asking: ${what}`,
+  },
+
   activity: {
     lead: (n: string) =>
       `What ${n} did on this computer, newest first. The contents of pages and files are never recorded.`,

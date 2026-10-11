@@ -142,7 +142,9 @@ export function StoreProvider(props: { children: ReactNode; fallback?: ReactNode
   const edit = useCallback((change: (draft: Settings) => void) => {
     const current = latest.current.state;
     if (!current) return;
-    const next = structuredClone(current);
+    // A JSON copy: the state is plain data, and older system webviews
+    // have no structuredClone.
+    const next = JSON.parse(JSON.stringify(current)) as UiState;
     change(next.core.settings);
     latest.current = { ...latest.current, state: next };
     setState(next);

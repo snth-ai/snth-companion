@@ -2,6 +2,7 @@ import type { ComputerMode, Foreground } from "../backend/types";
 import { useStore } from "../lib/store";
 import { ChoiceList, ListEditor, Notice, Row, Section, SwitchRow } from "../ui/controls";
 import { HelperStatus } from "./HelperStatus";
+import { Remembered } from "./Remembered";
 
 const AWAY_MINUTES = [1, 2, 5, 10, 15, 30, 60];
 
@@ -92,6 +93,8 @@ export function Computer() {
           />
         </Section>
       </fieldset>
+
+      <Remembered capability="computer" />
 
       <Section title={t.needsTitle}>
         <HelperStatus live={false} />
