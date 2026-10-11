@@ -1,0 +1,149 @@
+# Builds SNTH Connect (app/) for macOS arm64 + x64, Windows x64 and Linux x64
+# and attaches the installers to a DRAFT GitHub release.
+#
+# UNTESTED: this workflow was written without being run. Expect to fix
+# small things on the first run.
+#
+# Start it by pushing a tag `connect-v<version>` (the version in
+# app/package.json), or by hand from the Actions tab.
+#
+# Every signing step is optional. With no secrets the builds are unsigned
+# and no updater files are produced. See app/README.md for the secrets.
+
+name: connect-release
+
+on:
+  push:
+    tags:
+      - "connect-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: connect-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+          - name: macOS x64
+            os: macos-latest
+            target: x86_64-apple-darwin
+          - name: Windows x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - name: Linux x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux build packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libdbus-1-dev pkg-config
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: npm ci
+
+      # Secrets reach the build only when they exist. An absent secret is
+      # an empty string here, and an empty APPLE_CERTIFICATE in the
+      # environment would make the bundler try (and fail) to sign.
+      - name: macOS signing and notarization (when the secrets exist)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY }}
+          API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          if [ -n "$CERT" ] && [ -n "$CERT_PASSWORD" ] && [ -n "$IDENTITY" ]; then
+            {
+              echo "APPLE_CERTIFICATE=$CERT"
+              echo "APPLE_CERTIFICATE_PASSWORD=$CERT_PASSWORD"
+              echo "APPLE_SIGNING_IDENTITY=$IDENTITY"
+            } >> "$GITHUB_ENV"
+            echo "The macOS build will be signed."
+          else
+            echo "::warning::No Apple certificate secrets: the macOS build is UNSIGNED."
+          fi
+          if [ -n "$CERT" ] && [ -n "$API_KEY_ID" ] && [ -n "$API_ISSUER" ] && [ -n "$API_KEY_P8" ]; then
+            key_path="$RUNNER_TEMP/AuthKey_${API_KEY_ID}.p8"
+            printf '%s' "$API_KEY_P8" > "$key_path"
+            {
+              echo "APPLE_API_KEY=$API_KEY_ID"
+              echo "APPLE_API_ISSUER=$API_ISSUER"
+              echo "APPLE_API_KEY_PATH=$key_path"
+            } >> "$GITHUB_ENV"
+            echo "The macOS build will be notarized."
+          else
+            echo "::warning::No notarization secrets: the macOS build is NOT notarized."
+          fi
+
+      - name: Updater signing (when the key exists)
+        id: updater
+        shell: bash
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::warning::No TAURI_SIGNING_PRIVATE_KEY: no updater files (latest.json) in this release."
+            echo "args=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if grep -q "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY" app/src-tauri/tauri.conf.json; then
+            echo "::error::A signing key is set but app/src-tauri/tauri.conf.json still has the placeholder public key."
+            exit 1
+          fi
+          {
+            echo "TAURI_SIGNING_PRIVATE_KEY<<SNTH_EOF"
+            echo "$KEY"
+            echo "SNTH_EOF"
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+          echo "args=--config src-tauri/tauri.release.conf.json" >> "$GITHUB_OUTPUT"
+
+      - name: Build and attach to a draft release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: app
+          tagName: connect-v__VERSION__
+          releaseName: SNTH Connect v__VERSION__
+          releaseBody: Draft build. Check the installers before publishing.
+          releaseDraft: true
+          prerelease: false
+          args: --target ${{ matrix.target }} ${{ steps.updater.outputs.args }}

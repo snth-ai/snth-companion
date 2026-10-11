@@ -47,7 +47,9 @@ pub mod tcp;
 pub mod wire;
 pub mod ws_io;
 
-pub use crate::core::{Core, CoreConfig, CoreEvent, CuaAttach, LinkState, Shared, Snapshot};
+pub use crate::core::{
+    Core, CoreConfig, CoreEvent, CuaAttach, LinkBrief, LinkState, Shared, Snapshot,
+};
 pub use cookies::{CookieError, CookieRead, CookieSource, KeySource, MultiReader, WireCookie};
 pub use grant::{Approval, ApprovalRequest, Approver, Duration_, GrantStore};
 pub use journal::{Entry, Journal};

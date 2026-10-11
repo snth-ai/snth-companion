@@ -1,0 +1,5 @@
+# The workspace builds with the Rust named in Cargo.toml (`rust-version`).
+# Prefer dependency versions that support it over newer ones that do not,
+# so `cargo update` cannot quietly raise the toolchain requirement.
+[resolver]
+incompatible-rust-versions = "fallback"

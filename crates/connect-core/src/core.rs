@@ -71,6 +71,9 @@ struct Counters {
     last_flush: Instant,
 }
 
+/// How long one `cua-driver --version` probe is reused.
+const CUA_PROBE_TTL: Duration = Duration::from_secs(5);
+
 const EGRESS_FLUSH_EVERY: Duration = Duration::from_secs(30);
 const EGRESS_FLUSH_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -114,6 +117,9 @@ pub struct Shared {
     pub(crate) cua_bin: String,
     pub(crate) cua_attach: CuaAttach,
     pub(crate) cua_daemon: tokio::sync::Mutex<Option<PrivateDaemon>>,
+    /// The last `cua-driver --version` probe, reused for a few seconds so
+    /// a burst of snapshots does not spawn a process each.
+    cua_probe: Mutex<Option<(Instant, cua::Detect)>>,
 
     paused: AtomicBool,
     metered: AtomicBool,
@@ -377,9 +383,24 @@ impl Shared {
         }
     }
 
+    /// Is the driver installed, and which version? Cached for
+    /// `CUA_PROBE_TTL`; `fresh` skips the cache (the UI's "check again").
+    pub async fn cua_detect(&self, fresh: bool) -> cua::Detect {
+        if !fresh {
+            if let Some((at, d)) = self.cua_probe.lock().unwrap().as_ref() {
+                if at.elapsed() < CUA_PROBE_TTL {
+                    return d.clone();
+                }
+            }
+        }
+        let d = cua::detect(&self.cua_bin).await;
+        *self.cua_probe.lock().unwrap() = Some((Instant::now(), d.clone()));
+        d
+    }
+
     /// The hello `computer.status` label.
     pub async fn cua_status(&self) -> (String, String) {
-        let d = cua::detect(&self.cua_bin).await;
+        let d = self.cua_detect(false).await;
         if !d.installed {
             return (String::new(), cua::Status::NotInstalled.label());
         }
@@ -482,6 +503,7 @@ impl Core {
             cua_bin: cfg.cua_bin,
             cua_attach: cfg.cua_attach,
             cua_daemon: tokio::sync::Mutex::new(None),
+            cua_probe: Mutex::new(None),
             paused: AtomicBool::new(false),
             metered: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
@@ -767,19 +789,19 @@ impl Core {
         cua::permissions_status(&self.shared.cua_bin, None).await
     }
 
+    /// Probe the driver now, bypassing the short cache.
+    pub async fn cua_detect(&self) -> cua::Detect {
+        self.shared.cua_detect(true).await
+    }
+
     // --- snapshot ---
 
-    pub async fn snapshot(&self) -> Snapshot {
-        let (cua_version, cua_status) = self.shared.cua_status().await;
-        let presence = crate::presence::read();
-        let counters = {
-            let c = self.shared.counters.lock().unwrap();
-            (c.month.clone(), c.bytes)
-        };
+    /// The cheap part of the snapshot: no Cua probe, no await. For a tray
+    /// label that is refreshed on every event.
+    pub fn link_brief(&self) -> LinkBrief {
         let synth = self.shared.synth.read().unwrap().clone();
-        // Before the first hello_ack of this run, fall back to what the
-        // pairing stored, so the UI can name the synth while offline.
         let identity = self.shared.identity.read().unwrap().clone();
+        let paired = identity.is_some();
         let stored_name = self
             .shared
             .persisted
@@ -789,14 +811,16 @@ impl Core {
             .as_ref()
             .map(|i| i.synth_name.clone())
             .filter(|n| !n.is_empty());
-        let paired = identity.is_some();
-        Snapshot {
+        LinkBrief {
             link_state: *self.shared.link_state.read().unwrap(),
             paired,
+            paused: self.shared.paused(),
             synth_id: synth
                 .as_ref()
                 .map(|s| s.synth_id.clone())
                 .or_else(|| identity.as_ref().map(|i| i.synth_id.clone())),
+            // Before the first hello_ack of this run, fall back to what
+            // the pairing stored, so the UI can name the synth offline.
             synth_name: synth
                 .as_ref()
                 .map(|s| s.synth_name.clone())
@@ -804,6 +828,24 @@ impl Core {
                 .or(if paired { stored_name } else { None }),
             synth_url: identity.as_ref().map(|i| i.synth_url.clone()),
             synth_version: synth.as_ref().map(|s| s.synth_version.clone()),
+        }
+    }
+
+    pub async fn snapshot(&self) -> Snapshot {
+        let (cua_version, cua_status) = self.shared.cua_status().await;
+        let presence = crate::presence::read();
+        let counters = {
+            let c = self.shared.counters.lock().unwrap();
+            (c.month.clone(), c.bytes)
+        };
+        let brief = self.link_brief();
+        Snapshot {
+            link_state: brief.link_state,
+            paired: brief.paired,
+            synth_id: brief.synth_id,
+            synth_name: brief.synth_name,
+            synth_url: brief.synth_url,
+            synth_version: brief.synth_version,
             idle_seconds: presence.idle_seconds,
             screen_locked: presence.screen_locked,
             paused: self.shared.paused(),
@@ -822,6 +864,18 @@ impl Core {
     pub async fn run_link(&self, ws_url: Option<String>, shutdown: watch::Receiver<bool>) {
         crate::link::run_forever(self.shared.clone(), ws_url, shutdown).await;
     }
+}
+
+/// Who we are linked to and how the link stands (see `Core::link_brief`).
+#[derive(Debug, Clone, Serialize)]
+pub struct LinkBrief {
+    pub link_state: LinkState,
+    pub paired: bool,
+    pub paused: bool,
+    pub synth_id: Option<String>,
+    pub synth_name: Option<String>,
+    pub synth_url: Option<String>,
+    pub synth_version: Option<String>,
 }
 
 /// A read-only picture of the core for the UI.
@@ -859,7 +913,7 @@ fn new_device_id() -> String {
     hex
 }
 
-pub(crate) fn registrable_domain(host: &str) -> String {
+pub fn registrable_domain(host: &str) -> String {
     let host = host.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
     if host.parse::<std::net::IpAddr>().is_ok() {
         return host;

@@ -1,0 +1,32 @@
+[package]
+name = "snth-connect"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SNTH Connect: the desktop shell (tray app) over connect-core."
+publish = false
+default-run = "snth-connect"
+
+[[bin]]
+name = "snth-connect"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+connect-core = { path = "../../crates/connect-core" }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tauri-plugin-deep-link = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-updater = "2"
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+keyring.workspace = true
+directories.workspace = true

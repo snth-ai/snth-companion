@@ -1,0 +1,367 @@
+//! SNTH Connect: the desktop shell. A tray app that holds one
+//! `connect_core::Core`, shows its state in a small window, and asks the
+//! owner before the synth does anything the settings say to ask about.
+
+// No console window next to the app on Windows (release builds).
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod actions;
+mod approvals;
+mod browsers;
+mod commands;
+mod i18n;
+mod prefs;
+mod state;
+mod tray;
+mod ui;
+mod windows;
+
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use connect_core::{Core, CoreConfig, CoreEvent, CuaAttach, SecretStore, UreqHubClient};
+use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
+use tauri_plugin_autostart::MacosLauncher;
+use tauri_plugin_deep_link::DeepLinkExt;
+use tauri_plugin_global_shortcut::ShortcutState;
+use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::{watch, Notify};
+
+use crate::approvals::{Approvals, UiApprover};
+use crate::prefs::PrefsFile;
+use crate::state::{Ctx, UPDATER_KEY_PLACEHOLDER};
+use crate::ui::UiEvent;
+
+/// The flag the autostart entry passes, so a launch at login stays in the
+/// tray instead of opening the window.
+const HIDDEN_FLAG: &str = "--hidden";
+
+/// The pairing token goes to the OS keychain in a release build. A debug
+/// build is unsigned, and an unsigned binary reading the keychain makes
+/// macOS ask for the login password on every rebuild, so debug builds keep
+/// the token in a 0600 file in the config dir instead.
+#[cfg(not(debug_assertions))]
+fn secret_store(_config_dir: &Path) -> (Arc<dyn SecretStore>, &'static str) {
+    (
+        Arc::new(connect_core::KeyringSecretStore::new("ai.snth.connect")),
+        "system keychain",
+    )
+}
+
+#[cfg(debug_assertions)]
+fn secret_store(config_dir: &Path) -> (Arc<dyn SecretStore>, &'static str) {
+    (
+        Arc::new(connect_core::FileSecretStore::new(config_dir.join("secrets.json"))),
+        "file (debug build)",
+    )
+}
+
+/// Where the Cua Driver command line lives. A GUI app does not get the
+/// shell's PATH, so look in the places the installer uses; when it is not
+/// installed yet, settle on the installer's default so it is found after
+/// an install without restarting.
+fn cua_bin() -> String {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(dirs) = directories::BaseDirs::new() {
+        if cfg!(windows) {
+            candidates.push(dirs.data_local_dir().join("Programs/cua-driver/cua-driver.exe"));
+        } else {
+            candidates.push(dirs.home_dir().join(".local/bin/cua-driver"));
+        }
+    }
+    if cfg!(target_os = "macos") {
+        candidates.push(PathBuf::from("/Applications/CuaDriver.app/Contents/MacOS/cua-driver"));
+        candidates.push(PathBuf::from("/opt/homebrew/bin/cua-driver"));
+    }
+    if cfg!(unix) {
+        candidates.push(PathBuf::from("/usr/local/bin/cua-driver"));
+    }
+    candidates
+        .iter()
+        .find(|p| p.exists())
+        .or(candidates.first())
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "cua-driver".to_string())
+}
+
+/// Is a real updater public key configured (not the placeholder)?
+fn updater_configured(config: &tauri::Config) -> bool {
+    config
+        .plugins
+        .0
+        .get("updater")
+        .and_then(|u| u.get("pubkey"))
+        .and_then(|k| k.as_str())
+        .is_some_and(|k| !k.trim().is_empty() && k != UPDATER_KEY_PLACEHOLDER)
+}
+
+fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let handle = app.handle().clone();
+    let config_dir = app.path().app_config_dir()?;
+    let data_dir = app.path().app_data_dir()?;
+    std::fs::create_dir_all(&config_dir)?;
+    std::fs::create_dir_all(&data_dir)?;
+
+    let prefs_file = PrefsFile::new(config_dir.join("shell.json"));
+    let prefs = prefs_file.load();
+    let was_paused = prefs.paused;
+    let stop_shortcut = prefs.stop_shortcut.clone();
+    let onboarded = prefs.onboarded;
+
+    let approvals = Arc::new(Approvals::default());
+    let (secret, secret_kind) = secret_store(&config_dir);
+    let cua_bin = cua_bin();
+    let core = Core::new(CoreConfig {
+        settings_path: Some(config_dir.join("settings.json")),
+        journal_path: Some(data_dir.join("journal.jsonl")),
+        approver: Arc::new(UiApprover { app: handle.clone(), approvals: approvals.clone() }),
+        cookies: Arc::new(browsers::system_reader()),
+        secret,
+        hub: Arc::new(UreqHubClient),
+        app_version: app.package_info().version.to_string(),
+        cua_bin: cua_bin.clone(),
+        // Our own private helper daemon; the owner's daemon is never touched.
+        cua_attach: CuaAttach::Private,
+    });
+
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    let ctx = Arc::new(Ctx {
+        app: handle.clone(),
+        core: core.clone(),
+        approvals,
+        prefs: Mutex::new(prefs),
+        prefs_file,
+        offered_roots: Mutex::new(HashSet::new()),
+        link_detail: Mutex::new((None, String::new())),
+        pair_code: Mutex::new(None),
+        relink: Notify::new(),
+        shutdown,
+        tray: Mutex::new(None),
+        device_name: core.shared().device_name(),
+        secret_store: secret_kind,
+        cua_bin,
+        updater_ready,
+        shortcut_active: Mutex::new(false),
+    });
+    app.manage(ctx.clone());
+
+    // Stay paused if the owner left the app paused, and while onboarding
+    // is unfinished (nothing may run before the owner finished choosing).
+    if core.is_paired() && (was_paused || !onboarded) {
+        tauri::async_runtime::block_on(core.pause());
+    }
+
+    // Subscribe before the link starts so no event is missed.
+    spawn_event_forwarder(ctx.clone());
+    spawn_link(ctx.clone(), shutdown_rx);
+
+    tray::build(&handle, &ctx)?;
+
+    // Launched at login: stay in the tray, unless there is something the
+    // owner has to do first (pair or finish onboarding).
+    let hidden = std::env::args().any(|a| a == HIDDEN_FLAG) && onboarded && core.is_paired();
+    windows::create_main(&handle, !hidden)?;
+    #[cfg(target_os = "macos")]
+    {
+        if hidden {
+            let _ = handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
+        }
+    }
+
+    // The stop shortcut. Another app may own the combination; the General
+    // screen shows that and lets the owner pick another.
+    let _ = actions::set_stop_shortcut(&ctx, &stop_shortcut);
+
+    // snth://pair?code=...
+    #[cfg(any(windows, target_os = "linux"))]
+    let _ = app.deep_link().register_all();
+    if let Ok(Some(urls)) = app.deep_link().get_current() {
+        for url in urls {
+            actions::handle_deep_link(&ctx, url.as_str());
+        }
+    }
+    let ctx_links = ctx.clone();
+    app.deep_link().on_open_url(move |event| {
+        for url in event.urls() {
+            actions::handle_deep_link(&ctx_links, url.as_str());
+        }
+    });
+
+    Ok(())
+}
+
+/// The link supervisor. `run_link` returns when the app shuts down or the
+/// owner unlinks; after an unlink it waits for the next pairing.
+fn spawn_link(ctx: Arc<Ctx>, mut shutdown: watch::Receiver<bool>) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            ctx.core.run_link(None, shutdown.clone()).await;
+            if *shutdown.borrow() {
+                break;
+            }
+            tokio::select! {
+                _ = ctx.relink.notified() => {}
+                _ = shutdown.changed() => break,
+            }
+        }
+    });
+}
+
+/// Core events and journal entries -> the UI's one event channel, plus the
+/// tray label.
+fn spawn_event_forwarder(ctx: Arc<Ctx>) {
+    let mut events = ctx.core.subscribe();
+    let mut journal = ctx.core.subscribe_journal();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::select! {
+                ev = events.recv() => match ev {
+                    Ok(CoreEvent::Link { state, detail }) => {
+                        // An unpaired core repeats "no pairing" every two
+                        // seconds; only a change is news.
+                        let changed = {
+                            let mut last = ctx.link_detail.lock().unwrap();
+                            let changed = last.0 != Some(state) || last.1 != detail;
+                            *last = (Some(state), detail);
+                            changed
+                        };
+                        if changed {
+                            tray::refresh(&ctx);
+                            ui::emit(&ctx.app, UiEvent::State);
+                        }
+                    }
+                    Ok(_) | Err(RecvError::Lagged(_)) => {
+                        tray::refresh(&ctx);
+                        ui::emit(&ctx.app, UiEvent::State);
+                    }
+                    Err(RecvError::Closed) => break,
+                },
+                entry = journal.recv() => match entry {
+                    Ok(entry) => ui::emit(&ctx.app, UiEvent::Journal { entry }),
+                    Err(RecvError::Lagged(_)) => ui::emit(&ctx.app, UiEvent::State),
+                    Err(RecvError::Closed) => break,
+                },
+            }
+        }
+    });
+}
+
+fn ctx_of(app: &AppHandle) -> Option<Arc<Ctx>> {
+    app.try_state::<Arc<Ctx>>().map(|s| s.inner().clone())
+}
+
+fn main() {
+    let context = tauri::generate_context!();
+    let updater_ready = updater_configured(context.config());
+
+    let mut builder = tauri::Builder::default()
+        // Must be first: a second launch (or a deep link on Windows and
+        // Linux) lands in the running instance.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            windows::show_main(app);
+        }))
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            Some(vec![HIDDEN_FLAG]),
+        ))
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    // The only shortcut the app registers is "stop".
+                    if event.state() != ShortcutState::Pressed {
+                        return;
+                    }
+                    let Some(ctx) = ctx_of(app) else { return };
+                    tauri::async_runtime::spawn(async move {
+                        if !ctx.core.link_brief().paused {
+                            actions::pause(&ctx).await;
+                            ui::notify_paused(&ctx.app);
+                        }
+                    });
+                })
+                .build(),
+        )
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init());
+
+    // The updater verifies downloads against a public key from
+    // tauri.conf.json. Until the owner puts a real key there, the plugin
+    // stays out and "check for updates" reports that it is not set up.
+    if updater_ready {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
+
+    let app = builder
+        .invoke_handler(tauri::generate_handler![
+            commands::get_state,
+            commands::get_journal,
+            commands::ui_ready,
+            commands::pair_begin,
+            commands::pair_confirm,
+            commands::pair_cancel,
+            commands::unpair,
+            commands::finish_onboarding,
+            commands::apply_preset,
+            commands::update_settings,
+            commands::suggested_roots,
+            commands::add_suggested_root,
+            commands::pick_folder,
+            commands::remove_root,
+            commands::set_root_write,
+            commands::revoke_grant,
+            commands::pause,
+            commands::resume,
+            commands::approvals_pending,
+            commands::approval_answer,
+            commands::cua_check,
+            commands::cua_grant_permissions,
+            commands::cua_install,
+            commands::set_language,
+            commands::set_autostart,
+            commands::set_stop_shortcut,
+            commands::check_update,
+            commands::install_update,
+            commands::diagnostics,
+            commands::open_external,
+        ])
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                // Neither window is ever destroyed by its close button.
+                api.prevent_close();
+                let app = window.app_handle();
+                match window.label() {
+                    windows::APPROVAL => {
+                        // Closing the request window refuses what is in it.
+                        if let Some(ctx) = ctx_of(app) {
+                            for id in ctx.approvals.deny_all() {
+                                ui::emit(app, UiEvent::ApprovalClosed { id });
+                            }
+                        }
+                        windows::hide_approval(app);
+                    }
+                    _ => windows::hide_main(app),
+                }
+            }
+        })
+        .setup(move |app| setup(app, updater_ready))
+        .build(context)
+        .expect("failed to start SNTH Connect");
+
+    app.run(|app, event| match event {
+        // Closing the last window must not quit a tray app. A real quit
+        // (the tray's Quit, an update restart) carries an exit code.
+        RunEvent::ExitRequested { api, code, .. } => {
+            if code.is_none() {
+                api.prevent_exit();
+            }
+        }
+        // macOS: the dock icon was clicked.
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen { .. } => windows::show_main(app),
+        _ => {
+            let _ = app;
+        }
+    });
+}

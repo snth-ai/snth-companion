@@ -1,8 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/connect-core", "crates/connectd"]
-
-# The Tauri shell (app/) is a separate agent's work and is not a member yet.
+members = ["crates/connect-core", "crates/connectd", "app/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"
