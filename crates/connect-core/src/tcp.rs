@@ -13,14 +13,17 @@
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Notify;
 
+use crate::core::Shared;
+use crate::journal::Entry;
 use crate::proto::{reply_ok, reply_refusal, MuxStream, Refusal, StreamHeader};
-use crate::{logln, Config};
+use crate::logln;
 
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -32,13 +35,28 @@ const COPY_BUF: usize = 64 * 1024;
 /// that went away mid-download leaves exactly this state behind.
 const STALL_AFTER_SYNTH_CLOSE: Duration = Duration::from_secs(30);
 
-pub async fn handle(mut s: MuxStream, hdr: StreamHeader, cfg: &Config) {
+pub async fn handle(mut s: MuxStream, hdr: StreamHeader, shared: &Arc<Shared>) {
     let started = Instant::now();
     let target = format!("{}:{}", hdr.host, hdr.port);
 
-    let tcp = match tokio::time::timeout(CONNECT_BUDGET, connect(&hdr, cfg.allow_private)).await {
+    // Owner policy first (enabled / mode / cap / metered / the ask), then
+    // the address policy and the dial.
+    if let Err(why) = shared.net_allows(&hdr.host, &hdr.reason).await {
+        shared
+            .journal()
+            .record(Entry::new("net", "dial", target.clone(), why.to_string()));
+        logln!("tcp {target}: refused: {why}");
+        reply_refusal(&mut s, &why).await;
+        return;
+    }
+
+    let allow_local = shared.allow_local_network();
+    let tcp = match tokio::time::timeout(CONNECT_BUDGET, connect(&hdr, allow_local)).await {
         Ok(Ok(tcp)) => tcp,
         Ok(Err(why)) => {
+            shared
+                .journal()
+                .record(Entry::new("net", "dial", target.clone(), why.to_string()));
             logln!("tcp {target}: refused: {why}");
             reply_refusal(&mut s, &why).await;
             return;
@@ -48,6 +66,9 @@ pub async fn handle(mut s: MuxStream, hdr: StreamHeader, cfg: &Config) {
                 "dial failed: {target} did not connect within {} s",
                 CONNECT_BUDGET.as_secs()
             ));
+            shared
+                .journal()
+                .record(Entry::new("net", "dial", target.clone(), why.to_string()));
             logln!("tcp {target}: refused: {why}");
             reply_refusal(&mut s, &why).await;
             return;
@@ -61,14 +82,18 @@ pub async fn handle(mut s: MuxStream, hdr: StreamHeader, cfg: &Config) {
     let up = AtomicU64::new(0);
     let down = AtomicU64::new(0);
     let res = pump(s, tcp, &up, &down).await;
+    let up = up.load(Ordering::Relaxed);
+    let down = down.load(Ordering::Relaxed);
+    shared.add_egress(up + down);
     let outcome = match res {
-        Ok(()) => "closed".to_string(),
+        Ok(()) => "ok".to_string(),
         Err(e) => format!("aborted: {e}"),
     };
+    shared
+        .journal()
+        .record(Entry::new("net", "dial", target.clone(), outcome.clone()).with_bytes(up + down));
     logln!(
-        "tcp {target}: {outcome}, up={} down={} in {:.1}s",
-        up.load(Ordering::Relaxed),
-        down.load(Ordering::Relaxed),
+        "tcp {target}: {outcome}, up={up} down={down} in {:.1}s",
         started.elapsed().as_secs_f64()
     );
 }

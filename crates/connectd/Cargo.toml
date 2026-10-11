@@ -1,0 +1,18 @@
+[package]
+name = "connectd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Headless CLI over connect-core: pair / run / status / settings / pause / resume / unpair, with a terminal approver. For tests and debugging."
+publish = false
+
+[[bin]]
+name = "connectd"
+path = "src/main.rs"
+
+[dependencies]
+connect-core = { path = "../connect-core" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true

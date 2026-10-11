@@ -13,3 +13,6 @@ coverage.out
 # embed.FS at compile time.
 ui/node_modules/
 internal/ui/dist/
+
+# Rust build output
+/target/

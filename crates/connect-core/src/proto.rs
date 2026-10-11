@@ -27,6 +27,9 @@ pub type MuxStream = BufReader<Compat<yamux::Stream>>;
 
 pub const MAX_HEADER_LINE: usize = 64 * 1024;
 
+/// `purpose` value for a catalog-only mcp stream (connect.md).
+pub const PURPOSE_CATALOG: &str = "catalog";
+
 #[derive(Debug, Deserialize)]
 pub struct StreamHeader {
     pub kind: String,
@@ -36,6 +39,13 @@ pub struct StreamHeader {
     pub host: String,
     #[serde(default)]
     pub port: u32,
+    /// Free text the synth gives for an mcp stream, UNVERIFIED. Shown to
+    /// the owner as "the synth says: ...".
+    #[serde(default)]
+    pub reason: String,
+    /// "" (working stream) or "catalog" (read the tool catalog only).
+    #[serde(default)]
+    pub purpose: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
