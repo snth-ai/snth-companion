@@ -199,6 +199,21 @@ impl GrantStore {
         g.retain(|x| !(x.capability == capability && x.scope == scope));
     }
 
+    /// Put back a grant read from disk at startup (`until`: 0 = forever,
+    /// otherwise the unix second it ends). An expired one is skipped.
+    pub fn restore(&self, capability: &str, scope: &str, until: i64) {
+        if until != 0 && until <= now_unix() {
+            return;
+        }
+        let mut g = self.grants.lock().unwrap();
+        g.retain(|x| !(x.capability == capability && x.scope == scope));
+        g.push(Grant {
+            capability: capability.to_string(),
+            scope: scope.to_string(),
+            until: Some(until),
+        });
+    }
+
     /// Forget everything (unpair).
     pub fn clear(&self) {
         self.grants.lock().unwrap().clear();
@@ -289,6 +304,18 @@ mod tests {
             },
         );
         assert!(s.allows("files", "/y"));
+    }
+
+    #[test]
+    fn restore_skips_expired() {
+        let s = GrantStore::new();
+        s.restore("cookies", "a.com", 0);
+        s.restore("cookies", "b.com", now_unix() + 100);
+        s.restore("cookies", "c.com", now_unix() - 100);
+        assert!(s.allows("cookies", "a.com"));
+        assert!(s.allows("cookies", "b.com"));
+        assert!(!s.allows("cookies", "c.com"));
+        assert_eq!(s.list().len(), 2);
     }
 
     #[test]

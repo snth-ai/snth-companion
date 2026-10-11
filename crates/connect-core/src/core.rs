@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tokio::sync::{broadcast, oneshot, watch};
@@ -19,7 +19,7 @@ use crate::journal::{Entry, Journal};
 use crate::pairing::{HubClient, Pending};
 use crate::proto::Refusal;
 use crate::secret::SecretStore;
-use crate::settings::{self, Persisted, Preset, Root, Settings};
+use crate::settings::{self, Persisted, Preset, Root, Settings, StoredGrant, StoredIdentity};
 use crate::wire;
 
 /// The keychain key the pairing token is stored under.
@@ -62,12 +62,17 @@ pub enum CoreEvent {
     Paused { paused: bool },
 }
 
-/// Monthly egress accounting.
-#[derive(Default)]
+/// Monthly egress accounting. Written to disk at most every
+/// `EGRESS_FLUSH_EVERY` (or `EGRESS_FLUSH_BYTES`), and on `Core::flush`.
 struct Counters {
     month: String,
     bytes: u64,
+    unsaved: u64,
+    last_flush: Instant,
 }
+
+const EGRESS_FLUSH_EVERY: Duration = Duration::from_secs(30);
+const EGRESS_FLUSH_BYTES: u64 = 4 * 1024 * 1024;
 
 fn month_key() -> String {
     // YYYY-MM from the wall clock, good enough for a monthly cap.
@@ -161,9 +166,60 @@ impl Shared {
         });
     }
 
-    /// The link learned the synth's identity from hello_ack.
+    /// The link learned the synth's identity from hello_ack. The friendly
+    /// name is kept on disk too, for the status line while the link is down.
     pub(crate) fn set_synth(&self, ack: wire::HelloAck) {
+        let name = ack.synth_name.clone();
         *self.synth.write().unwrap() = Some(ack);
+        let mut p = self.persisted.write().unwrap();
+        if let Some(id) = p.identity.as_mut() {
+            if id.synth_name != name && !name.is_empty() {
+                id.synth_name = name;
+                self.save_locked(&p);
+            }
+        }
+    }
+
+    /// Write the persisted record. The caller holds the write lock, which
+    /// also serializes the writers (they share one temp file).
+    fn save_locked(&self, p: &Persisted) {
+        if let Some(path) = &self.settings_path {
+            let _ = settings::save(path, p);
+        }
+    }
+
+    /// Mirror the durable grants ("always" and until-time) to disk, so they
+    /// survive a restart. Session grants are never written. Not a settings
+    /// change: `settings_rev` does not move.
+    pub(crate) fn persist_grants(&self) {
+        let durable: Vec<StoredGrant> = self
+            .grants
+            .list()
+            .into_iter()
+            .filter(|(_, _, until)| *until >= 0)
+            .map(|(capability, scope, until)| StoredGrant { capability, scope, until })
+            .collect();
+        let mut p = self.persisted.write().unwrap();
+        if p.grants != durable {
+            p.grants = durable;
+            self.save_locked(&p);
+        }
+    }
+
+    /// Write the egress counters to disk now.
+    fn flush_egress(&self) {
+        let (month, bytes) = {
+            let mut c = self.counters.lock().unwrap();
+            c.unsaved = 0;
+            c.last_flush = Instant::now();
+            (c.month.clone(), c.bytes)
+        };
+        let mut p = self.persisted.write().unwrap();
+        if p.egress_month != month || p.egress_bytes != bytes {
+            p.egress_month = month;
+            p.egress_bytes = bytes;
+            self.save_locked(&p);
+        }
     }
 
     /// Nudge the control watch so the link re-sends presence. Computes the
@@ -201,6 +257,7 @@ impl Shared {
         tokio::spawn(async move {
             let appr = fut.await;
             me.grants.record(&cap, &sc, appr);
+            me.persist_grants();
             let _ = tx.send(appr);
         });
         match tokio::time::timeout(APPROVAL_TIMEOUT, rx).await {
@@ -269,13 +326,20 @@ impl Shared {
 
     /// Add egress bytes to the month counter.
     pub fn add_egress(&self, n: u64) {
-        let mut c = self.counters.lock().unwrap();
-        let m = month_key();
-        if c.month != m {
-            c.month = m;
-            c.bytes = 0;
+        let flush = {
+            let mut c = self.counters.lock().unwrap();
+            let m = month_key();
+            if c.month != m {
+                c.month = m;
+                c.bytes = 0;
+            }
+            c.bytes = c.bytes.saturating_add(n);
+            c.unsaved = c.unsaved.saturating_add(n);
+            c.unsaved >= EGRESS_FLUSH_BYTES || c.last_flush.elapsed() >= EGRESS_FLUSH_EVERY
+        };
+        if flush {
+            self.flush_egress();
         }
-        c.bytes = c.bytes.saturating_add(n);
     }
 
     pub fn allow_local_network(&self) -> bool {
@@ -374,10 +438,41 @@ impl Core {
         let (events, _) = broadcast::channel(256);
         let (settings_tx, _) = watch::channel(persisted.rev);
         let (control_tx, _) = watch::channel(0);
+
+        // State that survives a restart: the confirmed pairing (only while
+        // its token is still in the secret store), the durable grants and
+        // this month's egress count.
+        let has_token = cfg
+            .secret
+            .get(TOKEN_KEY)
+            .ok()
+            .flatten()
+            .is_some_and(|t| !t.is_empty());
+        let identity = match (&persisted.identity, has_token) {
+            (Some(id), true) => Some(Pending {
+                synth_id: id.synth_id.clone(),
+                synth_url: id.synth_url.clone(),
+                token: String::new(), // the link reads it from the secret store
+            }),
+            _ => None,
+        };
+        let grants = GrantStore::new();
+        if has_token {
+            for g in &persisted.grants {
+                grants.restore(&g.capability, &g.scope, g.until);
+            }
+        }
+        let month = month_key();
+        let egress_bytes = if persisted.egress_month == month {
+            persisted.egress_bytes
+        } else {
+            0
+        };
+
         let shared = Arc::new(Shared {
             persisted: RwLock::new(persisted),
             settings_path: cfg.settings_path,
-            grants: GrantStore::new(),
+            grants,
             approver: cfg.approver,
             journal: Arc::new(Journal::new(cfg.journal_path)),
             cookies: cfg.cookies,
@@ -391,10 +486,12 @@ impl Core {
             metered: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
             counters: Mutex::new(Counters {
-                month: month_key(),
-                bytes: 0,
+                month,
+                bytes: egress_bytes,
+                unsaved: 0,
+                last_flush: Instant::now(),
             }),
-            identity: RwLock::new(None),
+            identity: RwLock::new(identity),
             pending: Mutex::new(None),
             synth: RwLock::new(None),
             link_state: RwLock::new(LinkState::Unpaired),
@@ -404,14 +501,11 @@ impl Core {
             unpair_req: tokio::sync::Notify::new(),
             unpair_ack: tokio::sync::Notify::new(),
         });
-        // A stored token means we are already paired: reflect it.
-        if let Some(tok) = shared.token() {
-            if !tok.is_empty() {
-                // identity url/id are not persisted in P1; the link still
-                // works from the token + a stored synth url. For the CLI
-                // the url is passed in run(). Mark as paired-but-idle.
-                shared.set_link_state(LinkState::Connecting, "token present");
-            }
+        // A stored token means we are already paired: reflect it. The
+        // synth url/id come back from settings.json (see above); the CLI
+        // may also pass the url to run_link().
+        if has_token {
+            shared.set_link_state(LinkState::Connecting, "token present");
         }
         Core { shared }
     }
@@ -506,6 +600,24 @@ impl Core {
     }
     pub fn revoke(&self, capability: &str, scope: &str) {
         self.shared.grants.revoke(capability, scope);
+        self.shared.persist_grants();
+    }
+
+    // --- connection facts the host observes ---
+
+    /// The host tells the core whether the current connection is metered
+    /// (the core has no portable way to know). Reported in presence and
+    /// used by the "do not use on metered connections" setting.
+    pub fn set_metered(&self, metered: bool) {
+        if self.shared.metered.swap(metered, Ordering::AcqRel) != metered {
+            self.shared.bump_control();
+        }
+    }
+
+    /// Write anything held back for batching (the egress counters). Call
+    /// before the process exits.
+    pub fn flush(&self) {
+        self.shared.flush_egress();
     }
 
     // --- pause ---
@@ -562,6 +674,15 @@ impl Core {
             .map_err(|e| format!("store token: {e}"))?;
         self.shared.stopping.store(false, Ordering::Release);
         *self.shared.identity.write().unwrap() = Some(p.clone());
+        {
+            let mut persisted = self.shared.persisted.write().unwrap();
+            persisted.identity = Some(StoredIdentity {
+                synth_id: p.synth_id.clone(),
+                synth_url: p.synth_url.clone(),
+                synth_name: String::new(),
+            });
+            self.shared.save_locked(&persisted);
+        }
         self.shared.set_link_state(LinkState::Connecting, "paired");
         let _ = self.shared.events.send(CoreEvent::Paired {
             synth_id: p.synth_id.clone(),
@@ -609,6 +730,11 @@ impl Core {
         self.shared.identity.read().unwrap().as_ref().map(|p| p.ws_url())
     }
 
+    /// Is this computer paired (a confirmed synth and its token on hand)?
+    pub fn is_paired(&self) -> bool {
+        self.shared.identity.read().unwrap().is_some()
+    }
+
     /// Wipe the token, grants and pending/identity. Called after a bounded
     /// wait for `unpair_ack` (the link sends `unpair` first). Idempotent.
     pub fn wipe_local(&self) {
@@ -617,6 +743,14 @@ impl Core {
         *self.shared.identity.write().unwrap() = None;
         *self.shared.pending.lock().unwrap() = None;
         *self.shared.synth.write().unwrap() = None;
+        {
+            let mut persisted = self.shared.persisted.write().unwrap();
+            if persisted.identity.is_some() || !persisted.grants.is_empty() {
+                persisted.identity = None;
+                persisted.grants.clear();
+                self.shared.save_locked(&persisted);
+            }
+        }
         self.shared.set_link_state(LinkState::Unpaired, "unpaired");
         let _ = self.shared.events.send(CoreEvent::Unpaired);
     }
@@ -643,10 +777,32 @@ impl Core {
             (c.month.clone(), c.bytes)
         };
         let synth = self.shared.synth.read().unwrap().clone();
+        // Before the first hello_ack of this run, fall back to what the
+        // pairing stored, so the UI can name the synth while offline.
+        let identity = self.shared.identity.read().unwrap().clone();
+        let stored_name = self
+            .shared
+            .persisted
+            .read()
+            .unwrap()
+            .identity
+            .as_ref()
+            .map(|i| i.synth_name.clone())
+            .filter(|n| !n.is_empty());
+        let paired = identity.is_some();
         Snapshot {
             link_state: *self.shared.link_state.read().unwrap(),
-            synth_id: synth.as_ref().map(|s| s.synth_id.clone()),
-            synth_name: synth.as_ref().map(|s| s.synth_name.clone()),
+            paired,
+            synth_id: synth
+                .as_ref()
+                .map(|s| s.synth_id.clone())
+                .or_else(|| identity.as_ref().map(|i| i.synth_id.clone())),
+            synth_name: synth
+                .as_ref()
+                .map(|s| s.synth_name.clone())
+                .filter(|n| !n.is_empty())
+                .or(if paired { stored_name } else { None }),
+            synth_url: identity.as_ref().map(|i| i.synth_url.clone()),
             synth_version: synth.as_ref().map(|s| s.synth_version.clone()),
             idle_seconds: presence.idle_seconds,
             screen_locked: presence.screen_locked,
@@ -672,8 +828,12 @@ impl Core {
 #[derive(Debug, Clone, Serialize)]
 pub struct Snapshot {
     pub link_state: LinkState,
+    /// A confirmed pairing exists (whether or not the link is up).
+    pub paired: bool,
     pub synth_id: Option<String>,
     pub synth_name: Option<String>,
+    /// The paired synth's base url (https://...), if paired.
+    pub synth_url: Option<String>,
     pub synth_version: Option<String>,
     pub idle_seconds: u64,
     pub screen_locked: bool,
@@ -917,6 +1077,111 @@ mod tests {
         assert!(sh.grants().allows("net", "youtube.com"));
         // Next attempt passes without asking.
         sh.net_allows("m.youtube.com", "").await.unwrap();
+    }
+
+    /// A core over real files in a temp dir, to prove what survives a
+    /// restart. The secret store is shared between the two "runs".
+    fn file_core(dir: &std::path::Path, secret: Arc<MemSecretStore>) -> Core {
+        let cookies = Arc::new(MultiReader {
+            chromium: vec![],
+            firefox: vec![],
+            keys: Arc::new(crate::cookies::fixtures::NoKey),
+        });
+        Core::new(CoreConfig {
+            settings_path: Some(dir.join("settings.json")),
+            journal_path: None,
+            approver: Arc::new(AutoAllow),
+            cookies,
+            secret,
+            hub: Arc::new(FakeHub),
+            app_version: "t".into(),
+            cua_bin: "cua-driver-not-installed".into(),
+            cua_attach: CuaAttach::User,
+        })
+    }
+
+    #[tokio::test]
+    async fn pairing_grants_and_egress_survive_a_restart() {
+        let dir = std::env::temp_dir().join(format!("connect-core-restart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let secret = Arc::new(MemSecretStore::new());
+
+        let core = file_core(&dir, secret.clone());
+        assert!(!core.is_paired());
+        core.pair_begin("https://hub".into(), "123456".into()).await.unwrap();
+        core.pair_confirm().unwrap();
+        core.apply_preset(Preset::Careful); // net = ask
+        let sh = core.shared();
+        // AutoAllow answers "always": a durable grant.
+        sh.net_allows("www.youtube.com", "").await.unwrap();
+        // A session grant must NOT be written.
+        sh.grants().record(
+            "cookies",
+            "session-only.com",
+            Approval { allow: true, duration: crate::grant::Duration_::Session },
+        );
+        sh.persist_grants();
+        sh.add_egress(1234);
+        core.flush();
+        drop(sh);
+        drop(core);
+
+        let core = file_core(&dir, secret.clone());
+        assert!(core.is_paired());
+        assert_eq!(core.synth_url().as_deref(), Some("wss://mia.snth.ai/api/connect/ws"));
+        let snap = core.snapshot().await;
+        assert!(snap.paired);
+        assert_eq!(snap.synth_id.as_deref(), Some("mia"));
+        assert_eq!(snap.synth_url.as_deref(), Some("https://mia.snth.ai"));
+        assert_eq!(snap.egress_bytes, 1234);
+        let sh = core.shared();
+        assert!(sh.grants().allows("net", "youtube.com"));
+        assert!(!sh.grants().allows("cookies", "session-only.com"));
+
+        // Revoke is durable too.
+        core.revoke("net", "youtube.com");
+        drop(sh);
+        drop(core);
+        let core = file_core(&dir, secret.clone());
+        assert!(!core.shared().grants().allows("net", "youtube.com"));
+
+        // Unpair wipes the stored pairing.
+        core.wipe_local();
+        drop(core);
+        let core = file_core(&dir, secret.clone());
+        assert!(!core.is_paired());
+        assert!(core.snapshot().await.synth_id.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_stored_pairing_without_its_token_is_not_paired() {
+        let dir = std::env::temp_dir().join(format!("connect-core-notoken-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let secret = Arc::new(MemSecretStore::new());
+        let core = file_core(&dir, secret.clone());
+        core.pair_begin("https://hub".into(), "123456".into()).await.unwrap();
+        core.pair_confirm().unwrap();
+        drop(core);
+        // The keychain entry is gone (say, the user deleted it).
+        secret.delete(TOKEN_KEY).unwrap();
+        let core = file_core(&dir, secret);
+        assert!(!core.is_paired());
+        assert!(!core.snapshot().await.paired);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn metered_flag_gates_net_when_asked_to() {
+        let (core, _) = test_core();
+        core.apply_preset(Preset::Full);
+        core.mutate_settings(|s| s.net.skip_on_metered = true);
+        let sh = core.shared();
+        assert!(sh.net_allows("example.com", "").await.is_ok());
+        core.set_metered(true);
+        assert!(sh.net_allows("example.com", "").await.is_err());
+        core.set_metered(false);
+        assert!(sh.net_allows("example.com", "").await.is_ok());
     }
 
     #[tokio::test]

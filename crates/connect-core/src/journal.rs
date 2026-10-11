@@ -77,11 +77,23 @@ impl Journal {
     /// dir).
     pub fn new(path: Option<PathBuf>) -> Journal {
         let (tx, _rx) = broadcast::channel(256);
+        let mut ring = VecDeque::with_capacity(RING_CAP);
+        // Fill the ring from the tail of the file, so the UI's activity
+        // list is not empty after a restart. The file is bounded by
+        // ROTATE_BYTES; a line that does not parse is skipped.
+        if let Some(p) = &path {
+            if let Ok(text) = std::fs::read_to_string(p) {
+                let lines: Vec<&str> = text.lines().collect();
+                let from = lines.len().saturating_sub(RING_CAP);
+                for line in &lines[from..] {
+                    if let Ok(e) = serde_json::from_str::<Entry>(line) {
+                        ring.push_back(e);
+                    }
+                }
+            }
+        }
         Journal {
-            inner: Mutex::new(Inner {
-                path,
-                ring: VecDeque::with_capacity(RING_CAP),
-            }),
+            inner: Mutex::new(Inner { path, ring }),
             tx,
         }
     }
@@ -166,6 +178,10 @@ mod tests {
         }
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text.lines().count(), 3);
+        // A new journal over the same file starts with the old entries.
+        let again = Journal::new(Some(path.clone()));
+        assert_eq!(again.recent().len(), 3);
+        assert_eq!(again.recent()[0].action, "files.read");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

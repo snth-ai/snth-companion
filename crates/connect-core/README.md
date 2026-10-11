@@ -62,7 +62,10 @@ Everything on `Core` is `Send + Sync`; clone the handle freely (it is an
 | `settings() -> Settings` | current settings |
 | `add_root(path, write) -> rev` / `remove_root(path) -> rev` | shared folders |
 | `Core::default_roots() -> Vec<Root>` | Desktop + Downloads, for onboarding |
-| `grant_list()` / `revoke(cap, scope)` | live grants |
+| `grant_list()` / `revoke(cap, scope)` | live grants (`until`: 0 = always, -1 = this session, else a unix second) |
+| `is_paired()` | a confirmed pairing exists (link up or not) |
+| `set_metered(bool)` | the host reports a metered connection (the core cannot detect it) |
+| `flush()` | write batched state (egress counters) before exit |
 | `pause().await` / `resume()` | pause closes streams, refuses new ones, stops our Cua daemon, reports `paused:true`; resume is explicit |
 | `cua_install_argv()` / `cua_permissions_grant_argv()` | argv the UI runs (we never run them) |
 | `cua_permissions_status().await` | read-only `permissions status` |
@@ -79,11 +82,27 @@ Everything on `Core` is `Send + Sync`; clone the handle freely (it is an
 
 ## Snapshot
 
-`Snapshot { link_state, synth_id, synth_name, synth_version, idle_seconds,
-screen_locked, paused, metered, settings, settings_rev, cua_version,
-cua_status, egress_month, egress_bytes }`. `link_state` is
-`unpaired | connecting | linked | reconnecting | paused`. All fields are
-`Serialize`, so a Tauri command can return the snapshot as JSON directly.
+`Snapshot { link_state, paired, synth_id, synth_name, synth_url,
+synth_version, idle_seconds, screen_locked, paused, metered, settings,
+settings_rev, cua_version, cua_status, egress_month, egress_bytes }`.
+`link_state` is `unpaired | connecting | linked | reconnecting | paused`.
+While the link is down, `synth_id` / `synth_name` come from the stored
+pairing. All fields are `Serialize`, so a Tauri command can return the
+snapshot as JSON directly.
+
+## What survives a restart
+
+`settings.json` holds, next to the settings and `settings_rev`:
+
+- the confirmed pairing without its token (`identity`: synth id, url and the
+  last friendly name). The token stays in the `SecretStore`; a stored
+  pairing whose token is gone counts as not paired;
+- durable grants ("always" and until-time). Session grants are memory only;
+- this month's egress count, so the monthly cap is not reset by a restart
+  (written at most every 30 s or 4 MiB, and on `flush()`).
+
+The journal ring is refilled from the tail of `journal.jsonl` on start.
+`unpair` / `wipe_local` erase the pairing and every grant.
 
 ## Settings + presets
 

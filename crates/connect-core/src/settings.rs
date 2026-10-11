@@ -273,13 +273,48 @@ impl Settings {
     }
 }
 
-/// What is actually written to disk: the settings plus the monotonic rev.
+/// The confirmed pairing, minus the token (that lives in the SecretStore).
+/// Kept on disk so a restart can reopen the link without pairing again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredIdentity {
+    pub synth_id: String,
+    pub synth_url: String,
+    /// The friendly name from the last `hello_ack`, for the status line
+    /// while the link is down. Empty until the first link.
+    #[serde(default)]
+    pub synth_name: String,
+}
+
+/// A grant that outlives the process: "always" (`until` = 0) or until a
+/// unix second. Session grants are never written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredGrant {
+    pub capability: String,
+    pub scope: String,
+    pub until: i64,
+}
+
+/// What is actually written to disk: the settings plus the monotonic rev,
+/// and the small amount of state that must survive a restart.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Persisted {
     pub rev: u64,
     pub settings: Settings,
     /// Random, generated once, kept across restarts (connect.md device_id).
     pub device_id: String,
+    /// The confirmed pairing (no token). None = not paired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<StoredIdentity>,
+    /// "Always" and until-time grants. Not part of `settings_rev`: the
+    /// synth never sees them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<StoredGrant>,
+    /// Monthly egress accounting (`YYYY-MM` and the bytes used in it), so
+    /// the monthly cap survives a restart.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub egress_month: String,
+    #[serde(default)]
+    pub egress_bytes: u64,
 }
 
 impl Persisted {
@@ -288,6 +323,10 @@ impl Persisted {
             rev: 0,
             settings: Settings::default(),
             device_id,
+            identity: None,
+            grants: Vec::new(),
+            egress_month: String::new(),
+            egress_bytes: 0,
         }
     }
 }
@@ -382,6 +421,22 @@ mod tests {
         assert_eq!(back.device_id, "dev-abc");
         assert_eq!(back.settings, p.settings);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_written_before_the_extra_state_still_loads() {
+        // settings.json from the first P1 build has only rev / settings /
+        // device_id; the newer fields must default.
+        let old = serde_json::json!({
+            "rev": 3,
+            "settings": Settings::default(),
+            "device_id": "dev-old",
+        });
+        let p: Persisted = serde_json::from_value(old).unwrap();
+        assert_eq!(p.rev, 3);
+        assert!(p.identity.is_none());
+        assert!(p.grants.is_empty());
+        assert_eq!(p.egress_bytes, 0);
     }
 
     #[test]
