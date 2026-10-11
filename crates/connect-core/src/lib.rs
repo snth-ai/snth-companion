@@ -32,6 +32,7 @@ macro_rules! logln {
 pub mod cookies;
 pub mod core;
 pub mod cua;
+pub mod cua_install;
 pub mod files;
 pub mod grant;
 pub mod journal;
@@ -43,6 +44,7 @@ pub mod proto;
 pub mod rpc;
 pub mod secret;
 pub mod settings;
+pub mod tcc;
 pub mod tcp;
 pub mod wire;
 pub mod ws_io;
@@ -50,6 +52,7 @@ pub mod ws_io;
 pub use crate::core::{
     Core, CoreConfig, CoreEvent, CuaAttach, LinkBrief, LinkState, Shared, Snapshot,
 };
+pub use cua_install::{FailCode, InstallState};
 pub use cookies::{CookieError, CookieRead, CookieSource, KeySource, MultiReader, WireCookie};
 pub use grant::{Approval, ApprovalRequest, Approver, Duration_, GrantStore};
 pub use journal::{Entry, Journal};

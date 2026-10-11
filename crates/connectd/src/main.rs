@@ -249,6 +249,7 @@ fn build_core(a: &Args, approver: Arc<dyn Approver>) -> Core {
         hub: Arc::new(connect_core::UreqHubClient),
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         cua_bin: a.get("--cua-bin").unwrap_or("cua-driver").to_string(),
+        cua_private_root: None,
         cua_attach: attach,
     });
 

@@ -13,7 +13,8 @@ use serde::Serialize;
 use tokio::sync::{broadcast, oneshot, watch};
 
 use crate::cookies::CookieSource;
-use crate::cua::{self, PrivateDaemon};
+use crate::cua::{self, DriverEnv, PrivateDaemon};
+use crate::cua_install::{CuaInstaller, FailCode, InstallState, UreqFetcher};
 use crate::grant::{Approval, ApprovalRequest, Approver, GrantStore, APPROVAL_TIMEOUT};
 use crate::journal::{Entry, Journal};
 use crate::pairing::{HubClient, Pending};
@@ -115,6 +116,10 @@ pub struct Shared {
     hub: Arc<dyn HubClient>,
     pub(crate) app_version: String,
     pub(crate) cua_bin: String,
+    /// What every driver process we start gets in its environment.
+    pub(crate) cua_env: DriverEnv,
+    /// Set when the app keeps its own private copy of the driver.
+    cua_installer: Option<Arc<CuaInstaller>>,
     pub(crate) cua_attach: CuaAttach,
     pub(crate) cua_daemon: tokio::sync::Mutex<Option<PrivateDaemon>>,
     /// The last `cua-driver --version` probe, reused for a few seconds so
@@ -373,7 +378,7 @@ impl Shared {
                 let mut guard = self.cua_daemon.lock().await;
                 if guard.is_none() {
                     let s = self.settings();
-                    let d = PrivateDaemon::start(&self.cua_bin, &s).await.map_err(|e| {
+                    let d = PrivateDaemon::start(&self.cua_bin, &s, &self.cua_env).await.map_err(|e| {
                         Refusal::Failed(format!("unavailable: start private Cua daemon: {e}"))
                     })?;
                     *guard = Some(d);
@@ -393,7 +398,7 @@ impl Shared {
                 }
             }
         }
-        let d = cua::detect(&self.cua_bin).await;
+        let d = cua::detect(&self.cua_bin, &self.cua_env).await;
         *self.cua_probe.lock().unwrap() = Some((Instant::now(), d.clone()));
         d
     }
@@ -413,16 +418,22 @@ impl Shared {
                 Ok(_) => (version, cua::Status::Ok.label()),
                 Err(_) => (version, cua::Status::DaemonDown.label()),
             },
-            // For the private path we report ok on install; the daemon is
-            // started on demand. Permission state is checked by the UI.
-            CuaAttach::Private => (version, cua::Status::Ok.label()),
+            // The private daemon is started on demand, so installed is
+            // enough, except that on macOS it can do nothing until this
+            // app has its two permissions (see tcc.rs).
+            CuaAttach::Private => match crate::tcc::status() {
+                Some(p) if !(p.accessibility && p.screen_recording) => {
+                    (version, cua::Status::NoPermissions.label())
+                }
+                _ => (version, cua::Status::Ok.label()),
+            },
         }
     }
 
     async fn stop_cua(&self) {
         let d = self.cua_daemon.lock().await.take();
         if let Some(d) = d {
-            d.stop(&self.cua_bin).await;
+            d.stop(&self.cua_bin, &self.cua_env).await;
         }
     }
 }
@@ -444,7 +455,13 @@ pub struct CoreConfig {
     pub secret: Arc<dyn SecretStore>,
     pub hub: Arc<dyn HubClient>,
     pub app_version: String,
+    /// The driver binary to run. Ignored when `cua_private_root` is set.
     pub cua_bin: String,
+    /// Some(<app data>/cua) = the app keeps its own pinned copy of the
+    /// driver there and installs it itself (`Core::cua_ensure`); the
+    /// binary it runs is then that copy and nothing else. None = run
+    /// `cua_bin` as given (the CLI, tests).
+    pub cua_private_root: Option<PathBuf>,
     pub cua_attach: CuaAttach,
 }
 
@@ -490,17 +507,37 @@ impl Core {
             0
         };
 
+        let journal = Arc::new(Journal::new(cfg.journal_path));
+        let (cua_bin, cua_env, cua_installer) = match cfg.cua_private_root {
+            Some(root) => {
+                let installer = CuaInstaller::new(
+                    root,
+                    crate::cua_install::pinned_release(),
+                    Arc::new(UreqFetcher),
+                    journal.clone(),
+                );
+                (
+                    installer.bin_path().to_string_lossy().to_string(),
+                    installer.env(),
+                    Some(Arc::new(installer)),
+                )
+            }
+            None => (cfg.cua_bin, DriverEnv::default(), None),
+        };
+
         let shared = Arc::new(Shared {
             persisted: RwLock::new(persisted),
             settings_path: cfg.settings_path,
             grants,
             approver: cfg.approver,
-            journal: Arc::new(Journal::new(cfg.journal_path)),
+            journal,
             cookies: cfg.cookies,
             secret: cfg.secret,
             hub: cfg.hub,
             app_version: cfg.app_version,
-            cua_bin: cfg.cua_bin,
+            cua_bin,
+            cua_env,
+            cua_installer,
             cua_attach: cfg.cua_attach,
             cua_daemon: tokio::sync::Mutex::new(None),
             cua_probe: Mutex::new(None),
@@ -786,7 +823,80 @@ impl Core {
         cua::permissions_grant_argv(&self.shared.cua_bin)
     }
     pub async fn cua_permissions_status(&self) -> std::io::Result<cua::Permissions> {
-        cua::permissions_status(&self.shared.cua_bin, None).await
+        cua::permissions_status(&self.shared.cua_bin, None, &self.shared.cua_env).await
+    }
+
+    // --- the app's own copy of the driver ---
+
+    /// The binary this core runs for computer control.
+    pub fn cua_bin(&self) -> String {
+        self.shared.cua_bin.clone()
+    }
+
+    /// Where the helper stands (checking, downloading, ready, failed...).
+    /// `Idle` until the first `cua_ensure`.
+    pub fn cua_helper_state(&self) -> InstallState {
+        match &self.shared.cua_installer {
+            Some(i) => i.state(),
+            None => InstallState::Idle,
+        }
+    }
+
+    /// Live helper states, for a progress line. None when the core does
+    /// not manage a private copy.
+    pub fn subscribe_cua_helper(&self) -> Option<watch::Receiver<InstallState>> {
+        self.shared.cua_installer.as_ref().map(|i| i.subscribe())
+    }
+
+    /// Make sure the pinned driver is installed: check the private copy
+    /// and download it when it is missing, broken or of another version
+    /// (a new app version with a new pin). Idempotent, one run at a time,
+    /// safe to call again after a failure. Never touches a driver the
+    /// owner installed themselves.
+    ///
+    /// When a new copy went in, our daemon (if one runs the old copy) is
+    /// stopped so the next task starts the new one, and the synth is told
+    /// that computer control changed (`settings_rev` moves).
+    pub async fn cua_ensure(&self) -> InstallState {
+        let Some(installer) = self.shared.cua_installer.clone() else {
+            // Not managed: report what is there.
+            let d = self.shared.cua_detect(true).await;
+            return match d.version {
+                Some(version) if d.installed => InstallState::Ready { version },
+                _ => InstallState::Failed {
+                    code: FailCode::Unsupported,
+                    detail: "this core does not manage a private driver copy".into(),
+                },
+            };
+        };
+        let (state, installed) = installer.ensure().await;
+        if installed {
+            self.shared.stop_cua().await;
+            *self.shared.cua_probe.lock().unwrap() = None;
+            self.mutate_settings(|_| {});
+        }
+        state
+    }
+
+    /// The app is quitting: stop a running install, start no new one.
+    pub fn cua_stop_install(&self) {
+        if let Some(i) = &self.shared.cua_installer {
+            i.shutdown();
+        }
+    }
+
+    /// What the OS allows for computer control, as the app the embedded
+    /// driver runs under. macOS: Accessibility and Screen Recording of
+    /// THIS app (read-only, no prompt). None on systems without such
+    /// permissions.
+    pub fn computer_permissions(&self) -> Option<crate::tcc::HostPermissions> {
+        crate::tcc::status()
+    }
+
+    /// Ask macOS for the permissions still missing. Shows system dialogs:
+    /// call only from the owner's click.
+    pub fn request_computer_permissions(&self) {
+        crate::tcc::request();
     }
 
     /// Probe the driver now, bypassing the short cache.
@@ -1016,6 +1126,7 @@ mod tests {
             hub: Arc::new(FakeHub),
             app_version: "0.1.0-test".into(),
             cua_bin: "cua-driver".into(),
+            cua_private_root: None,
             cua_attach: CuaAttach::User,
         });
         (core, secret)
@@ -1119,6 +1230,7 @@ mod tests {
             hub: Arc::new(FakeHub),
             app_version: "t".into(),
             cua_bin: "cua-driver".into(),
+            cua_private_root: None,
             cua_attach: CuaAttach::User,
         });
         core.apply_preset(Preset::Careful); // net = ask
@@ -1150,6 +1262,7 @@ mod tests {
             hub: Arc::new(FakeHub),
             app_version: "t".into(),
             cua_bin: "cua-driver-not-installed".into(),
+            cua_private_root: None,
             cua_attach: CuaAttach::User,
         })
     }

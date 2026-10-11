@@ -87,7 +87,7 @@ async fn dispatch(shared: &Arc<Shared>, req: &Request) -> Result<Value, String> 
 }
 
 async fn cua_version(shared: &Shared) -> String {
-    crate::cua::detect(&shared.cua_bin)
+    crate::cua::detect(&shared.cua_bin, &shared.cua_env)
         .await
         .version
         .unwrap_or_default()

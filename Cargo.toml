@@ -29,6 +29,8 @@ cbc = "0.1"
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 hmac = "0.12"
 sha1 = "0.10"
+# Checks the downloaded Cua Driver archive against the hash pinned in the app.
+sha2 = "0.10"
 # Token custody in the OS keychain (behind the SecretStore trait; tests never touch it).
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 # One-shot HTTPS to the hub for claim-pair. rustls, no OpenSSL.

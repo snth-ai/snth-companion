@@ -22,7 +22,8 @@ let core = Core::new(CoreConfig {
     secret:        my_secret_store,    // Arc<dyn SecretStore>  (keyring in prod)
     hub:           Arc::new(connect_core::UreqHubClient),
     app_version:   env!("CARGO_PKG_VERSION").into(),
-    cua_bin:       "cua-driver".into(),
+    cua_bin:       "cua-driver".into(),             // used only when cua_private_root is None
+    cua_private_root: Some(data_dir.join("cua")),   // the app's own pinned driver copy
     cua_attach:    CuaAttach::Private, // our own embedded daemon (the product path)
 });
 ```
@@ -67,8 +68,11 @@ Everything on `Core` is `Send + Sync`; clone the handle freely (it is an
 | `set_metered(bool)` | the host reports a metered connection (the core cannot detect it) |
 | `flush()` | write batched state (egress counters) before exit |
 | `pause().await` / `resume()` | pause closes streams, refuses new ones, stops our Cua daemon, reports `paused:true`; resume is explicit |
-| `cua_install_argv()` / `cua_permissions_grant_argv()` | argv the UI runs (we never run them) |
-| `cua_permissions_status().await` | read-only `permissions status` |
+| `cua_ensure().await -> InstallState` | make sure the app's pinned driver copy is installed: check it, download + verify + unpack + switch when missing or of another version. Idempotent, one run at a time, safe to retry |
+| `cua_helper_state()` / `subscribe_cua_helper()` | where the install stands (`idle, checking, downloading{received,total}, installing, verifying, ready{version}, failed{code,detail}`), and a `watch` of it |
+| `cua_stop_install()` | the app is quitting: stop a running install |
+| `computer_permissions()` / `request_computer_permissions()` | macOS Accessibility + Screen Recording of the HOST app (what the embedded driver works under): read-only status, and the system prompts |
+| `cua_install_argv()` / `cua_permissions_grant_argv()` / `cua_permissions_status()` | for a host that attaches to the user's own driver (`CuaAttach::User`): argv the host runs, and the read-only CLI status |
 | `run_link(ws_url, shutdown).await` | the reconnect loop; spawn it. `ws_url` None = the paired synth url |
 | `snapshot().await -> Snapshot` | the state snapshot below |
 
@@ -136,5 +140,9 @@ atomic.
   idle), and a per-`tools/call` gate in the mcp pipe (tool denylist, app
   blocklist, foreground delivery per `never/idle/ask/always`). Our own
   private Cua daemon on a private socket; the user's daemon is never touched.
+  With `cua_private_root` the driver itself is the app's own copy too
+  (`cua_install.rs`: pinned version, SHA-256 pinned in the source, private
+  `CUA_DRIVER_RS_HOME`); the hello `computer.status` is `not_installed` until
+  it is in place and `no_permissions` while macOS has not allowed the app.
 
 The synth has no message that changes settings or grants.

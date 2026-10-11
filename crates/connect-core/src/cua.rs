@@ -55,10 +55,32 @@ pub struct Detect {
     pub path: String,
 }
 
+/// The environment every driver process the app starts gets. Telemetry and
+/// the driver's own update check are always off. With a private copy
+/// (`home` set) the driver also keeps its state in the app's data dir
+/// instead of `~/.cua-driver`, which belongs to a driver the owner may
+/// have installed for themselves.
+#[derive(Debug, Clone, Default)]
+pub struct DriverEnv {
+    pub home: Option<PathBuf>,
+}
+
+impl DriverEnv {
+    pub fn apply(&self, cmd: &mut Command) {
+        telemetry_off(cmd);
+        cmd.env("CUA_DRIVER_RS_UPDATE_CHECK", "0");
+        if let Some(home) = &self.home {
+            cmd.env("CUA_DRIVER_RS_HOME", home);
+        }
+    }
+}
+
 /// Run `<bin> --version` to see whether the driver is installed and which
 /// version. Read-only.
-pub async fn detect(bin: &str) -> Detect {
-    let out = Command::new(bin)
+pub async fn detect(bin: &str, env: &DriverEnv) -> Detect {
+    let mut cmd = Command::new(bin);
+    env.apply(&mut cmd);
+    let out = cmd
         .arg("--version")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -108,8 +130,13 @@ pub struct Permissions {
 
 /// Read `permissions status --json` from a running daemon. Read-only, no
 /// prompt. `socket` targets our private daemon when we run one.
-pub async fn permissions_status(bin: &str, socket: Option<&str>) -> std::io::Result<Permissions> {
+pub async fn permissions_status(
+    bin: &str,
+    socket: Option<&str>,
+    env: &DriverEnv,
+) -> std::io::Result<Permissions> {
     let mut cmd = Command::new(bin);
+    env.apply(&mut cmd);
     cmd.args(["permissions", "status", "--json"]);
     if let Some(s) = socket {
         cmd.args(["--socket", s]);
@@ -174,7 +201,11 @@ impl PrivateDaemon {
     /// SAFETY NOTE: embedded mode never prompts and never relaunches the
     /// standalone app; it stays in this process's TCC chain. It does not
     /// touch the user's own daemon (a different socket).
-    pub async fn start(bin: &str, _settings: &Settings) -> std::io::Result<PrivateDaemon> {
+    pub async fn start(
+        bin: &str,
+        _settings: &Settings,
+        env: &DriverEnv,
+    ) -> std::io::Result<PrivateDaemon> {
         let dir = std::env::temp_dir().join(format!(
             "connect-cua-{}-{}",
             std::process::id(),
@@ -196,7 +227,7 @@ impl PrivateDaemon {
             "--pid-file",
             &pid_file.to_string_lossy(),
         ]);
-        telemetry_off(&mut cmd);
+        env.apply(&mut cmd);
         cmd.env("CUA_DRIVER_EMBEDDED", "1")
             .env("CUA_DRIVER_HOST_BUNDLE_ID", HOST_BUNDLE_ID)
             .stdin(Stdio::null())
@@ -223,9 +254,11 @@ impl PrivateDaemon {
     }
 
     /// Stop OUR daemon by its own pid (kill_on_drop also covers a crash).
-    pub async fn stop(mut self, bin: &str) {
+    pub async fn stop(mut self, bin: &str, env: &DriverEnv) {
         // Polite stop on our socket first.
-        let _ = Command::new(bin)
+        let mut cmd = Command::new(bin);
+        env.apply(&mut cmd);
+        let _ = cmd
             .args(["stop", "--socket", &self.socket])
             .stdin(Stdio::null())
             .stdout(Stdio::null())

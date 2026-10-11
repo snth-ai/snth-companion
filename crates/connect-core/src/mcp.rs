@@ -76,7 +76,7 @@ pub async fn handle(mut s: MuxStream, hdr: StreamHeader, shared: &Arc<Shared>) {
     let argv = cua::mcp_argv(&shared.cua_bin, &socket, embedded);
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
-    telemetry_off(&mut cmd);
+    shared.cua_env.apply(&mut cmd);
     let mut child = match cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -347,12 +347,6 @@ async fn gate_line(shared: &Arc<Shared>, is_catalog: bool, line: &[u8]) -> Gate 
         Ok(b) => Gate::Forward(b),
         Err(_) => Gate::Drop("cannot re-serialize"),
     }
-}
-
-fn telemetry_off(cmd: &mut Command) {
-    cmd.env("DO_NOT_TRACK", "1")
-        .env("CUA_DRIVER_RS_TELEMETRY_ENABLED", "0")
-        .env("CUA_TELEMETRY_ENABLED", "0");
 }
 
 #[cfg(test)]
