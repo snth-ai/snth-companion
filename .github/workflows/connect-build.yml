@@ -1,0 +1,56 @@
+# Build-only check for SNTH Connect (app/) on every push to a connect/* branch.
+# Produces a Windows installer as a workflow artifact. No release, no signing.
+# The release pipeline lives in connect-release.yml.
+
+name: connect-build
+
+on:
+  push:
+    branches:
+      - "connect/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: connect-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-pc-windows-msvc
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Core tests
+        run: cargo test -p connect-core
+
+      - name: Build the installer
+        working-directory: app
+        run: npm run tauri build -- --bundles nsis
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: snth-connect-windows-x64
+          path: target/release/bundle/nsis/*.exe
+          if-no-files-found: error
