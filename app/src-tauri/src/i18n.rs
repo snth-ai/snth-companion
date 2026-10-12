@@ -130,3 +130,22 @@ pub fn approval_body(lang: Lang, capability: &str, scope: &str) -> String {
         (Lang::Ru, _) => "Откройте окно запроса, чтобы ответить.".into(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A notification can show on a locked screen: for a change in the
+    /// owner's apps it says what kind of request waits, never who a
+    /// message is for or anything else from the request.
+    #[test]
+    fn an_apps_notification_names_no_recipient() {
+        for lang in [Lang::En, Lang::Ru] {
+            let send = approval_body(lang, "apps", "messages.send:+79161234567");
+            assert!(!send.contains("7916") && !send.contains("messages.send"), "{send}");
+            let other = approval_body(lang, "apps", "shortcuts.run:Unlock Front Door");
+            assert!(!other.contains("Unlock") && !other.is_empty(), "{other}");
+            assert_ne!(send, other);
+        }
+    }
+}

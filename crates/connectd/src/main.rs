@@ -144,9 +144,14 @@ impl Approver for TerminalApprover {
     fn ask(&self, req: ApprovalRequest) -> ApprovalFuture {
         Box::pin(async move {
             println!(
-                "\nApproval needed: {} for {}\n  (the synth says: {:?})\n  {} [y / a=always / N]: ",
-                req.capability, req.scope, req.reason, req.summary
+                "\nApproval needed: {} for {}\n  (the synth says: {:?})",
+                req.capability, req.scope, req.reason
             );
+            // The action itself, in full (a message's recipient and text...).
+            for (key, value) in &req.details {
+                println!("  {key}: {value}");
+            }
+            println!("  {} [y / a=always / N]: ", req.summary);
             let line = tokio::task::spawn_blocking(|| {
                 let mut s = String::new();
                 let _ = std::io::stdin().read_line(&mut s);
