@@ -77,6 +77,21 @@ Everything on `Core` is `Send + Sync`; clone the handle freely (it is an
 | `run_link(ws_url, shutdown).await` | the reconnect loop; spawn it. `ws_url` None = the paired synth url |
 | `snapshot().await -> Snapshot` | the state snapshot below |
 
+## Child processes
+
+Every child process (the driver, `tar`, `hostname`) is created through
+`proc::command` / `proc::std_command`. On Windows they set `CREATE_NO_WINDOW`,
+without which a windowed app flashes a console window for each child. A test
+fails on a raw `Command::new` anywhere in this crate, in `connectd` or in the
+app's shell.
+
+Our driver daemon listens on a private Unix socket on macOS and Linux and on
+a private named pipe on Windows (`cua.rs`, `PrivateDaemon`). It counts as
+started only once that endpoint listens; a failed start is reported with the
+daemon's last words and retried with a growing pause (5 s to 5 min).
+`connectd selftest cua` runs the whole computer-control path on the machine
+it is started on.
+
 ## Events
 
 - `subscribe() -> broadcast::Receiver<CoreEvent>`: `Link{state,detail}`,

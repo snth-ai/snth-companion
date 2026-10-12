@@ -6,8 +6,11 @@ and shows it through a React + TypeScript UI (`src/`).
 
 Status: runs for real on macOS (one Mac linked to a live synth, the helper
 installs itself, computer control works under the app's own permissions).
-Windows and Linux builds exist in CI but have not been used. What has never
-been exercised is listed under "Not verified" at the end.
+On Windows the app installs, pairs and links on a real machine, and the
+computer-control path (driver install, our daemon on a named pipe, an MCP
+session) passes a self-test on a Windows CI machine at every push. Linux has
+not been used. What has never been exercised is listed under "Not verified"
+at the end.
 
 ## Layout
 
@@ -89,7 +92,10 @@ npm run tauri build                            # release bundles for this OS
 ```
 
 Rust commands from the repo root: `cargo test -p connect-core -p snth-connect`,
-`cargo clippy --workspace`. The workspace builds with Rust 1.85
+`cargo clippy --workspace`. `cargo run -p connectd -- selftest cua` runs the
+computer-control path for real in a temp dir (it downloads the pinned driver
+and starts a private daemon on the machine; the Windows CI job runs it on
+every push). The workspace builds with Rust 1.85
 (`rust-version` in the root `Cargo.toml`); `.cargo/config.toml` makes cargo
 prefer dependency versions that support it, which is why `Cargo.lock` holds
 Tauri 2.11 and `package.json` pins the matching `@tauri-apps/*` 2.11 packages.
@@ -285,6 +291,12 @@ hidden "Advanced" override that accepts only `https://` addresses.
   compiled and unit-tested in pieces only.
 - The release workflow as a whole, the Linux build, and the Windows update
   (the installer restarts the app; the app only stores how to come back).
+- Windows, beyond install, pairing, the link and the CI self-test: the tray,
+  autostart, the stop shortcut, notifications and the approval window on
+  Windows; computer control from the installed app after the named-pipe fix
+  (the self-test starts the daemon from a console program, the app from a
+  windowed one); the screen-lock state (always reported as unlocked);
+  browser sign-ins (Chrome on Windows is not readable, Firefox is).
 - `scripts/release-macos.sh` was run with `--dry-run` only: notarization,
   stapling, the upload and the `latest.json` edit have never run.
 - Beyond what the first real run showed (pairing, the link, the helper
