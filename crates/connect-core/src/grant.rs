@@ -73,10 +73,41 @@ impl Approval {
     }
 }
 
+/// Which answers beyond "this time" the owner may give to one ask. The
+/// approver should offer only these, and the core drops any other: an
+/// answer that is not allowed here is treated as "this time".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Remember {
+    /// Session, until a time, or always (the usual case).
+    #[default]
+    Any,
+    /// Only "always", for this exact scope (a message recipient).
+    AlwaysOnly,
+    /// Nothing is remembered: every such action asks again.
+    Never,
+}
+
+impl Remember {
+    pub fn allows(self, d: Duration_) -> bool {
+        matches!(
+            (self, d),
+            (_, Duration_::Once) | (Remember::Any, _) | (Remember::AlwaysOnly, Duration_::Always)
+        )
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Remember::Any => "any",
+            Remember::AlwaysOnly => "always",
+            Remember::Never => "never",
+        }
+    }
+}
+
 /// What the owner is being asked to allow.
 #[derive(Debug, Clone)]
 pub struct ApprovalRequest {
-    /// "net", "cookies", "computer" or "files".
+    /// "net", "cookies", "computer", "files" or "apps".
     pub capability: String,
     /// A registrable domain, a folder, a tool, "task", ...
     pub scope: String,
@@ -86,6 +117,15 @@ pub struct ApprovalRequest {
     /// A short, app-authored line (not from the synth) describing the
     /// concrete action, e.g. "read cookies for youtube.com".
     pub summary: String,
+    /// The facts of the concrete action, in full, as (key, value): the
+    /// recipient and the whole text of a message, the title and time of
+    /// an event, the name of a shortcut. The keys are the app's own
+    /// ("to", "text", "title", "when"...); the values are what will
+    /// actually be sent or created, so the owner approves the real thing
+    /// and not the synth's description of it. Empty for most asks.
+    pub details: Vec<(String, String)>,
+    /// What the owner may ask the app to remember for this ask.
+    pub remember: Remember,
 }
 
 impl ApprovalRequest {
@@ -100,7 +140,19 @@ impl ApprovalRequest {
             scope: scope.into(),
             reason: sanitize_reason(reason),
             summary: summary.into(),
+            details: Vec::new(),
+            remember: Remember::Any,
         }
+    }
+
+    pub fn with_details(mut self, details: Vec<(String, String)>) -> ApprovalRequest {
+        self.details = details;
+        self
+    }
+
+    pub fn with_remember(mut self, remember: Remember) -> ApprovalRequest {
+        self.remember = remember;
+        self
     }
 }
 
@@ -257,6 +309,20 @@ mod tests {
         assert_eq!(r, "hithere you");
         let long = "x".repeat(1000);
         assert_eq!(sanitize_reason(&long).len(), MAX_REASON);
+    }
+
+    #[test]
+    fn remember_limits_what_an_answer_may_last() {
+        let session = Duration_::Session;
+        assert!(Remember::Any.allows(session));
+        assert!(Remember::Any.allows(Duration_::Always));
+        assert!(Remember::AlwaysOnly.allows(Duration_::Always));
+        assert!(!Remember::AlwaysOnly.allows(session));
+        assert!(!Remember::AlwaysOnly.allows(Duration_::Until(1)));
+        assert!(!Remember::Never.allows(Duration_::Always));
+        for r in [Remember::Any, Remember::AlwaysOnly, Remember::Never] {
+            assert!(r.allows(Duration_::Once));
+        }
     }
 
     #[test]

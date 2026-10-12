@@ -1,6 +1,6 @@
 //! Persisted settings and the three onboarding presets.
 //!
-//! The settings are the owner's policy for the four capabilities. They
+//! The settings are the owner's policy for the five capabilities. They
 //! live in the OS config dir, are written atomically, and carry a
 //! `settings_rev` that grows by one on every change (the synth uses it to
 //! decide when to re-read the MCP catalog, connect.md).
@@ -132,6 +132,70 @@ pub struct FilesSettings {
     pub ask_on_write: bool,
 }
 
+/// When the app asks before the synth CHANGES or SENDS something in one of
+/// the owner's apps (connect.md: apps.mode). Reading never asks: the
+/// per-app switch is the consent for reading.
+///
+/// Sending a message as the owner is outside this setting: it asks every
+/// time in every mode, unless the owner said "always" for that one
+/// recipient (see `apps::gate`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppsMode {
+    /// Ask before every change, every time. Nothing is remembered.
+    Ask,
+    /// Ask before a change; the owner may let the app remember the answer
+    /// for that kind of change.
+    AskNew,
+    /// No questions for changes.
+    Auto,
+}
+
+/// The owner's own apps on this computer (Calendar, Notes, the
+/// clipboard...). Which apps exist depends on the system: see
+/// `apps::Backend::offered`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppsSettings {
+    pub enabled: bool,
+    pub mode: AppsMode,
+    /// Per-app switches the owner moved away from the default. An app
+    /// that is not listed has its default: on, except Messages (off until
+    /// the owner switches it on by hand). See `AppsSettings::app_on`.
+    #[serde(default)]
+    pub apps: std::collections::BTreeMap<String, bool>,
+}
+
+impl Default for AppsSettings {
+    fn default() -> Self {
+        AppsSettings {
+            enabled: false,
+            mode: AppsMode::Ask,
+            apps: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+impl AppsSettings {
+    /// Is this app on by default once the owner enabled apps? Everything
+    /// except Messages: sending and reading messages as the owner is the
+    /// one the owner has to switch on separately.
+    pub fn default_on(app: &str) -> bool {
+        app != "messages"
+    }
+
+    /// The owner's switch for one app (the master switch is separate).
+    pub fn app_on(&self, app: &str) -> bool {
+        self.apps.get(app).copied().unwrap_or_else(|| Self::default_on(app))
+    }
+
+    /// Drop entries that only repeat the default, and entries for apps
+    /// this build does not know, so equal policies compare equal.
+    pub fn normalize(&mut self, known: &[&str]) {
+        self.apps
+            .retain(|app, on| known.contains(&app.as_str()) && *on != Self::default_on(app));
+    }
+}
+
 /// Which preset the settings came from, or `custom` after a hand edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -149,6 +213,9 @@ pub struct Settings {
     pub cookies: CookiesSettings,
     pub computer: ComputerSettings,
     pub files: FilesSettings,
+    /// Absent in a settings file written before apps existed: off.
+    #[serde(default)]
+    pub apps: AppsSettings,
     pub preset: Preset,
 }
 
@@ -181,6 +248,7 @@ impl Default for Settings {
                 roots: Vec::new(),
                 ask_on_write: false,
             },
+            apps: AppsSettings::default(),
             preset: Preset::Custom,
         }
     }
@@ -218,6 +286,8 @@ impl Settings {
                 };
                 s.files.enabled = true;
                 s.files.ask_on_write = true;
+                s.apps.enabled = true;
+                s.apps.mode = AppsMode::Ask;
             }
             Preset::Balanced => {
                 s.net = NetSettings {
@@ -242,6 +312,8 @@ impl Settings {
                 };
                 s.files.enabled = true;
                 s.files.ask_on_write = false;
+                s.apps.enabled = true;
+                s.apps.mode = AppsMode::AskNew;
             }
             Preset::Full => {
                 s.net = NetSettings {
@@ -266,6 +338,8 @@ impl Settings {
                 };
                 s.files.enabled = true;
                 s.files.ask_on_write = false;
+                s.apps.enabled = true;
+                s.apps.mode = AppsMode::Auto;
             }
             Preset::Custom => {}
         }
@@ -384,6 +458,48 @@ mod tests {
         assert!(!s.cookies.enabled);
         assert!(!s.computer.enabled);
         assert!(!s.files.enabled);
+        assert!(!s.apps.enabled);
+    }
+
+    #[test]
+    fn apps_presets_and_the_messages_default() {
+        let careful = Settings::from_preset(Preset::Careful, vec![]);
+        assert!(careful.apps.enabled);
+        assert_eq!(careful.apps.mode, AppsMode::Ask);
+        let balanced = Settings::from_preset(Preset::Balanced, vec![]);
+        assert_eq!(balanced.apps.mode, AppsMode::AskNew);
+        let full = Settings::from_preset(Preset::Full, vec![]);
+        assert_eq!(full.apps.mode, AppsMode::Auto);
+        // Every app is on after enabling, except Messages: in every
+        // preset, the full one included.
+        for s in [&careful, &balanced, &full] {
+            assert!(s.apps.app_on("calendar"));
+            assert!(s.apps.app_on("clipboard"));
+            assert!(!s.apps.app_on("messages"), "Messages must be switched on by hand");
+        }
+    }
+
+    #[test]
+    fn apps_switches_normalize_to_the_default() {
+        let mut a = AppsSettings::default();
+        a.apps.insert("calendar".into(), true); // same as the default
+        a.apps.insert("messages".into(), false); // same as the default
+        a.apps.insert("notes".into(), false);
+        a.apps.insert("teleporter".into(), true); // not an app we know
+        a.normalize(&["calendar", "messages", "notes"]);
+        assert_eq!(a.apps.len(), 1);
+        assert!(!a.app_on("notes"));
+        assert!(a.app_on("calendar"));
+    }
+
+    #[test]
+    fn a_settings_file_written_before_apps_still_loads() {
+        // settings.json of app 0.1.1 has no "apps" key at all.
+        let mut old = serde_json::to_value(Settings::from_preset(Preset::Balanced, vec![])).unwrap();
+        old.as_object_mut().unwrap().remove("apps");
+        let s: Settings = serde_json::from_value(old).unwrap();
+        assert!(!s.apps.enabled, "apps stay off until the owner turns them on");
+        assert!(s.net.enabled);
     }
 
     #[test]

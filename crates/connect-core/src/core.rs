@@ -145,6 +145,9 @@ pub struct Shared {
     pub(crate) approver: Arc<dyn Approver>,
     pub(crate) journal: Arc<Journal>,
     pub(crate) cookies: Arc<dyn CookieSource>,
+    /// The owner's own apps: the backend for this system and the little
+    /// state the gate keeps (see apps/mod.rs).
+    pub(crate) apps: crate::apps::State,
     secret: Arc<dyn SecretStore>,
     hub: Arc<dyn HubClient>,
     pub(crate) app_version: String,
@@ -299,12 +302,18 @@ impl Shared {
         req: ApprovalRequest,
     ) -> Approval {
         let (tx, rx) = oneshot::channel();
+        let remember = req.remember;
         let fut = self.approver.ask(req);
         let me = self.clone();
         let cap = capability.to_string();
         let sc = scope.to_string();
         tokio::spawn(async move {
-            let appr = fut.await;
+            let mut appr = fut.await;
+            // An answer this ask may not be remembered for counts as
+            // "this time", whatever the approver sent.
+            if appr.allow && !remember.allows(appr.duration) {
+                appr.duration = crate::grant::Duration_::Once;
+            }
             me.grants.record(&cap, &sc, appr);
             me.persist_grants();
             let _ = tx.send(appr);
@@ -540,6 +549,9 @@ pub struct CoreConfig {
     pub journal_path: Option<PathBuf>,
     pub approver: Arc<dyn Approver>,
     pub cookies: Arc<dyn CookieSource>,
+    /// The owner's own apps on this computer. The product passes
+    /// `apps::system_backend(..)`; tests pass a stub.
+    pub apps: Arc<dyn crate::apps::Backend>,
     pub secret: Arc<dyn SecretStore>,
     pub hub: Arc<dyn HubClient>,
     pub app_version: String,
@@ -620,6 +632,7 @@ impl Core {
             approver: cfg.approver,
             journal,
             cookies: cfg.cookies,
+            apps: crate::apps::State::new(cfg.apps),
             secret: cfg.secret,
             hub: cfg.hub,
             app_version: cfg.app_version,
@@ -1013,6 +1026,27 @@ impl Core {
         self.shared.cua_detect(true).await
     }
 
+    // --- the owner's own apps ---
+
+    /// The apps this computer offers, with the owner's switches. A Mac
+    /// app is not in the list on Windows.
+    pub fn apps_views(&self) -> Vec<crate::apps::AppView> {
+        let s = self.shared.settings();
+        crate::apps::views(self.shared.apps.backend().as_ref(), &s.apps)
+    }
+
+    /// Where the system permissions of one app stand. Read-only: never
+    /// raises a prompt. May take a moment: call it off the UI thread.
+    pub fn apps_permissions(&self, app: &str) -> Vec<crate::apps::Permission> {
+        self.shared.apps.backend().permissions(app)
+    }
+
+    /// Make the system ask for a permission of one app. Shows a system
+    /// window: call only from the owner's click.
+    pub fn apps_request_permission(&self, app: &str, kind: crate::apps::PermissionKind) -> Result<(), String> {
+        self.shared.apps.backend().request_permission(app, kind)
+    }
+
     // --- snapshot ---
 
     /// The cheap part of the snapshot: no Cua probe, no await. For a tray
@@ -1231,6 +1265,7 @@ mod tests {
             journal_path: None,
             approver: Arc::new(AutoAllow),
             cookies,
+            apps: Arc::new(crate::apps::stub::StubBackend::offering(&[])),
             secret: secret.clone(),
             hub: Arc::new(FakeHub),
             app_version: "0.1.0-test".into(),
@@ -1335,6 +1370,7 @@ mod tests {
             journal_path: None,
             approver: Arc::new(Delayed),
             cookies,
+            apps: Arc::new(crate::apps::stub::StubBackend::offering(&[])),
             secret,
             hub: Arc::new(FakeHub),
             app_version: "t".into(),
@@ -1367,6 +1403,7 @@ mod tests {
             journal_path: None,
             approver: Arc::new(AutoAllow),
             cookies,
+            apps: Arc::new(crate::apps::stub::StubBackend::offering(&[])),
             secret,
             hub: Arc::new(FakeHub),
             app_version: "t".into(),

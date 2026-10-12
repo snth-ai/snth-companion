@@ -11,7 +11,17 @@ pub const PROTO: u32 = 1;
 
 /// Build the capabilities object exactly as connect.md lists it.
 /// `cua_version` and `cua_status` describe computer use.
-pub fn capabilities_value(s: &Settings, cua_version: &str, cua_status: &str) -> Value {
+///
+/// `apps` is the fifth capability, added after the first release: a synth
+/// that does not know it ignores the key. It lists only the apps this
+/// computer has (never a Mac app on Windows), each with the owner's
+/// switch and the actions available here.
+pub fn capabilities_value(
+    s: &Settings,
+    cua_version: &str,
+    cua_status: &str,
+    apps: &dyn crate::apps::Backend,
+) -> Value {
     let net_mode = match s.net.mode {
         NetMode::All => "all",
         NetMode::Ask => "ask",
@@ -45,6 +55,7 @@ pub fn capabilities_value(s: &Settings, cua_version: &str, cua_status: &str) -> 
             "status": cua_status,
         },
         "files": {"enabled": s.files.enabled, "roots": roots},
+        "apps": crate::apps::wire_value(apps, &s.apps),
     })
 }
 

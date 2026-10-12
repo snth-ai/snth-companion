@@ -1,7 +1,8 @@
 //! `rpc` streams: sequential request/response calls (connect.md).
 //!
 //! Methods: files.list / files.stat / files.read / files.write,
-//! cookies.get, permission.request, device.info. One stream serves any
+//! cookies.get, permission.request, device.info, and apps.<app>.<action>
+//! (every one of those goes through the one gate in apps/mod.rs). One stream serves any
 //! number of sequential requests; the synth opens one per call and the
 //! app also serves many on one.
 
@@ -75,6 +76,7 @@ async fn dispatch(shared: &Arc<Shared>, req: &Request) -> Result<Value, String> 
             files_method(shared, req).await
         }
         "cookies.get" => cookies_get(shared, req).await,
+        m if m.starts_with("apps.") => crate::apps::handle(shared, m, &req.params).await,
         "permission.request" => permission_request(shared, req).await,
         "device.info" => Ok(wire::device_info(
             &shared.device_id(),
@@ -84,6 +86,12 @@ async fn dispatch(shared: &Arc<Shared>, req: &Request) -> Result<Value, String> 
         )),
         other => Err(format!("denied: unknown method {other:?}")),
     }
+}
+
+/// One call as a stream would make it, for tests of other modules.
+#[cfg(test)]
+pub(crate) async fn call_for_test(shared: &Arc<Shared>, method: &str, params: Value) -> Result<Value, String> {
+    dispatch(shared, &Request { id: Value::Null, method: method.to_string(), params }).await
 }
 
 async fn cua_version(shared: &Shared) -> String {
@@ -250,6 +258,13 @@ async fn permission_request(shared: &Arc<Shared>, req: &Request) -> Result<Value
         .ok_or("bad request: params.capability is required")?;
     let scope = req.params.get("scope").and_then(Value::as_str).unwrap_or("");
     let reason = req.params.get("reason").and_then(Value::as_str).unwrap_or("");
+    // Nothing in the owner's apps can be allowed ahead of time. Each
+    // change is asked about with its own facts on the screen (who a
+    // message goes to and what it says), by the gate in apps/mod.rs; a
+    // grant made here would be a way around that.
+    if capability == crate::apps::CAP {
+        return Err("denied: actions in the owner's apps are asked about one by one, when they happen".into());
+    }
     let ask = ApprovalRequest::new(
         capability,
         scope,

@@ -23,7 +23,7 @@ const RING_CAP: usize = 500;
 pub struct Entry {
     /// Unix seconds.
     pub time: i64,
-    /// "net", "cookies", "computer", "files", "link".
+    /// "net", "cookies", "computer", "files", "apps", "link".
     pub capability: String,
     /// "dial", "cookies.get", "files.read", "mcp.open", "tools/call", ...
     pub action: String,
@@ -33,6 +33,10 @@ pub struct Entry {
     pub outcome: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bytes: Option<u64>,
+    /// How many items a call returned (events, contacts, messages...).
+    /// The number only: never what the items say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u64>,
 }
 
 impl Entry {
@@ -52,7 +56,13 @@ impl Entry {
             target: target.into(),
             outcome: outcome.into(),
             bytes: None,
+            count: None,
         }
+    }
+
+    pub fn with_count(mut self, count: u64) -> Entry {
+        self.count = Some(count);
+        self
     }
 
     pub fn with_bytes(mut self, bytes: u64) -> Entry {

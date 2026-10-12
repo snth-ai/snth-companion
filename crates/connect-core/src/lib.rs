@@ -1,10 +1,10 @@
 //! SNTH Connect core.
 //!
 //! A library, never a UI. It keeps ONE outbound WebSocket to the owner's
-//! synth and gives it four capabilities under the owner's policy: internet
+//! synth and gives it five capabilities under the owner's policy: internet
 //! through this computer (`net`), browser cookies per domain (`cookies`),
-//! computer use through Cua Driver (`computer`), and files in chosen
-//! folders (`files`). The protocol is v1 as written in connect.md; the
+//! computer use through Cua Driver (`computer`), files in chosen folders
+//! (`files`), and the owner's own apps (`apps`). The protocol is v1 as written in connect.md; the
 //! synth side (Go) is the peer.
 //!
 //! A host (the Tauri shell, or the `connectd` CLI) builds one [`Core`]
@@ -29,6 +29,7 @@ macro_rules! logln {
     }};
 }
 
+pub mod apps;
 pub mod cookies;
 pub mod core;
 pub mod cua;

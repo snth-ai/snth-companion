@@ -220,7 +220,12 @@ async fn control_loop(mut s: MuxStream, shared: Arc<Shared>, established: Arc<At
     }
 
     let (cua_version, cua_status) = shared.cua_status().await;
-    let caps = wire::capabilities_value(&shared.settings(), &cua_version, &cua_status);
+    let caps = wire::capabilities_value(
+        &shared.settings(),
+        &cua_version,
+        &cua_status,
+        shared.apps.backend().as_ref(),
+    );
     let hello = wire::hello(
         &shared.device_id(),
         &shared.device_name(),
@@ -288,7 +293,12 @@ async fn control_loop(mut s: MuxStream, shared: Arc<Shared>, established: Arc<At
                 _ = settings_rx.changed() => {
                     let rev = *settings_rx.borrow();
                     let (v, st) = shared_w.cua_status().await;
-                    let caps = wire::capabilities_value(&shared_w.settings(), &v, &st);
+                    let caps = wire::capabilities_value(
+                        &shared_w.settings(),
+                        &v,
+                        &st,
+                        shared_w.apps.backend().as_ref(),
+                    );
                     if let Err(e) = write_json_line(&mut wr, &wire::settings_msg(rev, caps)).await {
                         return format!("send settings: {e}");
                     }
