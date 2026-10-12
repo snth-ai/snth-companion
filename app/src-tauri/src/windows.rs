@@ -51,6 +51,13 @@ pub fn show_main(app: &AppHandle) {
     let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_focus();
+    // The owner is at the app: an update no longer restarts it out of
+    // hand (see updates.rs).
+    if let Some(ctx) = app.try_state::<std::sync::Arc<crate::state::Ctx>>() {
+        ctx.updates
+            .window_was_shown
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
 }
 
 /// Closing the main window keeps the app in the tray. On macOS the dock

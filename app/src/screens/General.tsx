@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { backend } from "../backend";
-import type { UpdateInfo } from "../backend/types";
-import { acceleratorFromEvent, hostOf, shortcutKeys } from "../lib/format";
+import type { UiState } from "../backend/types";
+import { acceleratorFromEvent, formatClock, hostOf, shortcutKeys } from "../lib/format";
 import { useStore } from "../lib/store";
-import { Keys, More, Row, Section, Segmented, Sheet, SwitchRow } from "../ui/controls";
+import { Keys, More, Notice, Row, Section, Segmented, Sheet, SwitchRow } from "../ui/controls";
 import { IconX } from "../ui/icons";
 
 type LangChoice = "system" | "en" | "ru";
@@ -102,71 +102,104 @@ function StopShortcut() {
   );
 }
 
-function Updates() {
+/** What stops this copy from updating itself, in plain words. Also
+ * shown on the Status page: on macOS it means the app should be moved. */
+export function UpdateBlockedNotice() {
   const { state, s } = useStore();
   const t = s.general;
-  const [phase, setPhase] = useState<"idle" | "checking" | "installing" | "failed">("idle");
-  const [info, setInfo] = useState<UpdateInfo | null>(null);
+  const blocked = state.update.blocked;
+  if (!state.update.configured || !blocked) return null;
+  return (
+    <Notice
+      kind="warn"
+      title={t.blockedTitle}
+      actions={
+        blocked === "package" ? (
+          <button type="button" className="btn small" onClick={() => void backend.openExternal("releases")}>
+            {t.blockedDownload}
+          </button>
+        ) : undefined
+      }
+    >
+      {t.blocked[blocked] ?? t.blocked.read_only}
+    </Notice>
+  );
+}
 
-  const check = async () => {
-    setPhase("checking");
-    try {
-      setInfo(await backend.checkUpdate());
-      setPhase("idle");
-    } catch {
-      setInfo(null);
-      setPhase("failed");
-    }
+function Updates() {
+  const { state, s, lang, act } = useStore();
+  const t = s.general;
+  const u = state.update;
+  const [busy, setBusy] = useState(false);
+
+  const run = (work: () => Promise<UiState>) => {
+    setBusy(true);
+    void act(work).then(() => setBusy(false));
   };
 
-  const install = async () => {
-    setPhase("installing");
-    try {
-      await backend.installUpdate();
-      setInfo(null);
-      setPhase("idle");
-    } catch {
-      setPhase("failed");
-    }
-  };
-
-  const line = !state.app.updater_ready
+  const percent = u.phase === "downloading" && u.total ? Math.min(100, Math.round((u.received / u.total) * 100)) : null;
+  const line = !u.configured
     ? t.notConfigured
-    : phase === "checking"
+    : u.phase === "checking"
       ? t.checking
-      : phase === "installing"
-        ? t.installing
-        : phase === "failed"
-          ? t.updateFailed
-          : info?.status === "up_to_date"
-            ? t.upToDate
-            : info?.status === "available"
-              ? t.available(info.version ?? "")
-              : info?.status === "not_configured"
-                ? t.notConfigured
-                : "";
+      : u.phase === "downloading"
+        ? t.downloading(u.version, percent)
+        : u.phase === "ready"
+          ? t.ready(u.version)
+          : u.phase === "available"
+            ? t.available(u.version)
+            : u.phase === "applying"
+              ? t.applying(u.version)
+              : u.phase === "failed"
+                ? u.step === "check"
+                  ? t.failedCheck
+                  : u.step === "download"
+                    ? t.failedDownload(u.version ?? "")
+                    : t.failedInstall(u.version ?? "")
+                : u.updated_from
+                  ? t.updatedFrom(u.updated_from)
+                  : u.last_checked
+                    ? t.lastChecked(formatClock(u.last_checked, lang))
+                    : "";
+  const working = busy || u.phase === "checking" || u.phase === "downloading" || u.phase === "applying";
+  // A version that can be installed with one click right now.
+  const installable = !u.blocked && (u.phase === "ready" || u.phase === "available");
 
   return (
-    <div className="row">
-      <div className="row-text">
-        <div className="row-title">{t.version(state.app.version)}</div>
-        {line ? (
-          <div className={`row-desc${phase === "failed" ? " error-text" : ""}`} aria-live="polite">
-            {line}
-            {info?.status === "available" && info.notes && phase === "idle" ? <div style={{ marginTop: 3 }}>{info.notes}</div> : null}
-          </div>
-        ) : null}
+    <>
+      <div className="row">
+        <div className="row-text">
+          <div className="row-title">{t.version(state.app.version)}</div>
+          {line ? (
+            <div className={`row-desc${u.phase === "failed" ? " error-text" : ""}`} aria-live="polite">
+              {line}
+              {installable && u.notes ? <div style={{ marginTop: 3 }}>{u.notes}</div> : null}
+            </div>
+          ) : null}
+          {u.phase === "downloading" ? (
+            <div className="meter" aria-hidden="true">
+              <i style={{ width: `${percent ?? 4}%` }} />
+            </div>
+          ) : null}
+        </div>
+        {installable ? (
+          <button type="button" className="btn primary" disabled={working} onClick={() => run(() => backend.installUpdate())}>
+            {u.phase === "ready" ? t.restartNow : t.install}
+          </button>
+        ) : (
+          <button type="button" className="btn" disabled={!u.configured || working} onClick={() => run(() => backend.checkUpdate())}>
+            {t.check}
+          </button>
+        )}
       </div>
-      {info?.status === "available" && phase !== "checking" ? (
-        <button type="button" className="btn primary" disabled={phase === "installing"} onClick={() => void install()}>
-          {t.install}
-        </button>
-      ) : (
-        <button type="button" className="btn" disabled={!state.app.updater_ready || phase === "checking"} onClick={() => void check()}>
-          {t.check}
-        </button>
-      )}
-    </div>
+      <SwitchRow
+        title={t.autoUpdate}
+        desc={t.autoUpdateDesc}
+        checked={u.auto && u.configured && !u.blocked}
+        disabled={!u.configured || u.blocked !== null}
+        onChange={(v) => void act(() => backend.setAutoUpdate(v))}
+      />
+    </>
   );
 }
 
@@ -305,6 +338,11 @@ export function General() {
         <div className="group">
           <Updates />
         </div>
+        {state.update.blocked && state.update.configured ? (
+          <div style={{ marginTop: 8 }}>
+            <UpdateBlockedNotice />
+          </div>
+        ) : null}
       </Section>
 
       <Section>

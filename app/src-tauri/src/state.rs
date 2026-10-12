@@ -12,6 +12,7 @@ use tauri::{AppHandle, Wry};
 use tokio::sync::{watch, Notify};
 
 use crate::approvals::Approvals;
+use crate::updates::{UpdateStatus, Updates};
 use crate::i18n::Lang;
 use crate::prefs::{Prefs, PrefsFile};
 
@@ -37,6 +38,7 @@ pub struct Ctx {
     pub app: AppHandle,
     pub core: Core,
     pub approvals: Arc<Approvals>,
+    pub updates: Updates,
     pub prefs: Mutex<Prefs>,
     pub prefs_file: PrefsFile,
     /// Folders the owner picked in the native dialog during this run, plus
@@ -139,6 +141,8 @@ pub struct UiState {
     pub helper: InstallState,
     /// After a failed install: when the app tries again by itself.
     pub helper_retry_at: Option<i64>,
+    /// Updates of the app itself: phase, the setting, what blocks them.
+    pub update: UpdateStatus,
     pub grants: Vec<GrantDto>,
     pub prefs: PrefsDto,
     pub app: AppInfo,
@@ -160,6 +164,7 @@ pub async fn build_state(ctx: &Ctx) -> UiState {
         }),
         helper: ctx.core.cua_helper_state(),
         helper_retry_at: *ctx.helper_retry_at.lock().unwrap(),
+        update: ctx.updates.status(prefs.auto_update),
         grants: ctx
             .core
             .grant_list()

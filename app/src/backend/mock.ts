@@ -10,7 +10,11 @@
 //   &cua=ready|checking|downloading|installing|verifying|failed|noperm|half
 //        (installing plays the whole automatic install; failed takes
 //         &why=offline|download|checksum|disk|verify|unsupported|timeout)
-//   &update=available|none|unconfigured|error
+//   &update=checking|downloading|ready|available|applying|applied|failed|
+//           blocked|flow|unconfigured
+//        (failed takes &step=check|download|install; blocked takes
+//         &block=translocated|read_only|package; flow plays a whole
+//         automatic update: check, download, ready)
 //   &lang=en|ru  &theme=light|dark  &os=macos|windows|linux
 //
 // Nothing here touches the network, the disk or the real computer.
@@ -28,7 +32,8 @@ import type {
   Settings,
   UiEvent,
   UiState,
-  UpdateInfo,
+  UpdateBlock,
+  UpdateStatus,
 } from "./types";
 
 const params = new URLSearchParams(window.location.search);
@@ -161,7 +166,9 @@ class MockBackend implements Backend {
   private pendingCode: string | null = null;
   private permissions: { accessibility: boolean | null; screen_recording: boolean | null };
   private installTimers: number[] = [];
-  private update: UpdateInfo | "error";
+  /** The feed has this newer version to offer (mock scenarios). */
+  private offered: string | null = null;
+  private updateTimers: number[] = [];
   private workTimer: number | undefined;
 
   constructor() {
@@ -200,6 +207,7 @@ class MockBackend implements Backend {
       pending: null,
       helper: { state: "ready", version: "0.33.1" },
       helper_retry_at: null,
+      update: { phase: "idle", auto: true, configured: true, blocked: null, last_checked: now() - 3600, updated_from: null },
       grants: [
         { capability: "cookies", scope: "youtube.com", until: 0 },
         { capability: "cookies", scope: "github.com", until: now() + 5 * 3600 },
@@ -230,7 +238,6 @@ class MockBackend implements Backend {
     };
     // The two permissions exist on macOS only.
     this.permissions = os === "macos" ? { accessibility: true, screen_recording: true } : { accessibility: null, screen_recording: null };
-    this.update = { status: "up_to_date", version: null, notes: null };
     this.applyScenario();
   }
 
@@ -335,16 +342,63 @@ class MockBackend implements Backend {
         break;
     }
 
+    const base = { auto: true, configured: true, blocked: null, last_checked: now() - 600, updated_from: null };
+    const notes = "Faster reconnect after sleep. Clearer wording in the request window.";
     switch (params.get("update")) {
+      case "checking":
+        s.update = { ...base, phase: "checking" };
+        break;
+      case "downloading":
+        // Frozen mid-way, for a still picture.
+        s.update = { ...base, phase: "downloading", version: "0.2.0", received: 7_400_000, total: 18_200_000 };
+        break;
+      case "ready":
+        this.offered = "0.2.0";
+        s.update = { ...base, phase: "ready", version: "0.2.0", notes };
+        break;
       case "available":
-        this.update = { status: "available", version: "0.2.0", notes: "Faster reconnect after sleep. Clearer wording in the request window." };
+        // "Update automatically" is off: the app only says so.
+        this.offered = "0.2.0";
+        s.update = { ...base, auto: false, phase: "available", version: "0.2.0", notes };
+        break;
+      case "applying":
+        s.update = { ...base, phase: "applying", version: "0.2.0" };
+        break;
+      case "applied":
+        // The first run after an update.
+        s.app.version = "0.2.0";
+        s.update = { ...base, phase: "idle", updated_from: "0.1.0" };
+        this.journal.push({ time: now() - 40, capability: "app", action: "update", target: "0.2.0", outcome: "ok" });
+        break;
+      case "failed":
+      case "error": {
+        const step = (params.get("step") ?? (params.get("update") === "error" ? "check" : "install")) as "check" | "download" | "install";
+        this.offered = step === "check" ? null : "0.2.0";
+        s.update = {
+          ...base,
+          phase: "failed",
+          version: step === "check" ? null : "0.2.0",
+          step,
+          detail: step === "install" ? "the installed app did not pass the signature check" : "error sending request for url",
+        };
+        break;
+      }
+      case "blocked": {
+        const block = (params.get("block") ?? "translocated") as UpdateBlock;
+        if (block === "package") s.app.os = "linux";
+        s.update = { ...base, blocked: block, phase: "available", version: "0.2.0", notes };
+        break;
+      }
+      case "flow":
+        this.offered = "0.2.0";
+        this.playUpdate(1500);
+        break;
+      case "off":
+        s.update = { ...base, auto: false, phase: "idle" };
         break;
       case "unconfigured":
-        this.update = { status: "not_configured", version: null, notes: null };
+        s.update = { ...base, configured: false, last_checked: null, phase: "idle" };
         s.app.updater_ready = false;
-        break;
-      case "error":
-        this.update = "error";
         break;
     }
 
@@ -751,17 +805,74 @@ class MockBackend implements Backend {
     return this.changed();
   }
 
-  async checkUpdate() {
-    await this.reply(null, 900);
-    if (this.update === "error") throw "update_failed: could not reach the update server";
-    return structuredClone(this.update);
+  private setUpdate(patch: Partial<UpdateStatus>) {
+    this.state.update = { ...this.state.update, ...patch } as UpdateStatus;
+    this.emit({ type: "update", status: structuredClone(this.state.update) });
   }
 
+  /** A whole automatic update, as it runs in the background: check,
+   * download with progress, ready. (The restart waits for a quiet
+   * moment; "Restart now" plays it.) */
+  private playUpdate(startAfter = 0) {
+    this.updateTimers.forEach((t) => window.clearTimeout(t));
+    this.updateTimers = [];
+    const version = this.offered ?? "0.2.0";
+    const total = 18_200_000;
+    const notes = "Faster reconnect after sleep. Clearer wording in the request window.";
+    const at = (ms: number, patch: Partial<UpdateStatus>) =>
+      this.updateTimers.push(window.setTimeout(() => this.setUpdate(patch), startAfter + ms));
+    at(0, { phase: "checking" });
+    at(900, { phase: "downloading", version, received: 0, total, last_checked: now() } as Partial<UpdateStatus>);
+    for (let i = 1; i <= 12; i++) {
+      at(900 + i * 250, { phase: "downloading", version, received: Math.round((total * i) / 12), total } as Partial<UpdateStatus>);
+    }
+    at(4200, { phase: "ready", version, notes } as Partial<UpdateStatus>);
+  }
+
+  async checkUpdate() {
+    const u = this.state.update;
+    if (!u.configured) return this.snapshot();
+    this.setUpdate({ phase: "checking" });
+    await this.reply(null, 900);
+    if (this.offered === null) {
+      this.setUpdate({ phase: "idle", last_checked: now() });
+    } else if (u.blocked || !u.auto) {
+      this.setUpdate({ phase: "available", version: this.offered, notes: null, last_checked: now() } as Partial<UpdateStatus>);
+    } else {
+      this.playUpdate();
+    }
+    return this.snapshot();
+  }
+
+  /** "Install and restart" / "Restart now": in the app the window goes
+   * away and comes back as the new version; here the state just moves. */
   async installUpdate() {
+    const version = this.offered ?? "0.2.0";
+    if (this.state.update.blocked) throw "blocked";
+    this.updateTimers.forEach((t) => window.clearTimeout(t));
+    this.setUpdate({ phase: "applying", version } as Partial<UpdateStatus>);
     await this.reply(null, 1800);
-    this.state.app.version = "0.2.0";
-    this.update = { status: "up_to_date", version: null, notes: null };
+    const from = this.state.app.version;
+    this.state.app.version = version;
+    this.offered = null;
+    this.setUpdate({ phase: "idle", updated_from: from, last_checked: now() });
+    this.record("app", "update", version, "ok");
     this.emit({ type: "state" });
+    return this.snapshot();
+  }
+
+  setAutoUpdate(enabled: boolean) {
+    this.state.update.auto = enabled;
+    const u = this.state.update;
+    if (enabled && u.phase === "available" && !u.blocked) this.playUpdate(300);
+    return this.changed();
+  }
+
+  /** Review control: a new version shows up in the feed. */
+  simulateUpdate() {
+    this.offered = "0.2.0";
+    if (this.state.app.version === "0.2.0") this.state.app.version = "0.1.0";
+    void this.checkUpdate();
   }
 
   diagnostics() {

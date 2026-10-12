@@ -32,6 +32,7 @@
     "allow-set-stop-shortcut",
     "allow-check-update",
     "allow-install-update",
+    "allow-set-auto-update",
     "allow-diagnostics",
     "allow-open-external"
   ]

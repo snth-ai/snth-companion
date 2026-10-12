@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { buildLines, dayLabel, formatClock, type LineKind } from "../lib/format";
 import { useStore } from "../lib/store";
-import { IconCookie, IconFolder, IconGlobe, IconLink, IconPointer } from "../ui/icons";
+import { IconCookie, IconFolder, IconGlobe, IconLink, IconPointer, IconUpdate } from "../ui/icons";
 
 type Filter = "all" | "net" | "cookies" | "computer" | "files";
 
@@ -11,6 +11,7 @@ const ICONS: Record<LineKind, () => React.JSX.Element> = {
   computer: IconPointer,
   files: IconFolder,
   link: IconLink,
+  app: IconUpdate,
 };
 
 export function Activity() {

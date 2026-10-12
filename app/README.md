@@ -4,10 +4,10 @@ The tray app that links a person's computer to their synth. A Tauri 2 shell
 (`src-tauri/`, Rust) holds one `connect_core::Core` (`../crates/connect-core`)
 and shows it through a React + TypeScript UI (`src/`).
 
-Status: the shell compiles, its unit tests pass and a debug `.app` bundle
-builds. It has NOT been launched: nothing here was verified in a running
-window, against a real synth, signed, or on Windows / Linux. See "Not
-verified" at the end.
+Status: runs for real on macOS (one Mac linked to a live synth, the helper
+installs itself, computer control works under the app's own permissions).
+Windows and Linux builds exist in CI but have not been used. What has never
+been exercised is listed under "Not verified" at the end.
 
 ## Layout
 
@@ -31,6 +31,7 @@ app/
     src/actions.rs     pause / resume / quit / deep link / stop shortcut
     src/windows.rs     main + approval windows, navigation guard
     src/tray.rs        tray icon and menu
+    src/updates.rs     automatic updates of the app itself
     src/menu.rs        macOS application menu (clean Cmd+Q, Edit menu)
     src/browsers.rs    where browsers keep cookies; the Chromium key source
     src/state.rs       shared context and the UiState the UI renders
@@ -64,7 +65,7 @@ URL parameters stage a screen or a state directly:
 | `approval` | `net`, `cookies`, `computer`, `foreground`, `files`, `other`, `queue` (shows the approval window alone) |
 | `preset` | `careful` (default), `balanced`, `full` |
 | `cua` | the helper: `ready` (default), `checking`, `downloading` (frozen at 42%), `installing` (plays the whole automatic install, about 7 s), `verifying`, `failed` (with `why=offline`, `download`, `checksum`, `disk`, `verify`, `unsupported`, `timeout`); the macOS permissions: `noperm`, `half` |
-| `update` | `available`, `unconfigured`, `error` |
+| `update` | the app's own updates: `checking`, `downloading` (frozen at 40%), `ready` (downloaded, waiting for a quiet moment), `available` (the setting is off), `applying`, `applied` (first run after an update), `failed` (with `step=check`, `download`, `install`), `blocked` (with `block=translocated`, `read_only`, `package`), `flow` (plays check, download, ready), `off`, `unconfigured` |
 | `pair` | a 6-digit code: behaves as if `snth://pair?code=...` was opened |
 | `lang` | `en`, `ru` |
 | `theme` | `light`, `dark` |
@@ -98,73 +99,132 @@ A debug build keeps the pairing token in a 0600 file in the config dir; a
 release build uses the OS keychain. Do not judge keychain behaviour from a
 debug build.
 
-## Before a real release
+## Releasing
 
-### 1. Updater signing key (required for auto-update)
+Variant A: Windows and Linux are built by CI, macOS is built, signed and
+notarized on the release Mac. A macOS update that is unsigned or signed by
+someone else would make macOS forget the permissions a tester gave the app,
+so the macOS half never comes from CI.
 
-The app verifies every update against a public key in
-`src-tauri/tauri.conf.json` (`plugins.updater.pubkey`). The repo ships the
-placeholder `REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY`. While it is there the
-updater plugin is not loaded and General shows "Updates are not set up in
-this build".
+Every installed copy checks
+`https://github.com/snth-ai/snth-companion/releases/latest/download/latest.json`
+(shortly after launch, then about every six hours). "Latest" is the newest
+PUBLISHED release of that repo that is not a pre-release, so a draft reaches
+nobody, and no other kind of release may be published as "latest" there.
 
-Run once, on a machine you trust, and choose a password when asked:
+### The runbook
 
-```
-cd app
-npm run tauri signer generate -- -w ~/.tauri/snth-connect.key
-```
+1. Bump the version in `app/package.json` (the only place; `tauri.conf.json`
+   reads it). Commit.
+2. Tag that commit `connect-v<version>` and push the tag.
+3. Wait for the `connect-release` workflow to finish green. It creates a
+   DRAFT release for the tag with the Windows installer, the Linux AppImage
+   and .deb, their `.sig` files and `latest.json`.
+4. On the release Mac, on that same commit:
 
-This writes the private key to `~/.tauri/snth-connect.key` and the public key
-to `~/.tauri/snth-connect.key.pub` (it is also printed).
+   ```
+   scripts/release-macos.sh <version>
+   ```
 
-- Public key: paste the contents of the `.pub` file as the value of
-  `plugins.updater.pubkey` in `src-tauri/tauri.conf.json`, and commit that.
-- Private key: the contents of `~/.tauri/snth-connect.key` go into the GitHub
-  secret `TAURI_SIGNING_PRIVATE_KEY`; the password into
-  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Never commit the private key.
+   It builds the arm64 app signed with the Developer ID (hardened runtime),
+   notarizes and staples it, checks it with `codesign` and `spctl`, makes a
+   signed and notarized DMG (first install) and the `.app.tar.gz` of the
+   stapled app with its updater signature, uploads all three to the draft
+   release, and adds `darwin-aarch64` to the release's `latest.json`. It
+   stops with an error if the release or `latest.json` is missing, if the
+   built app is not `<version>`, or if any check fails. It can be run again.
+   `--dry-run` does everything except notarization, upload and the
+   `latest.json` edit; `--no-upload` keeps everything local;
+   `--universal` makes one build for Apple silicon and Intel (needs
+   `rustup target add x86_64-apple-darwin`, about twice the build time,
+   never tried).
+5. Check the draft: it must hold the `.dmg`, the `.app.tar.gz` and its
+   `.sig`, the Windows `-setup.exe` (+ `.sig`), the `.AppImage` (+ `.sig`),
+   the `.deb`, and a `latest.json` whose `platforms` lists `darwin-aarch64`,
+   `windows-x86_64` and `linux-x86_64`. Install the DMG on a Mac once.
+6. Publish the release (not as a pre-release). From that moment installed
+   copies find it at their next check and update themselves.
 
-Keep a safe copy of the private key and its password. If they are lost,
-installed copies can never be updated again: they only accept updates signed
-with that key.
+If macOS is published late, Mac copies simply see no update for their
+platform until `latest.json` has the darwin entry; nothing breaks.
 
-The update feed is
-`https://github.com/snth-ai/snth-companion/releases/latest/download/latest.json`.
-`tauri-action` writes `latest.json` into the release when the signing key is
-present. A release must be published (not a draft) to become "latest".
+What the script needs on the release Mac: the certificate `Developer ID
+Application: Aleksandr Sabri (CZAP38JFAE)` and the notary profile
+`SNTH_NOTARY` in the login keychain, the updater key at
+`~/.tauri/snth-connect.key`, its password in the login keychain (service
+`snth-connect-updater-key-password`), and `gh` signed in with write access
+to the repo. The header of the script lists the environment overrides.
 
-### 2. macOS signing and notarization (optional in CI)
+### What an installed copy does with an update
 
-`.github/workflows/connect-release.yml` signs and notarizes only when these
-repository secrets exist; otherwise it builds unsigned and says so in a
-warning.
+- With "Update automatically" on (the default): it downloads and verifies the
+  new version in the background, then switches to it when nothing is in
+  flight (the synth has no stream open, no request window is waiting, the
+  helper is not being installed) and the person has been away from the
+  computer for three minutes, or the app was started hidden at login and its
+  window was never opened. It also switches when the person quits the app
+  (without coming back, since they quit). After a switch at a quiet moment it
+  comes back the way it was: tray only if the window was hidden, still paused if it was
+  paused, and it links again by itself.
+- With the setting off: General says that a version is available; the button
+  installs it and restarts.
+- Offline, feed errors and broken downloads are silent and tried again later.
+- A failed install leaves the old version running (on macOS the app keeps a
+  safety copy of itself during the switch and puts it back if the new bundle
+  is missing or fails `codesign --verify`).
+- Each update writes one line to Activity ("updated itself to version X"),
+  and the synth learns the new version in the next hello.
 
-| Secret | What |
-|---|---|
-| `APPLE_CERTIFICATE` | the Developer ID Application certificate, exported as `.p12`, base64 encoded |
-| `APPLE_CERTIFICATE_PASSWORD` | the password of that `.p12` |
-| `APPLE_SIGNING_IDENTITY` | for example `Developer ID Application: Name (TEAMID)` |
-| `APPLE_API_KEY` | App Store Connect API key id (for notarization) |
-| `APPLE_API_ISSUER` | the issuer id of that key |
-| `APPLE_API_KEY_P8` | the contents of the `AuthKey_<id>.p8` file |
+### First install, per system
 
-An unsigned macOS build is stopped by Gatekeeper for ordinary users. Signing
-locally after an unsigned CI build is the other route.
+- **macOS**: download the `.dmg`, open it, DRAG "SNTH Connect" onto the
+  Applications shortcut in the same window, then open it from Applications.
+  This matters: an app opened straight from the disk image or from Downloads
+  runs from a read-only copy that macOS makes, cannot update itself, and may
+  lose its permissions at every start. The app says so on its first screen
+  when it finds itself in that state.
+- **Windows**: download the `-setup.exe` and run it. The installer is not
+  signed with a Windows certificate, so SmartScreen shows "Windows protected
+  your PC": click "More info", then "Run anyway". It installs for the
+  current user, no administrator rights.
+- **Linux**: the `.AppImage` is the one that updates itself: make it
+  executable (`chmod +x`) and run it from a folder you own. The `.deb`
+  installs like any package, but then the package manager owns the files:
+  that copy only tells you a new version exists (General, with a button to
+  the download page) and you install the new `.deb` yourself.
 
-### 3. Hub address
+### Which version does a tester run
+
+- In the app: General, Updates, "Version X". Diagnostics (same page) has
+  "Copy diagnostics" with the version, the update state and the link state.
+- From the synth's side: the app reports `app_version` in its hello; the
+  synth's `device_status` tool and its `connect_devices` table show it.
+- Activity shows the moment of each update.
+
+### The updater key
+
+Updates are accepted only when signed with the key whose public half is in
+`src-tauri/tauri.conf.json` (`plugins.updater.pubkey`). The private half is
+`~/.tauri/snth-connect.key` on the release Mac and the GitHub secret
+`TAURI_SIGNING_PRIVATE_KEY` (password: `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`,
+and the login keychain on the Mac). Keep a copy of both somewhere safe.
+
+If the key or its password is lost: copies that are already installed can
+never be updated again, because they trust only that key. The way out is a
+new key (`npm run tauri signer generate -- -w ~/.tauri/snth-connect.key`),
+its public half in `tauri.conf.json`, the new private half in the secrets
+and the keychain, a new release, and every tester installing that release
+by hand once. From then on updates work again. If the key leaks, do the
+same: whoever has it can sign an update the apps would accept (they would
+still have to get it into the release feed).
+
+### Hub address
 
 The pairing server is fixed at build time: `https://hub.snth.ai` unless the
 environment variable `SNTH_HUB_URL` is set when the Rust crate is compiled
-(`SNTH_HUB_URL=https://... npm run tauri build`). The onboarding screen has a
+(`SNTH_HUB_URL=https://... npm run tauri build`, also honoured by the
+release script and the workflow if set there). The onboarding screen has a
 hidden "Advanced" override that accepts only `https://` addresses.
-
-### 4. Version and release
-
-The version lives in `app/package.json` (`tauri.conf.json` reads it). To
-release: bump it, commit, push the tag `connect-v<version>`. The workflow
-attaches the installers to a draft release; check them, then publish.
-
-The workflow has never been run. Treat its first run as a test.
 
 ## How the shell is put together
 
@@ -176,6 +236,12 @@ The workflow has never been run. Treat its first run as a test.
   refusals.
 - Pause is remembered (`shell.json`): a relaunch stays paused until the owner
   resumes.
+- Updates of the app itself are in `src/updates.rs`: the schedule, the quiet
+  moment, the macOS safety copy, and the relaunch (a small shell waits for
+  the old process to end and opens the app through the system, so macOS
+  attributes the new process to the app itself and the single-instance check
+  finds nothing in the way). What blocks self-update is detected at start:
+  a translocated or unwritable location on macOS, a system package on Linux.
 - The helper for computer control (Cua Driver) is the app's own pinned copy
   in `<app data>/cua/releases/<version>/`. `spawn_helper` in `main.rs` checks
   it at every launch, in the background, and installs it when it is missing
@@ -213,19 +279,32 @@ The workflow has never been run. Treat its first run as a test.
 
 ## Not verified
 
-- The app was never launched: tray, window hiding, single instance, autostart,
-  deep link, global shortcut, notifications, the approval window and the
-  updater are written against the Tauri 2.11 APIs and compile, nothing more.
-- No real pairing, no real link, no real approval round trip.
-- No Keychain access (token store or the browser key), no real cookie read.
-- The helper install was run for real once, into a temp dir, through the
-  core's installer (download, hash check, unpack, `--version`). It was never
-  run from the app, and the installed helper was never started as a daemon.
-- The macOS permission flow (the app asking for Accessibility and Screen
-  Recording itself, the embedded helper working under those grants) follows
-  the driver's embedding guide but was never exercised: it needs a launched,
-  signed app.
-- Windows and Linux builds, the helper install there (the `.zip` is unpacked
-  with the system `tar`), and the CI workflow.
+- An update round trip. It needs two published versions; see "Testing the
+  first update" below. Until then the whole apply path (download, safety
+  copy, install, relaunch through `open`, coming back hidden or shown) is
+  compiled and unit-tested in pieces only.
+- The release workflow as a whole, the Linux build, and the Windows update
+  (the installer restarts the app; the app only stores how to come back).
+- `scripts/release-macos.sh` was run with `--dry-run` only: notarization,
+  stapling, the upload and the `latest.json` edit have never run.
+- Beyond what the first real run showed (pairing, the link, the helper
+  install, computer control), nothing tests the shell's windows, tray,
+  autostart, stop shortcut and notifications.
 - Metered-connection detection is not implemented, so "Do not use on metered
   connections" is shown as unavailable.
+
+### Testing the first update
+
+1. Release `0.1.x` as above and install it from the DMG into Applications.
+   Link it, grant the permissions.
+2. Release the next version (any visible change) and publish it.
+3. In the installed app: General, "Check now". It should show the download,
+   then "Version X is downloaded...". Click "Restart now": the window goes
+   away and comes back as the new version, Activity has the update line,
+   General says "Updated from version ...", the link is back, and the two
+   macOS permissions are still granted (computer control still works).
+4. Repeat with a third version without touching the app: leave it in the
+   tray, lock the screen for a few minutes, and check that it switched by
+   itself and came back tray-only.
+5. The traps: open a copy straight from the mounted DMG and check that the
+   first screen says to move it to Applications.

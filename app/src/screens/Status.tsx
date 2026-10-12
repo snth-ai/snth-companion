@@ -5,6 +5,7 @@ import { useActiveEntry, useNow, useStore } from "../lib/store";
 import { Notice, Section } from "../ui/controls";
 import { IconChevron, IconCookie, IconFolder, IconGlobe, IconPause, IconPlay, IconPointer, IconBlock } from "../ui/icons";
 import type { Screen } from "../App";
+import { UpdateBlockedNotice } from "./General";
 
 export function Status(props: { go: (screen: Screen) => void }) {
   const { state, journal, s, lang, name, act } = useStore();
@@ -76,6 +77,14 @@ export function Status(props: { go: (screen: Screen) => void }) {
     <>
       <h1 className="page-title">{name}</h1>
       <p className="page-lead">{linkLine}</p>
+
+      {/* macOS: running from the download or a disk image. Worth saying on
+          the first screen: the app should be moved before anything else. */}
+      {state.update.configured && (state.update.blocked === "translocated" || state.update.blocked === "read_only") ? (
+        <div style={{ marginTop: 16 }}>
+          <UpdateBlockedNotice />
+        </div>
+      ) : null}
 
       {state.needs_repair ? (
         <div style={{ marginTop: 16 }}>

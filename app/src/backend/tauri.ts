@@ -42,6 +42,7 @@ export const tauriBackend: Backend = {
   setStopShortcut: (accelerator) => invoke("set_stop_shortcut", { accelerator }),
   checkUpdate: () => invoke("check_update"),
   installUpdate: () => invoke("install_update"),
+  setAutoUpdate: (enabled) => invoke("set_auto_update", { enabled }),
   diagnostics: () => invoke("diagnostics"),
   openExternal: (target) => invoke("open_external", { target }),
 

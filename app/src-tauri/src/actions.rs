@@ -37,9 +37,23 @@ pub fn resume(ctx: &Arc<Ctx>) {
     ui::emit(&ctx.app, UiEvent::State);
 }
 
-/// Quit for real (the tray's Quit): stop the link, stop our own helper
-/// daemon if one is running, write what is batched, exit.
+/// Quit for real (the tray's Quit, Cmd+Q): stop the link, stop our own
+/// helper daemon if one is running, write what is batched, exit. A
+/// downloaded update is put in place on the way out.
 pub async fn quit(ctx: &Arc<Ctx>) {
+    stop_everything(ctx).await;
+    crate::updates::apply_at_quit(ctx).await;
+    ctx.app.exit(0);
+}
+
+/// Leave without the quit-time extras: used right after an update was
+/// installed, when a relaunch is already scheduled.
+pub async fn exit(ctx: &Arc<Ctx>) {
+    stop_everything(ctx).await;
+    ctx.app.exit(0);
+}
+
+async fn stop_everything(ctx: &Arc<Ctx>) {
     let _ = ctx.shutdown.send(true);
     ctx.core.cua_stop_install();
     ctx.approvals.deny_all();
@@ -47,7 +61,6 @@ pub async fn quit(ctx: &Arc<Ctx>) {
     // not remembered: only the owner's own pause survives a relaunch.
     let _ = tokio::time::timeout(Duration::from_secs(4), ctx.core.pause()).await;
     ctx.core.flush();
-    ctx.app.exit(0);
 }
 
 /// `snth://pair?code=XXXXXX`. Any web page can open such a link, so this

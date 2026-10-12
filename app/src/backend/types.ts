@@ -96,6 +96,7 @@ export interface UiState {
   helper: HelperState;
   /** After a failed install: when the app tries again (unix seconds). */
   helper_retry_at: number | null;
+  update: UpdateStatus;
   grants: Grant[];
   prefs: {
     onboarded: boolean;
@@ -160,17 +161,37 @@ export interface CuaStatus {
   screen_recording: boolean | null;
 }
 
-export interface UpdateInfo {
-  status: "not_configured" | "up_to_date" | "available";
-  version: string | null;
-  notes: string | null;
-}
+/** Why this copy of the app cannot replace itself. */
+export type UpdateBlock = "translocated" | "read_only" | "package";
+
+export type UpdatePhase =
+  | { phase: "idle" | "checking" }
+  | { phase: "downloading"; version: string; received: number; total: number | null }
+  /** ready: downloaded, waiting for a quiet moment. available: not
+   * downloaded (the setting is off, or the app cannot replace itself). */
+  | { phase: "ready" | "available"; version: string; notes: string | null }
+  | { phase: "applying"; version: string }
+  | { phase: "failed"; version: string | null; step: "check" | "download" | "install"; detail: string };
+
+/** Updates of the app itself. */
+export type UpdateStatus = UpdatePhase & {
+  /** The "Update automatically" setting. */
+  auto: boolean;
+  /** False in a build without the updater key. */
+  configured: boolean;
+  blocked: UpdateBlock | null;
+  /** Unix seconds of the last successful check. */
+  last_checked: number | null;
+  /** This run is the first after an update from that version. */
+  updated_from: string | null;
+};
 
 export type ExternalTarget = "privacy_accessibility" | "privacy_screen" | "helper" | "releases";
 
 export type UiEvent =
   | { type: "state" }
   | { type: "helper"; state: HelperState }
+  | { type: "update"; status: UpdateStatus }
   | { type: "journal"; entry: Entry }
   | { type: "approval"; request: ApprovalRequest }
   | { type: "approval_closed"; id: number }
@@ -215,8 +236,11 @@ export interface Backend {
   setLanguage(language: string | null, resolved: string): Promise<UiState>;
   setAutostart(enabled: boolean): Promise<UiState>;
   setStopShortcut(accelerator: string): Promise<UiState>;
-  checkUpdate(): Promise<UpdateInfo>;
-  installUpdate(): Promise<void>;
+  /** "Check now". Progress after it arrives as `update` events. */
+  checkUpdate(): Promise<UiState>;
+  /** Install the new version and restart into it now. */
+  installUpdate(): Promise<UiState>;
+  setAutoUpdate(enabled: boolean): Promise<UiState>;
   diagnostics(): Promise<string>;
   openExternal(target: ExternalTarget): Promise<void>;
 

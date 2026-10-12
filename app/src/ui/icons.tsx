@@ -115,6 +115,13 @@ export const IconLink = () => (
   </Svg>
 );
 
+export const IconUpdate = () => (
+  <Svg>
+    <path d="M8 2.5v7M5 6.8l3 3 3-3" />
+    <path d="M2.5 10.5v1.5A1.5 1.5 0 0 0 4 13.5h8a1.5 1.5 0 0 0 1.5-1.5v-1.5" />
+  </Svg>
+);
+
 export const IconBlock = () => (
   <Svg>
     <circle cx="8" cy="8" r="6" />

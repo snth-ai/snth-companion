@@ -19,6 +19,8 @@ pub enum UiEvent {
     State,
     /// The helper install moved on (also every progress step).
     Helper { state: connect_core::InstallState },
+    /// The app's own update moved on (also every download step).
+    Update { status: crate::updates::UpdateStatus },
     /// One new line in the activity journal.
     Journal { entry: connect_core::Entry },
     /// The core asks the owner something.

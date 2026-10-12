@@ -3759,6 +3759,7 @@ dependencies = [
  "connect-core",
  "directories",
  "keyring",
+ "libc",
  "serde",
  "serde_json",
  "tauri",

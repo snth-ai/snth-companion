@@ -40,6 +40,7 @@ const COMMANDS: &[&str] = &[
     "set_stop_shortcut",
     "check_update",
     "install_update",
+    "set_auto_update",
     "diagnostics",
     "open_external",
 ];

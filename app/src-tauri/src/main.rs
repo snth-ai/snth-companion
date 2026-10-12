@@ -16,11 +16,13 @@ mod prefs;
 mod state;
 mod tray;
 mod ui;
+mod updates;
 mod windows;
 
 use std::collections::HashSet;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use connect_core::{
@@ -81,7 +83,7 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
     std::fs::create_dir_all(&data_dir)?;
 
     let prefs_file = PrefsFile::new(config_dir.join("shell.json"));
-    let prefs = prefs_file.load();
+    let mut prefs = prefs_file.load();
     let was_paused = prefs.paused;
     let stop_shortcut = prefs.stop_shortcut.clone();
     let onboarded = prefs.onboarded;
@@ -105,11 +107,19 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
         cua_attach: CuaAttach::Private,
     });
 
+    // The first run of a new version: one line in the journal. And an
+    // update restart leaves word whether to come back hidden.
+    let version = app.package_info().version.to_string();
+    let updated_from = updates::note_version(&mut prefs, &version, core.shared().journal());
+    let resume_hidden = prefs.resume_hidden.take();
+    prefs_file.save(&prefs);
+
     let (shutdown, shutdown_rx) = watch::channel(false);
     let ctx = Arc::new(Ctx {
         app: handle.clone(),
         core: core.clone(),
         approvals,
+        updates: updates::Updates::new(updater_ready, updated_from),
         prefs: Mutex::new(prefs),
         prefs_file,
         offered_roots: Mutex::new(HashSet::new()),
@@ -137,15 +147,20 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
     // Subscribe before the link starts so no event is missed.
     spawn_event_forwarder(ctx.clone());
     spawn_link(ctx.clone(), shutdown_rx.clone());
-    spawn_helper(ctx.clone(), shutdown_rx);
+    spawn_helper(ctx.clone(), shutdown_rx.clone());
+    updates::spawn(ctx.clone(), shutdown_rx);
 
     tray::build(&handle, &ctx)?;
     #[cfg(target_os = "macos")]
     menu::install(&handle)?;
 
-    // Launched at login: stay in the tray, unless there is something the
+    // Launched at login, or back from an update that happened while the
+    // window was hidden: stay in the tray, unless there is something the
     // owner has to do first (pair or finish onboarding).
-    let hidden = std::env::args().any(|a| a == HIDDEN_FLAG) && onboarded && core.is_paired();
+    let asked_hidden = resume_hidden.unwrap_or_else(|| std::env::args().any(|a| a == HIDDEN_FLAG));
+    let hidden = asked_hidden && onboarded && core.is_paired();
+    ctx.updates.started_hidden.store(hidden, Ordering::Release);
+    ctx.updates.window_was_shown.store(!hidden, Ordering::Release);
     windows::create_main(&handle, !hidden)?;
     #[cfg(target_os = "macos")]
     {
@@ -361,6 +376,7 @@ fn main() {
             commands::set_stop_shortcut,
             commands::check_update,
             commands::install_update,
+            commands::set_auto_update,
             commands::diagnostics,
             commands::open_external,
         ])

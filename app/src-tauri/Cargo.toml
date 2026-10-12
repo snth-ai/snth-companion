@@ -30,3 +30,7 @@ serde.workspace = true
 serde_json.workspace = true
 keyring.workspace = true
 directories.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# access(2): can the app replace itself where it runs (updates.rs)?
+libc = "0.2"

@@ -19,7 +19,7 @@ use tauri_plugin_dialog::DialogExt;
 use crate::i18n::Lang;
 use crate::state::{build_state, matching_preset, Ctx, PendingDto, UiState, HUB_URL};
 use crate::ui::{self, UiEvent};
-use crate::{actions, tray, windows};
+use crate::{actions, tray, updates, windows};
 
 type Cx<'a> = State<'a, Arc<Ctx>>;
 
@@ -514,50 +514,34 @@ pub async fn set_stop_shortcut(ctx: Cx<'_>, accelerator: String) -> Result<UiSta
     }
 }
 
-#[derive(Serialize)]
-pub struct UpdateDto {
-    /// "not_configured" | "up_to_date" | "available"
-    status: &'static str,
-    version: Option<String>,
-    notes: Option<String>,
+/// "Check now": ask the release feed. The answer (and every step after
+/// it) is in the returned state and in `update` events.
+#[tauri::command]
+pub async fn check_update(ctx: Cx<'_>) -> Result<UiState, String> {
+    updates::check_by_owner(&ctx).await;
+    Ok(build_state(&ctx).await)
 }
 
+/// "Install and restart": download if needed, put the new version in
+/// place and restart into it now. On success the app is gone before this
+/// returns; an error means the current version keeps running.
 #[tauri::command]
-pub async fn check_update(app: AppHandle, ctx: Cx<'_>) -> Result<UpdateDto, String> {
-    if !ctx.updater_ready {
-        return Ok(UpdateDto { status: "not_configured", version: None, notes: None });
-    }
-    use tauri_plugin_updater::UpdaterExt;
-    let updater = app.updater().map_err(|e| format!("update_failed: {e}"))?;
-    match updater.check().await {
-        Ok(Some(u)) => Ok(UpdateDto {
-            status: "available",
-            version: Some(u.version.clone()),
-            notes: u.body.clone(),
-        }),
-        Ok(None) => Ok(UpdateDto { status: "up_to_date", version: None, notes: None }),
-        Err(e) => Err(format!("update_failed: {e}")),
-    }
+pub async fn install_update(ctx: Cx<'_>) -> Result<UiState, String> {
+    let result = updates::install_by_owner(&ctx).await;
+    let state = build_state(&ctx).await;
+    result.map(|()| state)
 }
 
-/// Download the update, verify its signature against the configured
-/// public key, install it and restart.
+/// The "Update automatically" switch.
 #[tauri::command]
-pub async fn install_update(app: AppHandle, ctx: Cx<'_>) -> Result<(), String> {
-    if !ctx.updater_ready {
-        return Err("not_configured".into());
+pub async fn set_auto_update(ctx: Cx<'_>, enabled: bool) -> Result<UiState, String> {
+    ctx.update_prefs(|p| p.auto_update = enabled);
+    if enabled {
+        // An update that was only announced so far is fetched right away.
+        let ctx = ctx.inner().clone();
+        tauri::async_runtime::spawn(async move { updates::fetch_if_wanted(&ctx).await });
     }
-    use tauri_plugin_updater::UpdaterExt;
-    let updater = app.updater().map_err(|e| format!("update_failed: {e}"))?;
-    let Some(update) = updater.check().await.map_err(|e| format!("update_failed: {e}"))? else {
-        return Err("up_to_date".into());
-    };
-    update
-        .download_and_install(|_, _| {}, || {})
-        .await
-        .map_err(|e| format!("update_failed: {e}"))?;
-    ctx.core.flush();
-    app.restart();
+    Ok(build_state(&ctx).await)
 }
 
 /// Plain-text facts for a support request. No token, no cookie data, no
@@ -577,7 +561,8 @@ pub async fn diagnostics(ctx: Cx<'_>) -> Result<String, String> {
         format!("system: {} {}", st.app.os, st.app.arch),
         format!("hub: {}", st.app.hub_url),
         format!("key storage: {}", st.app.secret_store),
-        format!("updates configured: {}", st.app.updater_ready),
+        format!("updates: configured {}, automatic {}, blocked {:?}, state {:?}",
+            st.update.configured, st.update.auto, st.update.blocked, st.update.phase),
         String::new(),
         format!("linked: {} (state {:?}, paused {})", c.paired, c.link_state, c.paused),
         format!("link detail: {}", if st.link_detail.is_empty() { "-" } else { &st.link_detail }),

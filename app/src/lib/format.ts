@@ -186,7 +186,7 @@ export function grantTime(grant: Grant, s: Strings, lang: Lang): string {
 
 // --- the activity journal in plain words ---
 
-export type LineKind = "net" | "cookies" | "computer" | "files" | "link";
+export type LineKind = "net" | "cookies" | "computer" | "files" | "link" | "app";
 
 export interface Line {
   key: string;
@@ -274,6 +274,9 @@ export function describeEntry(entry: Entry, s: Strings, lang: Lang): Omit<Line, 
     }
     case "link":
       return { ...base, kind: "link", text: j.linkUp, note: "" };
+    case "app":
+      if (entry.action === "update") return { ...base, kind: "app", text: j.appUpdate(entry.target), note: "" };
+      return { ...base, kind: "app", text: j.other(entry.action, entry.target), note: "" };
     default:
       return { ...base, kind: "link", text: j.other(entry.action, entry.target), note: refused ? why : "" };
   }

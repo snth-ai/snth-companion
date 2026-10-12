@@ -285,6 +285,7 @@ export const en = {
     taskRefused: "Refused a computer task",
     taskFailed: "Could not start a computer task",
     linkUp: "Link is up",
+    appUpdate: (version: string) => `SNTH Connect updated itself to version ${version}`,
     askNoAnswer: (t: string) => `A request about ${t} got no answer and was refused`,
     tool: {
       click: "Clicked",
@@ -346,13 +347,35 @@ export const en = {
     updates: "Updates",
     version: (v: string) => `Version ${v}`,
     check: "Check now",
-    checking: "Checking...",
+    autoUpdate: "Update automatically",
+    autoUpdateDesc: "SNTH Connect downloads new versions by itself and switches to them when you are away and nothing is running.",
     upToDate: "You have the latest version.",
+    lastChecked: (time: string) => `Up to date. Last checked at ${time}.`,
+    updatedFrom: (from: string) => `Updated from version ${from}.`,
+    checking: "Checking...",
+    downloading: (v: string, percent: number | null) =>
+      percent === null ? `Downloading version ${v}...` : `Downloading version ${v}... ${percent}%`,
+    ready: (v: string) =>
+      `Version ${v} is downloaded. SNTH Connect switches to it by itself when you are away and nothing is running, or when you quit.`,
+    restartNow: "Restart now",
     available: (v: string) => `Version ${v} is available.`,
     install: "Install and restart",
-    installing: "Installing...",
+    applying: (v: string) => `Installing version ${v}...`,
+    failedCheck: "Could not check for updates. Try again later.",
+    failedDownload: (v: string) => `Version ${v} could not be downloaded. Try again later.`,
+    failedInstall: (v: string) =>
+      `Version ${v} could not be installed. The version you have keeps working, and SNTH Connect tries again later.`,
     notConfigured: "Updates are not set up in this build.",
-    updateFailed: "Could not check for updates. Try again later.",
+    blockedTitle: "SNTH Connect cannot update itself here",
+    blocked: {
+      translocated:
+        "macOS is running SNTH Connect from a temporary copy, because it was opened straight from the download. Quit SNTH Connect, drag it into the Applications folder, and open it from there.",
+      read_only:
+        "SNTH Connect is in a place it is not allowed to change, for example a disk image or a folder that belongs to another account. Quit it, drag it into the Applications folder, and open it from there.",
+      package:
+        "This copy was installed as a system package, so it does not replace itself. Download the new package to update.",
+    } as Record<string, string>,
+    blockedDownload: "Open the download page",
     unlink: "Unlink this computer",
     unlinkDesc: (n: string) => `Ends the connection with ${n}.`,
     unlinkButton: "Unlink...",
@@ -498,6 +521,7 @@ export const en = {
     work: "Start working",
     stopWork: "Stop working",
     link: "Deep link",
+    update: "New version appears",
     helperInstall: "Run helper install",
     helperFail: "Fail helper install",
     drop: "Drop link",

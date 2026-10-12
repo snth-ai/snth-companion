@@ -31,6 +31,21 @@ pub struct Prefs {
     /// The owner paused and has not resumed: a relaunch stays paused.
     #[serde(default)]
     pub paused: bool,
+    /// "Update automatically": download new versions and switch to them
+    /// at a quiet moment. Off = only say that one is available.
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
+    /// The version that ran last, to notice the first run after an update.
+    #[serde(default)]
+    pub last_version: Option<String>,
+    /// Set right before an update restart: come back hidden (tray only)
+    /// or with the window, as it was. Used once at the next launch.
+    #[serde(default)]
+    pub resume_hidden: Option<bool>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_shortcut() -> String {
@@ -46,6 +61,9 @@ impl Default for Prefs {
             autostart: false,
             stop_shortcut: default_shortcut(),
             paused: false,
+            auto_update: true,
+            last_version: None,
+            resume_hidden: None,
         }
     }
 }
