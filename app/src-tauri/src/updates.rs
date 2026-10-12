@@ -443,7 +443,10 @@ pub async fn apply(ctx: &Arc<Ctx>, how: Apply) -> Result<(), String> {
     }
     // From here on the synth's side is closed: new streams are refused
     // and our helper daemon is stopped. (At quit that is already done.)
-    let owner_paused = ctx.prefs.lock().unwrap().paused;
+    // If the install fails the core goes back to how it was: it may have
+    // been paused already (by the owner, or because onboarding is not
+    // finished), and then it stays paused.
+    let was_paused = ctx.core.link_brief().paused;
     if how != Apply::AtQuit {
         ctx.core.pause().await;
     }
@@ -478,7 +481,7 @@ pub async fn apply(ctx: &Arc<Ctx>, how: Apply) -> Result<(), String> {
     if let Err(detail) = installed {
         // The old version is intact (or was put back): carry on with it.
         ctx.update_prefs(|p| p.resume_hidden = None);
-        if how != Apply::AtQuit && !owner_paused {
+        if how != Apply::AtQuit && !was_paused {
             ctx.core.resume();
         }
         *up.next_check.lock().unwrap() = Instant::now() + RETRY_AFTER + jitter(120);
