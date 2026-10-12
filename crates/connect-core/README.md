@@ -1,8 +1,9 @@
 # connect-core
 
 The core of SNTH Connect: one outbound WebSocket from the owner's computer
-to their cloud synth, giving the synth four capabilities under the owner's
-policy. UI-free. The Tauri shell holds a single [`Core`] and drives it with
+to their cloud synth, giving the synth five capabilities under the owner's
+policy (internet, cookies, computer control, files, and the owner's own
+apps). UI-free. The Tauri shell holds a single [`Core`] and drives it with
 commands; `connectd` (sibling crate) is the headless CLI over the same API.
 
 Protocol v1 is implemented exactly from
@@ -19,6 +20,7 @@ let core = Core::new(CoreConfig {
     journal_path:  Some(data_dir.join("journal.jsonl")),   // None = ring + broadcast only
     approver:      my_approver,        // Arc<dyn Approver>  (the UI implements this)
     cookies:       my_cookie_source,   // Arc<dyn CookieSource>
+    apps:          connect_core::apps::system_backend(Some(my_notifier)), // Arc<dyn apps::Backend>
     secret:        my_secret_store,    // Arc<dyn SecretStore>  (keyring in prod)
     hub:           Arc::new(connect_core::UreqHubClient),
     app_version:   env!("CARGO_PKG_VERSION").into(),
@@ -44,6 +46,13 @@ Everything on `Core` is `Send + Sync`; clone the handle freely (it is an
   Use `MultiReader` with the installed-browser DB paths and a `KeySource`
   (the macOS Keychain reader in prod; a fixture key in tests). Reads a COPY
   of the DB. Cookie values never hit a log or the journal.
+- **`apps::Notifier`**: `fn show(&self, title, body) -> NotifyFuture`. Shows
+  a notification as the host app (its own name and icon). Pass it to
+  `apps::system_backend(Some(..))`; with `None` the system's own tools are
+  used (`osascript`, a PowerShell toast, `notify-send`).
+- **`apps::Backend`**: the owner's apps of one system. The product passes
+  `apps::system_backend(..)`; tests and `connectd --apps mac|windows` pass
+  `apps::stub::StubBackend`, an in-memory stand-in.
 - **`SecretStore`**: token custody. `KeyringSecretStore` in prod,
   `FileSecretStore` headless, `MemSecretStore` for tests.
 - **`HubClient`**: `UreqHubClient` claims a code against the hub; a fake is
@@ -74,6 +83,8 @@ Everything on `Core` is `Send + Sync`; clone the handle freely (it is an
 | `cua_stop_install()` | the app is quitting: stop a running install |
 | `computer_permissions()` / `request_computer_permissions()` | macOS Accessibility + Screen Recording of the HOST app (what the embedded driver works under): read-only status, and the system prompts |
 | `cua_install_argv()` / `cua_permissions_grant_argv()` / `cua_permissions_status()` | for a host that attaches to the user's own driver (`CuaAttach::User`): argv the host runs, and the read-only CLI status |
+| `apps_views()` | the apps this computer offers (no Mac app on Windows), each with the owner's switch and its actions |
+| `apps_permissions(app)` / `apps_request_permission(app, kind)` | macOS: where an app's Automation / Full Disk Access permission stands (read-only, never prompts), and the call that makes macOS ask. Empty elsewhere |
 | `run_link(ws_url, shutdown).await` | the reconnect loop; spawn it. `ws_url` None = the paired synth url |
 | `snapshot().await -> Snapshot` | the state snapshot below |
 
@@ -98,7 +109,10 @@ it is started on.
   `Settings{rev}`, `Paired{synth_id}`, `Unpaired`, `Paused{paused}`.
 - `subscribe_journal() -> broadcast::Receiver<Entry>` and
   `recent_journal() -> Vec<Entry>`: the action journal (time, capability,
-  action, target, outcome, bytes). No content, no cookie values, no bodies.
+  action, target, outcome, bytes, count). No content, no cookie values, no
+  bodies; for the owner's apps a line is the app, the action, the outcome
+  and how many items came back, never what a message, a contact or a note
+  says.
 
 ## Snapshot
 
@@ -129,18 +143,23 @@ The journal ring is refilled from the tail of `journal.jsonl` on start.
 Fresh install = everything off until onboarding applies a preset. The three
 presets (TZ section 5):
 
-| | net | cookies | computer | files |
-|---|---|---|---|---|
-| careful  | ask | ask always | ask per task, foreground never | ask on write |
-| balanced | all | ask new domain | auto, foreground idle | no questions |
-| full     | all | auto | auto, foreground always | no questions |
+| | net | cookies | computer | files | apps |
+|---|---|---|---|---|---|
+| careful  | ask | ask always | ask per task, foreground never | ask on write | on, ask before every change (`ask`) |
+| balanced | all | ask new domain | auto, foreground idle | no questions | on, ask before a change, may remember (`ask_new`) |
+| full     | all | auto | auto, foreground always | no questions | on, no questions (`auto`) |
+
+In every preset Messages is off until the owner switches it on, and a
+message sent as the owner is asked about every time. A settings file from
+before apps existed loads with apps off.
 
 `Settings` covers net (enabled, mode all/ask/list, domains, local-network
 toggle, monthly cap, skip-on-metered), cookies (enabled, mode), computer
 (enabled, mode ask/auto/away, foreground never/idle/ask/always, away-idle
 minutes, app blocklist, tool denylist), files (enabled, roots with a write
-flag, ask-on-write). `settings_rev` grows by one on every change; writes are
-atomic.
+flag, ask-on-write), apps (enabled, mode ask/ask_new/auto, per-app switches
+that differ from the default). `settings_rev` grows by one on every change;
+writes are atomic.
 
 ## What the core enforces (so the UI need not)
 
@@ -161,4 +180,55 @@ atomic.
   `CUA_DRIVER_RS_HOME`); the hello `computer.status` is `not_installed` until
   it is in place and `no_permissions` while macOS has not allowed the app.
 
+- **apps**: everything below, in ONE function (`apps::handle`, the only way
+  an `apps.<app>.<action>` rpc call reaches a backend). See "The owner's
+  apps".
+
 The synth has no message that changes settings or grants.
+
+## The owner's apps (`src/apps/`)
+
+| File | What |
+|---|---|
+| `mod.rs` | `CATALOG` (every action and its risk class), the gate `handle`, the policy `decide`, the result bounds `bound`, the `Backend` trait |
+| `request.rs` | `Request::parse`: every param checked and bounded before anyone is asked anything; the allowlist of file types `open.file` hands to the system |
+| `mac.rs` | macOS: AppleScripts for Contacts, Calendar, Reminders, Notes and sending in Messages; `chat.db` for reading Messages; `shortcuts`, `pbcopy` / `pbpaste`, `open`; the permission checks |
+| `win.rs` | Windows: the Win32 clipboard, `ShellExecuteW`, the Start menu (`Get-StartApps`) |
+| `linux.rs` | Linux: `notify-send`, `wl-copy` / `xclip` / `xsel`, `xdg-open`, each only when installed |
+| `notify.rs` | the `Notifier` seam and the system fallback |
+| `time.rs` | times as the synth writes them (local or with an offset) |
+| `stub.rs` | the in-memory stand-in |
+
+Risk classes: READ (list, search, read), ACT (create, complete, send, run,
+write, open) and ACT-light (`notify.show`, which never asks and is limited
+to 6 a minute). What the gate does, in order: paused, the master switch,
+what this system offers, the per-app switch, `Request::parse`, the
+decision (`decide(mode, risk, request)`), the ask, the backend call with a
+time limit, `bound`, one journal line.
+
+- READ never asks: the per-app switch is the consent for reading.
+- ACT follows `apps.mode`: `ask` asks every time and remembers nothing;
+  `ask_new` asks and may remember per kind of change (scope
+  `calendar.create`, `shortcuts.run:<name>`, `open.url:<site>`, ...);
+  `auto` does not ask.
+- `messages.send` is outside the mode. It asks in every mode, with the
+  recipient and the whole text in the request (`ApprovalRequest.details`),
+  and the only thing that can skip the ask is the owner's "always" for that
+  exact recipient (scope `messages.send:<recipient>`, `Remember::AlwaysOnly`),
+  not even that in `ask` mode. `permission.request` refuses the `apps`
+  capability, so the synth cannot make such a grant.
+- A run of a shortcut WITH input is never covered by a remembered answer.
+- Results are bounded whatever a backend returns: list lengths, text
+  lengths, no attachment data, and for `contacts.search` only real matches
+  of a real query (at least 2 letters, or 4 digits of a number).
+- `open.url` takes http and https only; `open.file` only a document
+  (allowlist of types, no executable bit) inside a shared folder, checked
+  after symlinks are resolved; `open.app` only a plain name.
+
+The limits (defaults and caps) are the constants at the top of
+`request.rs` and are listed in the protocol document (`connect.md`).
+
+macOS scripts are constants. What the synth sent travels as arguments of
+the script (`on run argv`), never as script text. `scripts/check-applescripts.sh`
+compiles all of them against the real apps' dictionaries without running
+them (inside a sandbox that forbids sending anything to an app).

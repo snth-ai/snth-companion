@@ -22,8 +22,8 @@ app/
     i18n/       en.ts, ru.ts: every string the UI shows
     lib/        store.tsx (state), format.ts (journal lines, sizes, shortcuts)
     ui/         controls.tsx, icons.tsx
-    screens/    Onboarding, Status, Internet, Computer, Files, Cookies,
-                Activity, General, HelperStatus
+    screens/    Onboarding, Status, Internet, Computer, Files, Apps,
+                Cookies, Activity, General, HelperStatus
     approval/   ApprovalView.tsx (the request window)
     MockStage.tsx   browser-only frame + review controls
     styles/app.css
@@ -62,20 +62,24 @@ URL parameters stage a screen or a state directly:
 
 | Parameter | Values |
 |---|---|
-| `screen` | `onboarding`, `status`, `internet`, `cookies`, `computer`, `files`, `activity`, `general` |
+| `screen` | `onboarding`, `status`, `internet`, `cookies`, `computer`, `files`, `apps`, `activity`, `general` |
 | `step` (with `screen=onboarding`) | `1` welcome, `2` code, `3` confirmation, `4` preset, `5` folders, `6` computer control, `7` done |
-| `state` | `paused`, `working`, `connecting`, `offline`, `repair`, `empty`, `off`, `metered` |
-| `approval` | `net`, `cookies`, `computer`, `foreground`, `files`, `other`, `queue` (shows the approval window alone) |
+| `state` | `paused`, `working`, `connecting`, `offline`, `repair`, `empty`, `off`, `appsoff` (only Apps off), `metered` |
+| `approval` | `net`, `cookies`, `computer`, `foreground`, `files`, `other`, `queue` (shows the approval window alone); for the owner's apps: `message` (a message as the owner, with "always for this person"), `messageask` (the same when nothing may be remembered, with a hostile reason), `event`, `reminder`, `note`, `shortcut`, `shortcutinput`, `clipboard`, `openurl`, `openfile`, `openapp` |
+| `apps` | the macOS permissions of the apps: `granted` (default), `noperm` (macOS has not asked yet), `denied`, `nodisk` (Messages may be controlled, its history cannot be read) |
+| `messages` | `on`: the Messages switch, which is off by default |
 | `preset` | `careful` (default), `balanced`, `full` |
 | `cua` | the helper: `ready` (default), `checking`, `downloading` (frozen at 42%), `installing` (plays the whole automatic install, about 7 s), `verifying`, `failed` (with `why=offline`, `download`, `checksum`, `disk`, `verify`, `unsupported`, `timeout`); the macOS permissions: `noperm`, `half` |
 | `update` | the app's own updates: `checking`, `downloading` (frozen at 40%), `ready` (downloaded, waiting for a quiet moment), `available` (the setting is off), `applying`, `applied` (first run after an update), `failed` (with `step=check`, `download`, `install`), `blocked` (with `block=translocated`, `read_only`, `package`), `flow` (plays check, download, ready), `off`, `unconfigured` |
 | `pair` | a 6-digit code: behaves as if `snth://pair?code=...` was opened |
 | `lang` | `en`, `ru` |
 | `theme` | `light`, `dark` |
-| `os` | `macos` (default), `windows`, `linux` |
+| `os` | `macos` (default), `windows`, `linux`. Apps follows it: the Mac apps are listed only with `macos` |
 
 Examples: `?screen=onboarding&step=3`, `?screen=status&state=paused`,
-`?approval=cookies`, `?screen=computer&cua=noperm&lang=ru&theme=dark`.
+`?approval=cookies`, `?screen=computer&cua=noperm&lang=ru&theme=dark`,
+`?screen=apps&apps=noperm&messages=on`, `?screen=apps&os=windows`,
+`?approval=message&lang=ru`.
 `/approval.html` is the approval window's own page.
 
 In the mock pairing step: any 6 digits work; `000000` is "not valid",
@@ -278,12 +282,74 @@ hidden "Advanced" override that accepts only `https://` addresses.
   endpoint.
 - macOS: `src/menu.rs` replaces the default application menu so Cmd+Q goes
   through the same clean shutdown as the tray's Quit; `Info.plist` holds the
-  sentences macOS shows when it asks about the Desktop, Downloads, Documents
-  and the local network.
+  sentences macOS shows when it asks about the Desktop, Downloads, Documents,
+  the local network and control of other apps.
+- The owner's apps (the Apps page): the core does the work
+  (`connect-core/src/apps/`), the shell adds three things. It shows the
+  synth's notifications as this app (`ui::AppNotifier`, the same plugin as
+  its own notifications). It reports where each app's macOS permission
+  stands (`apps_check`, read-only) and makes macOS ask on the owner's click
+  (`apps_request_permission`). And the request window shows the action
+  itself (`ApprovalDto.details`: the recipient and the whole text of a
+  message, the title and time of an event) and offers only the answers the
+  core allows for it (`remember`).
+- macOS permissions of the Apps page. Contacts, Calendar, Reminders, Notes
+  and sending in Messages go through Automation: macOS asks once per app
+  ("SNTH Connect wants to control Calendar") the first time the synth uses
+  it, or when the owner clicks "Ask now". That needs the entitlement
+  `com.apple.security.automation.apple-events` (`Entitlements.plist`, wired
+  as `bundle.macOS.entitlements`) and `NSAppleEventsUsageDescription`
+  (`Info.plist`); `scripts/release-macos.sh` refuses to go on when the
+  signed app lacks either. Reading Messages reads the history database and
+  needs Full Disk Access, which no app can ask for: the page explains the
+  step and opens the right pane. Shortcuts, the clipboard, "open" and
+  notifications need nothing.
 - Files on disk: `settings.json`, `shell.json` (and `secrets.json` in a debug
   build) in the app config dir; `journal.jsonl` in the app data dir.
 
+## Windows: what else could be driven, and why it is not built
+
+Built on Windows: notifications, the clipboard, and open (a link, a
+document in a shared folder, a Start menu app). Looked at and left out:
+
+| Target | Without extra installs | Without admin | How solid | Verdict |
+|---|---|---|---|---|
+| Classic Outlook (mail, calendar, contacts, tasks) through COM (`Outlook.Application`) | only where classic Outlook is installed; new PCs get the new Outlook | yes | works, with traps: it starts Outlook, can raise Outlook's own "a program is trying to access" window, and Microsoft does not support it without a signed-in desktop session | the one real candidate; not built (see below) |
+| New Outlook for Windows | preinstalled on Windows 11 | yes | no COM, no VBA, no MAPI, by design; only web add-ins and Microsoft Graph | not scriptable on the computer |
+| Windows Mail, Calendar, People | support ended on 31 December 2024; they no longer sync | - | their stores are empty or stale | nothing to drive |
+| Windows contact and appointment stores (WinRT) | yes | yes | need a packaged app identity; with the apps above retired nothing fills them | nothing to read |
+| Microsoft To Do | preinstalled on many PCs | yes | no local interface at all; Microsoft Graph only (a cloud sign-in) | belongs in the cloud |
+| Phone Link (SMS through the phone) | yes | yes | no API; only clicking through its window | computer control can do it, an API cannot |
+| PowerShell | yes | yes | it is a shell, not an app: "run a command" is the developer-mode package | later package |
+
+Recommendation: do not add Outlook now. Classic Outlook is being replaced,
+the new one cannot be scripted, and mail, calendar, contacts and tasks of a
+Microsoft account are reachable from the synth's side through Microsoft
+Graph with a normal sign-in, which works the same on every computer and
+needs nothing installed. If testers who live in classic Outlook ask for it,
+the shape is: offer an `outlook` app only when `Outlook.Application` is
+registered and the classic `OUTLOOK.EXE` exists, drive it from a hidden
+PowerShell child through COM, classify sending mail like sending a message
+(asked every time, whole text shown). A day of work plus a real machine
+with classic Outlook to verify on; the CI machines have none.
+
 ## Not verified
+
+- The owner's apps on a real Mac. Every script compiles against the real
+  apps' dictionaries (`scripts/check-applescripts.sh`) and everything
+  around them is tested with stand-ins, but no script has ever been RUN
+  against Calendar, Contacts, Reminders, Notes or Messages, the Messages
+  history has only been read from a database built by a test, and the
+  Automation question and the Full Disk Access step have never been seen
+  on screen in the signed app. Calendar's scripting finds a repeating
+  event only on the date of its first occurrence.
+- On Windows the Apps self-test (`connectd selftest apps --touch`, run on
+  every push) shows a toast through PowerShell, round-trips the clipboard,
+  opens a text file and starts a Start menu app. The INSTALLED app shows
+  notifications through its own plugin instead, which the self-test does
+  not cover.
+- Linux apps (`notify-send`, clipboard tools, `xdg-open`): compiled for
+  Linux in isolation, never built into the app there and never run.
 
 - An update round trip. It needs two published versions; see "Testing the
   first update" below. Until then the whole apply path (download, safety
