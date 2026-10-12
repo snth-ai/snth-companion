@@ -479,15 +479,28 @@ pub struct AppsDto {
 
 /// What this computer offers and where each app's permission stands.
 /// Read-only: nothing is shown and no app is started.
+///
+/// A permission is looked at only for an app the owner switched on (with
+/// apps on at all). Looking is not free of traces: checking whether the
+/// Messages history can be read makes macOS list SNTH Connect under Full
+/// Disk Access, which should not happen for someone who left Messages off.
 #[tauri::command]
 pub async fn apps_check(ctx: Cx<'_>) -> Result<AppsDto, String> {
     let core = ctx.core.clone();
-    tauri::async_runtime::spawn_blocking(move || AppsDto {
-        apps: core
-            .apps_views()
-            .into_iter()
-            .map(|v| AppStatusDto { id: v.id, on: v.on, permissions: core.apps_permissions(v.id), actions: v.actions })
-            .collect(),
+    tauri::async_runtime::spawn_blocking(move || {
+        let enabled = core.settings().apps.enabled;
+        AppsDto {
+            apps: core
+                .apps_views()
+                .into_iter()
+                .map(|v| AppStatusDto {
+                    id: v.id,
+                    on: v.on,
+                    permissions: if enabled && v.on { core.apps_permissions(v.id) } else { Vec::new() },
+                    actions: v.actions,
+                })
+                .collect(),
+        }
     })
     .await
     .map_err(|e| format!("apps_check: {e}"))

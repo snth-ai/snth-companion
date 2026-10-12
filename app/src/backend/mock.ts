@@ -1014,7 +1014,12 @@ class MockBackend implements Backend {
   appsCheck(): Promise<AppsStatus> {
     return this.reply(
       {
-        apps: this.state.apps.map((a) => ({ ...a, permissions: structuredClone(this.appPermissions[a.id] ?? []) })),
+        // As in the shell: a permission is looked at only for an app
+        // that is switched on.
+        apps: this.state.apps.map((a) => ({
+          ...a,
+          permissions: this.state.core.settings.apps.enabled && a.on ? structuredClone(this.appPermissions[a.id] ?? []) : [],
+        })),
       },
       80,
     );
