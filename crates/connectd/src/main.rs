@@ -12,6 +12,7 @@
 //!   connectd preset <careful|balanced|full> [--settings <p>]
 //!   connectd pause | resume | unpair           (REPL commands under `run`)
 //!   connectd make-cookie-fixture --db <p> --key <pw> --domain <d> --name <n> --value <v>
+//!   connectd selftest cua [--root <dir>] [--keep]   (see selftest.rs)
 //!
 //! `run` reads command lines from stdin (pause / resume / unpair /
 //! preset <name> / addroot <path>[:rw] / status / quit) so a test script
@@ -28,6 +29,8 @@ use connect_core::{
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::watch;
+
+mod selftest;
 
 const TOKEN_KEY: &str = "pairing_token";
 
@@ -47,6 +50,7 @@ fn main() {
             "settings" => cmd_settings(&args[1..]).await,
             "preset" => cmd_preset(&args[1..]).await,
             "make-cookie-fixture" => cmd_make_fixture(&args[1..]),
+            "selftest" => selftest::run(&args[1..]).await,
             "-h" | "--help" | "help" | "" => {
                 print_usage();
                 0
@@ -71,6 +75,7 @@ fn print_usage() {
          \u{20}  connectd status|settings [--settings <p>]\n\
          \u{20}  connectd preset <careful|balanced|full> [--settings <p>]\n\
          \u{20}  connectd make-cookie-fixture --db <p> --key <pw> --domain <d> --name <n> --value <v>\n\
+         \u{20}  connectd selftest cua [--root <dir>] [--keep]\n\
          \n\
          run options:\n\
          \u{20}  --settings <p>        settings.json path (default: in-memory)\n\

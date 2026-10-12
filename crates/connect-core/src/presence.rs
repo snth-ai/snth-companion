@@ -1,9 +1,10 @@
 //! Presence: how long since the owner last touched the machine, and
 //! whether the screen is locked.
 //!
-//! macOS has real values (Quartz). Other platforms are stubs that report
-//! "active, unlocked" (the conservative answer: the synth treats the
-//! owner as present) with a TODO.
+//! macOS has real values (Quartz). Windows has the idle time
+//! (GetLastInputInfo) but not yet the lock state. Linux is a stub that
+//! reports "active, unlocked" (the conservative answer: the synth treats
+//! the owner as present) with a TODO.
 
 /// Seconds since the last keyboard or pointer input, and whether the
 /// screen is locked.
@@ -82,12 +83,51 @@ mod imp {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
 mod imp {
-    // TODO(P2): real values per OS. Windows: GetLastInputInfo +
-    // WTSRegisterSessionNotification / session lock state. Linux X11:
-    // XScreenSaverQueryInfo + a lock-detection heuristic. Wayland: no
-    // portable idle API.
+    #[repr(C)]
+    struct LastInputInfo {
+        cb_size: u32,
+        dw_time: u32,
+    }
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetLastInputInfo(info: *mut LastInputInfo) -> i32;
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetTickCount() -> u32;
+    }
+
+    /// Time since the last keyboard or mouse input in this session. Both
+    /// values are milliseconds since boot in 32 bits, so the difference
+    /// is taken with wrap-around.
+    pub fn idle_seconds() -> u64 {
+        let mut info = LastInputInfo {
+            cb_size: std::mem::size_of::<LastInputInfo>() as u32,
+            dw_time: 0,
+        };
+        unsafe {
+            if GetLastInputInfo(&mut info) == 0 {
+                return 0;
+            }
+            u64::from(GetTickCount().wrapping_sub(info.dw_time)) / 1000
+        }
+    }
+
+    // TODO(P2): the lock state (WTS session notifications). Until then
+    // "unlocked": the synth treats the owner as possibly present.
+    pub fn screen_locked() -> bool {
+        false
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+mod imp {
+    // TODO(P2): real values. Linux X11: XScreenSaverQueryInfo + a
+    // lock-detection heuristic. Wayland: no portable idle API.
     pub fn idle_seconds() -> u64 {
         0
     }

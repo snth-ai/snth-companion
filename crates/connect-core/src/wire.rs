@@ -111,7 +111,7 @@ pub fn device_info(device_id: &str, device_name: &str, app_version: &str, cua_ve
 fn os_version() -> String {
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("sw_vers")
+        crate::proc::std_command("sw_vers")
             .arg("-productVersion")
             .output()
             .ok()
@@ -126,7 +126,13 @@ fn os_version() -> String {
 }
 
 pub fn hostname() -> String {
-    std::process::Command::new("hostname")
+    // Windows has the name in the environment: no process needed.
+    if cfg!(windows) {
+        if let Some(name) = std::env::var("COMPUTERNAME").ok().filter(|n| !n.is_empty()) {
+            return name;
+        }
+    }
+    crate::proc::std_command("hostname")
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())

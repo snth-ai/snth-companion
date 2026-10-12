@@ -63,6 +63,39 @@ pub enum CoreEvent {
     Paused { paused: bool },
 }
 
+/// After a failed start of our daemon the next try waits: 5 s, 15 s, 1 min,
+/// then 5 min. Without this a synth that retries would have the app start
+/// (and lose) a process on every attempt.
+const DAEMON_RETRY_AFTER: [Duration; 4] = [
+    Duration::from_secs(5),
+    Duration::from_secs(15),
+    Duration::from_secs(60),
+    Duration::from_secs(300),
+];
+
+#[derive(Default)]
+struct StartBackoff {
+    failures: usize,
+    not_before: Option<Instant>,
+    last_error: String,
+}
+
+impl StartBackoff {
+    /// Some(seconds) while a new start must still wait.
+    fn wait_left(&self) -> Option<u64> {
+        let until = self.not_before?;
+        let left = until.checked_duration_since(Instant::now())?;
+        Some(left.as_secs().max(1))
+    }
+
+    fn failed(&mut self, why: String) {
+        let step = self.failures.min(DAEMON_RETRY_AFTER.len() - 1);
+        self.failures += 1;
+        self.not_before = Some(Instant::now() + DAEMON_RETRY_AFTER[step]);
+        self.last_error = why;
+    }
+}
+
 /// Monthly egress accounting. Written to disk at most every
 /// `EGRESS_FLUSH_EVERY` (or `EGRESS_FLUSH_BYTES`), and on `Core::flush`.
 struct Counters {
@@ -125,6 +158,9 @@ pub struct Shared {
     /// The last `cua-driver --version` probe, reused for a few seconds so
     /// a burst of snapshots does not spawn a process each.
     cua_probe: Mutex<Option<(Instant, cua::Detect)>>,
+    /// Failed starts of our daemon: how many in a row, when the next try
+    /// is allowed, and why the last one failed.
+    cua_start_backoff: Mutex<StartBackoff>,
 
     paused: AtomicBool,
     metered: AtomicBool,
@@ -378,12 +414,44 @@ impl Shared {
             }
             CuaAttach::Private => {
                 let mut guard = self.cua_daemon.lock().await;
+                // A daemon that died by itself is not a daemon: start anew.
+                if guard.as_mut().is_some_and(|d| !d.is_alive()) {
+                    if let Some(dead) = guard.take() {
+                        dead.discard().await;
+                    }
+                }
                 if guard.is_none() {
+                    if self.cua_installer.is_some() && !std::path::Path::new(&self.cua_bin).is_file() {
+                        return Err(Refusal::Failed(
+                            "unavailable: the computer-control helper is not installed yet".into(),
+                        ));
+                    }
+                    // After a failed start, wait before the next one
+                    // instead of starting a process per attempt.
+                    {
+                        let backoff = self.cua_start_backoff.lock().unwrap();
+                        if let Some(secs) = backoff.wait_left() {
+                            return Err(Refusal::Failed(format!(
+                                "unavailable: the computer-control helper did not start ({}); next try in {secs} s",
+                                backoff.last_error
+                            )));
+                        }
+                    }
                     let s = self.settings();
-                    let d = PrivateDaemon::start(&self.cua_bin, &s, &self.cua_env).await.map_err(|e| {
-                        Refusal::Failed(format!("unavailable: start private Cua daemon: {e}"))
-                    })?;
-                    *guard = Some(d);
+                    match PrivateDaemon::start(&self.cua_bin, &s, &self.cua_env).await {
+                        Ok(d) => {
+                            *self.cua_start_backoff.lock().unwrap() = StartBackoff::default();
+                            *guard = Some(d);
+                        }
+                        Err(e) => {
+                            let why = e.to_string();
+                            crate::logln!("cua daemon: start failed: {why}");
+                            self.cua_start_backoff.lock().unwrap().failed(why.clone());
+                            return Err(Refusal::Failed(format!(
+                                "unavailable: start private Cua daemon: {why}"
+                            )));
+                        }
+                    }
                 }
                 Ok((guard.as_ref().unwrap().socket.clone(), true))
             }
@@ -393,6 +461,24 @@ impl Shared {
     /// Is the driver installed, and which version? Cached for
     /// `CUA_PROBE_TTL`; `fresh` skips the cache (the UI's "check again").
     pub async fn cua_detect(&self, fresh: bool) -> cua::Detect {
+        // The app's own copy changes only through the installer, which
+        // knows its state: no process is started to ask the binary. (Only
+        // before the installer's first check of this run is the binary
+        // asked directly, so the first hello is not wrong.)
+        if let Some(installer) = &self.cua_installer {
+            let known = match installer.state() {
+                InstallState::Ready { version } => Some(Some(version)),
+                InstallState::Idle | InstallState::Checking => None,
+                _ => Some(None),
+            };
+            if let Some(version) = known {
+                return cua::Detect {
+                    installed: version.is_some(),
+                    version,
+                    path: self.cua_bin.clone(),
+                };
+            }
+        }
         if !fresh {
             if let Some((at, d)) = self.cua_probe.lock().unwrap().as_ref() {
                 if at.elapsed() < CUA_PROBE_TTL {
@@ -543,6 +629,7 @@ impl Core {
             cua_attach: cfg.cua_attach,
             cua_daemon: tokio::sync::Mutex::new(None),
             cua_probe: Mutex::new(None),
+            cua_start_backoff: Mutex::new(StartBackoff::default()),
             paused: AtomicBool::new(false),
             metered: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
@@ -645,11 +732,15 @@ impl Core {
                     v.push(Root { path: d.to_path_buf(), write: true });
                 }
             }
-            if let Some(home) = Some(base.home_dir()) {
-                let dl = home.join("Downloads");
-                if dl.is_dir() {
-                    v.push(Root { path: dl, write: true });
-                }
+            // The system's own answer first (on Windows these folders
+            // can be moved, for example into OneDrive), then the usual
+            // place under the home folder.
+            let dl = base
+                .download_dir()
+                .map(|d| d.to_path_buf())
+                .unwrap_or_else(|| base.home_dir().join("Downloads"));
+            if dl.is_dir() {
+                v.push(Root { path: dl, write: true });
             }
         }
         v
@@ -890,6 +981,12 @@ impl Core {
         state
     }
 
+    /// Stop our own daemon if one runs (the next computer-control session
+    /// starts a new one). The owner's daemon is never touched.
+    pub async fn cua_stop_daemon(&self) {
+        self.shared.stop_cua().await;
+    }
+
     /// The app is quitting: stop a running install, start no new one.
     pub fn cua_stop_install(&self) {
         if let Some(i) = &self.shared.cua_installer {
@@ -1049,7 +1146,7 @@ pub fn registrable_domain(host: &str) -> String {
 /// Read the user's running daemon socket from `cua-driver status`
 /// (read-only; we never touch that daemon).
 async fn user_daemon_socket(bin: &str) -> Result<String, Refusal> {
-    let out = tokio::process::Command::new(bin)
+    let out = crate::proc::command(bin)
         .arg("status")
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

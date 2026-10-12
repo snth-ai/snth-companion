@@ -1,5 +1,6 @@
-# Build-only check for SNTH Connect (app/) on every push to a connect/* branch.
-# Produces a Windows installer as a workflow artifact. No release, no signing.
+# Check for SNTH Connect (app/) on every push to a connect/* branch: core
+# tests, a self-test of the computer-control path on a real Windows machine,
+# then a Windows installer as a workflow artifact. No release, no signing.
 # The release pipeline lives in connect-release.yml.
 
 name: connect-build
@@ -44,6 +45,15 @@ jobs:
 
       - name: Core tests
         run: cargo test -p connect-core
+
+      # The computer-control path as the app runs it, on a real Windows
+      # machine: install the pinned driver through our installer, start our
+      # private daemon (a named pipe), run one MCP session through our proxy
+      # spawn (initialize, tools/list, two read-only tools), check that a
+      # child we spawn has no console window, stop the daemon.
+      - name: Computer-control self-test
+        timeout-minutes: 15
+        run: cargo run -p connectd -- selftest cua
 
       - name: Build the installer
         working-directory: app

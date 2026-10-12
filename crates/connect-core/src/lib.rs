@@ -40,6 +40,7 @@ pub mod link;
 pub mod mcp;
 pub mod pairing;
 pub mod presence;
+pub mod proc;
 pub mod proto;
 pub mod rpc;
 pub mod secret;

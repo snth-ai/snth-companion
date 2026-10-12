@@ -135,6 +135,21 @@ pub fn pinned_release() -> Option<ReleaseSpec> {
     release_for(std::env::consts::OS, std::env::consts::ARCH)
 }
 
+/// The tar to unpack with. On Windows it is named by its full path: the
+/// system one (bsdtar, which also reads .zip) must be used, and a GNU tar
+/// that happens to be earlier on PATH (Git ships one) takes `C:\...` for a
+/// remote host and cannot read .zip at all.
+fn system_tar() -> PathBuf {
+    if cfg!(windows) {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+        let tar = PathBuf::from(root).join("System32").join("tar.exe");
+        if tar.is_file() {
+            return tar;
+        }
+    }
+    PathBuf::from("tar")
+}
+
 fn bin_name() -> &'static str {
     if cfg!(windows) {
         "cua-driver.exe"
@@ -508,7 +523,7 @@ impl CuaInstaller {
         // 3. Unpack, with the system's tar (bsdtar on Windows 10+ reads
         //    the .zip too).
         self.set(InstallState::Installing);
-        let mut tar = tokio::process::Command::new("tar");
+        let mut tar = crate::proc::command(system_tar());
         tar.arg("-xf")
             .arg(&archive)
             .arg("-C")
@@ -611,7 +626,7 @@ pub async fn installed_version(bin: &Path, env: &DriverEnv) -> Option<String> {
     if !bin.is_file() {
         return None;
     }
-    let mut cmd = tokio::process::Command::new(bin);
+    let mut cmd = crate::proc::command(bin);
     env.apply(&mut cmd);
     cmd.arg("--version")
         .stdin(Stdio::null())
@@ -812,7 +827,7 @@ mod tests {
             std::fs::write(src.join("cua-cursor-theme"), b"theme").unwrap();
             std::fs::write(src.join("libcua_driver_sdk.dylib"), vec![0u8; 4096]).unwrap();
             let archive = dir.join(name);
-            let ok = std::process::Command::new("tar")
+            let ok = crate::proc::std_command("tar")
                 .arg("-czf")
                 .arg(&archive)
                 .arg("-C")

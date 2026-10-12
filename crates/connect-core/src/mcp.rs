@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncWriteExt, BufReader};
-use tokio::process::Command;
+use tokio::process::Child;
 use tokio::sync::Mutex;
 
 use crate::core::Shared;
@@ -36,6 +36,22 @@ use crate::logln;
 
 /// One JSON-RPC line. A screenshot result is a few MiB of base64.
 const MAX_RPC_LINE: usize = 64 * 1024 * 1024;
+
+/// Start the `cua-driver mcp` proxy for one session against a daemon's
+/// endpoint. It speaks line-delimited JSON-RPC on its stdin / stdout and
+/// ends when its stdin closes. The app's mcp streams and the self-test
+/// both start it here.
+pub fn spawn_proxy(shared: &Shared, socket: &str, embedded: bool) -> std::io::Result<Child> {
+    let argv = cua::mcp_argv(&shared.cua_bin, socket, embedded);
+    let mut cmd = crate::proc::command(&argv[0]);
+    cmd.args(&argv[1..]);
+    shared.cua_env.apply(&mut cmd);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+}
 
 pub async fn handle(mut s: MuxStream, hdr: StreamHeader, shared: &Arc<Shared>) {
     if hdr.server != "desktop" {
@@ -73,17 +89,7 @@ pub async fn handle(mut s: MuxStream, hdr: StreamHeader, shared: &Arc<Shared>) {
         }
     };
 
-    let argv = cua::mcp_argv(&shared.cua_bin, &socket, embedded);
-    let mut cmd = Command::new(&argv[0]);
-    cmd.args(&argv[1..]);
-    shared.cua_env.apply(&mut cmd);
-    let mut child = match cmd
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-    {
+    let mut child = match spawn_proxy(shared, &socket, embedded) {
         Ok(c) => c,
         Err(e) => {
             let why = Refusal::Failed(format!("unavailable: spawn cua-driver mcp: {e}"));

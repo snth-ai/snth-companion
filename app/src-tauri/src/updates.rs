@@ -515,7 +515,7 @@ fn install_guarded(update: &Update, bytes: &[u8], target: Option<&Path>, backup_
         std::fs::create_dir_all(root).map_err(|e| format!("safety copy: {e}"))?;
         let copied = ["-Rcp", "-Rp"].iter().any(|flags| {
             let _ = std::fs::remove_dir_all(&backup);
-            std::process::Command::new("/bin/cp")
+            connect_core::proc::std_command("/bin/cp")
                 .arg(flags)
                 .arg(bundle)
                 .arg(&backup)
@@ -532,7 +532,7 @@ fn install_guarded(update: &Update, bytes: &[u8], target: Option<&Path>, backup_
             // Put the previous version back where it was.
             let _ = std::fs::remove_dir_all(bundle);
             if std::fs::rename(&backup, bundle).is_err() {
-                let _ = std::process::Command::new("/bin/cp").arg("-Rp").arg(&backup).arg(bundle).status();
+                let _ = connect_core::proc::std_command("/bin/cp").arg("-Rp").arg(&backup).arg(bundle).status();
             }
         }
         let _ = std::fs::remove_dir_all(&backup);
@@ -555,7 +555,7 @@ fn bundle_is_whole(bundle: &Path) -> Result<(), String> {
     if !has_program {
         return Err("the installed app has no program in it".into());
     }
-    let verified = std::process::Command::new("/usr/bin/codesign")
+    let verified = connect_core::proc::std_command("/usr/bin/codesign")
         .args(["--verify", "--deep", "--strict"])
         .arg(bundle)
         .stdout(std::process::Stdio::null())
@@ -586,7 +586,7 @@ fn schedule_relaunch() {
         let script = format!(
             "i=0; while kill -0 \"$1\" 2>/dev/null && [ \"$i\" -lt 150 ]; do sleep 0.2; i=$((i+1)); done; {launch}"
         );
-        let _ = std::process::Command::new("/bin/sh")
+        let _ = connect_core::proc::std_command("/bin/sh")
             .arg("-c")
             .arg(script)
             .arg("snth-connect-relaunch")

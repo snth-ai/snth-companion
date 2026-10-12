@@ -425,7 +425,7 @@ pub fn cua_check(ctx: Cx<'_>) -> CuaDto {
 /// fixed argv from this file; nothing from the webview reaches it.
 fn run_detached(argv: Vec<String>) -> Result<(), String> {
     let (bin, args) = argv.split_first().ok_or("empty command")?;
-    let mut child = std::process::Command::new(bin)
+    let mut child = connect_core::proc::std_command(bin)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

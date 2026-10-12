@@ -15,7 +15,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use serde::Deserialize;
-use tokio::process::{Child, Command};
+use tokio::process::{Child, ChildStdin, Command};
 
 use crate::settings::{ComputerMode, Foreground, Settings};
 
@@ -78,7 +78,7 @@ impl DriverEnv {
 /// Run `<bin> --version` to see whether the driver is installed and which
 /// version. Read-only.
 pub async fn detect(bin: &str, env: &DriverEnv) -> Detect {
-    let mut cmd = Command::new(bin);
+    let mut cmd = crate::proc::command(bin);
     env.apply(&mut cmd);
     let out = cmd
         .arg("--version")
@@ -135,7 +135,7 @@ pub async fn permissions_status(
     socket: Option<&str>,
     env: &DriverEnv,
 ) -> std::io::Result<Permissions> {
-    let mut cmd = Command::new(bin);
+    let mut cmd = crate::proc::command(bin);
     env.apply(&mut cmd);
     cmd.args(["permissions", "status", "--json"]);
     if let Some(s) = socket {
@@ -185,22 +185,93 @@ pub fn compile_manifest(settings: &Settings) -> String {
     y
 }
 
+/// How long a freshly started daemon may take to open its endpoint. The
+/// first start of a new binary can be slow (the OS scans it).
+const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// A private Cua daemon we started, owned by our process.
+///
+/// The endpoint is a Unix socket file in the daemon's own temp dir on
+/// macOS and Linux, and a named pipe on Windows (`\\.\pipe\...`): there
+/// the driver cannot listen on a file path at all.
 pub struct PrivateDaemon {
     child: Child,
+    /// The socket file (Unix) or the named pipe (Windows).
     pub socket: String,
     pub pid_file: PathBuf,
     pub pid: Option<u32>,
     dir: PathBuf,
+    /// Windows: the daemon's stdin, held open for as long as the app wants
+    /// the daemon. The daemon was started with `--parent-liveness-stdio`,
+    /// so the day this end closes (we stop it, or the app dies in any way)
+    /// it shuts itself down. This is how the driver's own SDK ties an
+    /// embedded daemon to its host.
+    liveness: Option<ChildStdin>,
+}
+
+/// The endpoint for a new daemon: unique per app process and per start.
+fn private_endpoint(dir: &std::path::Path) -> String {
+    if cfg!(windows) {
+        // A pipe name, not a file: the driver's Windows daemon serves a
+        // named pipe (and refuses a name that already exists).
+        format!(
+            r"\\.\pipe\snth-connect-cua-{}-{}",
+            std::process::id(),
+            fastish_suffix()
+        )
+    } else {
+        dir.join("cua.sock").to_string_lossy().to_string()
+    }
+}
+
+/// Is a daemon serving this endpoint? Unix: the socket file is there.
+/// Windows: a pipe of that name has an instance waiting (`WaitNamedPipeW`,
+/// which does not use up a connection; the driver probes the same way).
+pub fn endpoint_ready(endpoint: &str) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn WaitNamedPipeW(name: *const u16, timeout_ms: u32) -> i32;
+        }
+        let wide: Vec<u16> = std::ffi::OsStr::new(endpoint)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // 1 = NMPWAIT_NOWAIT: answer at once.
+        unsafe { WaitNamedPipeW(wide.as_ptr(), 1) != 0 }
+    }
+    #[cfg(not(windows))]
+    {
+        std::path::Path::new(endpoint).exists()
+    }
+}
+
+/// The last lines a daemon wrote before it gave up, for an error message.
+fn log_tail(path: &std::path::Path) -> String {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let tail: Vec<&str> = text.lines().rev().take(6).collect();
+    let mut out: String = tail.into_iter().rev().collect::<Vec<_>>().join(" | ");
+    if out.len() > 600 {
+        let mut cut = out.len() - 600;
+        while !out.is_char_boundary(cut) {
+            cut += 1;
+        }
+        out = out[cut..].to_string();
+    }
+    out
 }
 
 impl PrivateDaemon {
-    /// Start `cua-driver serve --embedded` on a private socket in its own
-    /// temp dir, telemetry off. Waits up to ~5 s for the socket to appear.
+    /// Start `cua-driver serve --embedded` on a private endpoint, telemetry
+    /// off, and wait until it is listening. An Err means no daemon is left
+    /// behind: it exited by itself or was killed here.
     ///
     /// SAFETY NOTE: embedded mode never prompts and never relaunches the
     /// standalone app; it stays in this process's TCC chain. It does not
-    /// touch the user's own daemon (a different socket).
+    /// touch the user's own daemon (a different socket or pipe).
     pub async fn start(
         bin: &str,
         _settings: &Settings,
@@ -212,14 +283,21 @@ impl PrivateDaemon {
             fastish_suffix()
         ));
         std::fs::create_dir_all(&dir)?;
-        let socket = dir.join("cua.sock");
+        let socket_s = private_endpoint(&dir);
+        // Always our own pid file: without the flag the daemon would write
+        // the default one, which belongs to a driver the owner may run.
         let pid_file = dir.join("cua.pid");
-        let socket_s = socket.to_string_lossy().to_string();
+        // What the daemon says on stderr, kept for the error message when
+        // it does not come up.
+        let log_path = dir.join("daemon.log");
+        let log = std::fs::File::create(&log_path)?;
 
-        let mut cmd = Command::new(bin);
+        let mut cmd = crate::proc::command(bin);
+        cmd.args(["serve", "--embedded"]);
+        if cfg!(windows) {
+            cmd.arg("--parent-liveness-stdio");
+        }
         cmd.args([
-            "serve",
-            "--embedded",
             "--host-bundle-id",
             HOST_BUNDLE_ID,
             "--socket",
@@ -230,19 +308,59 @@ impl PrivateDaemon {
         env.apply(&mut cmd);
         cmd.env("CUA_DRIVER_EMBEDDED", "1")
             .env("CUA_DRIVER_HOST_BUNDLE_ID", HOST_BUNDLE_ID)
-            .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(log))
             .kill_on_drop(true);
-        let child = cmd.spawn()?;
+        if cfg!(windows) {
+            // The driver's SDK sets this on the embedded daemon: on
+            // Windows the daemon knows its host by this pid.
+            cmd.env("CUA_DRIVER_EMBEDDED_HOST_PID", std::process::id().to_string())
+                .stdin(Stdio::piped());
+        } else {
+            cmd.stdin(Stdio::null());
+        }
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err(e);
+            }
+        };
         let pid = child.id();
+        let liveness = child.stdin.take();
 
-        // Wait for the socket (or the pid file) to show up.
-        for _ in 0..50 {
-            if socket.exists() {
-                break;
+        // Wait until it listens. A daemon that exits first, or never
+        // listens, is a failed start: say why and leave nothing running.
+        let deadline = tokio::time::Instant::now() + DAEMON_READY_TIMEOUT;
+        let failure = loop {
+            if endpoint_ready(&socket_s) {
+                break None;
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    break Some(format!(
+                        "the helper daemon exited before it was ready ({status}): {}",
+                        log_tail(&log_path)
+                    ));
+                }
+                Ok(None) => {}
+                Err(e) => break Some(format!("cannot watch the helper daemon: {e}")),
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break Some(format!(
+                    "the helper daemon was not listening after {} s: {}",
+                    DAEMON_READY_TIMEOUT.as_secs(),
+                    log_tail(&log_path)
+                ));
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        if let Some(why) = failure {
+            drop(liveness);
+            let _ = child.start_kill();
+            let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(std::io::Error::other(why));
         }
         Ok(PrivateDaemon {
             child,
@@ -250,24 +368,45 @@ impl PrivateDaemon {
             pid_file,
             pid,
             dir,
+            liveness,
         })
+    }
+
+    /// Is our daemon process still running?
+    pub fn is_alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
     }
 
     /// Stop OUR daemon by its own pid (kill_on_drop also covers a crash).
     pub async fn stop(mut self, bin: &str, env: &DriverEnv) {
-        // Polite stop on our socket first.
-        let mut cmd = Command::new(bin);
-        env.apply(&mut cmd);
-        let _ = cmd
-            .args(["stop", "--socket", &self.socket])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .output()
-            .await;
+        if let Some(liveness) = self.liveness.take() {
+            // Windows: closing its stdin is the daemon's signal to finish
+            // cleanly (the driver SDK's way).
+            drop(liveness);
+            let _ = tokio::time::timeout(Duration::from_secs(3), self.child.wait()).await;
+        } else {
+            // Polite stop on our socket first.
+            let mut cmd = crate::proc::command(bin);
+            env.apply(&mut cmd);
+            let _ = cmd
+                .args(["stop", "--socket", &self.socket])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .output()
+                .await;
+        }
         let _ = self.child.start_kill();
         let _ = tokio::time::timeout(Duration::from_secs(3), self.child.wait()).await;
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+
+    /// Forget a daemon that died by itself: reap it and remove its dir.
+    pub async fn discard(mut self) {
+        drop(self.liveness.take());
+        let _ = self.child.start_kill();
+        let _ = tokio::time::timeout(Duration::from_secs(1), self.child.wait()).await;
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
