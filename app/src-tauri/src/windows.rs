@@ -82,7 +82,9 @@ pub fn open_approval(app: &AppHandle) {
                 WebviewUrl::App("approval.html".into()),
             )
             .title("SNTH Connect")
-            .inner_size(440.0, 500.0)
+            // Tall enough for a whole message (recipient, text, the
+            // synth's reason, the choice) without scrolling past it.
+            .inner_size(440.0, 640.0)
             .resizable(false)
             .maximizable(false)
             .minimizable(false)

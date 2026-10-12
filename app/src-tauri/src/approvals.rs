@@ -23,20 +23,40 @@ use crate::{ui, windows};
 /// reason is.
 const MAX_SCOPE: usize = 200;
 
+/// The longest single fact shown in the window (a message text, the
+/// input of a shortcut). The core bounds these far below this already.
+const MAX_DETAIL: usize = 20_000;
+
+/// One fact of the action the owner is asked about ("to", "text",
+/// "title", "when"...). The value is what will actually be sent or
+/// created, shown in full.
+#[derive(Debug, Clone, Serialize)]
+pub struct DetailDto {
+    pub key: String,
+    pub value: String,
+}
+
 /// One pending request, as the approval window sees it.
 #[derive(Debug, Clone, Serialize)]
 pub struct ApprovalDto {
     pub id: u64,
-    /// "net", "cookies", "computer", "files", or whatever the synth named
-    /// in a `permission.request`.
+    /// "net", "cookies", "computer", "files", "apps", or whatever the
+    /// synth named in a `permission.request`.
     pub capability: String,
-    /// A site, "task", "foreground:<tool>", a file path.
+    /// A site, "task", "foreground:<tool>", a file path, or for apps the
+    /// kind of action ("calendar.create", "messages.send:<recipient>").
     pub scope: String,
     /// App-authored English line from the core; the UI words its own from
     /// capability + scope and falls back to this.
     pub summary: String,
     /// The synth's own words. Untrusted; shown as "the synth says".
     pub reason: String,
+    /// The facts of the action itself, from the core (empty for most
+    /// requests).
+    pub details: Vec<DetailDto>,
+    /// What the owner may ask to be remembered: "any", "always" (only
+    /// "always", for this exact scope) or "never" (this time only).
+    pub remember: &'static str,
     pub asked_at_ms: u64,
     pub expires_at_ms: u64,
 }
@@ -77,6 +97,15 @@ impl Approvals {
             scope,
             summary: req.summary,
             reason: req.reason,
+            details: req
+                .details
+                .into_iter()
+                .map(|(key, value)| DetailDto {
+                    key: sanitize_reason(&key),
+                    value: value.chars().take(MAX_DETAIL).collect(),
+                })
+                .collect(),
+            remember: req.remember.label(),
             asked_at_ms: now,
             expires_at_ms: now + APPROVAL_TIMEOUT.as_millis() as u64,
         };

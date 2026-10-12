@@ -430,11 +430,12 @@ export function Onboarding(props: { initialStep?: Step }) {
 
   // done
   const where = state.app.os === "macos" ? s.general.whereMac : s.general.whereOther;
-  const on: { title: string; cap: "net" | "cookies" | "computer" | "files"; enabled: boolean }[] = [
+  const on: { title: string; cap: "net" | "cookies" | "computer" | "files" | "apps"; enabled: boolean }[] = [
     { title: s.nav.internet, cap: "net", enabled: settings.net.enabled },
     { title: s.nav.cookies, cap: "cookies", enabled: settings.cookies.enabled },
     { title: s.nav.computer, cap: "computer", enabled: settings.computer.enabled },
     { title: s.nav.files, cap: "files", enabled: settings.files.enabled },
+    { title: s.nav.apps, cap: "apps", enabled: settings.apps.enabled },
   ];
   const enabled = on.filter((o) => o.enabled);
   return (
@@ -467,7 +468,7 @@ export function Onboarding(props: { initialStep?: Step }) {
           {enabled.map((o) => (
             <div className="row" key={o.cap} style={{ minHeight: 38 }}>
               <span className="row-text">{o.title}</span>
-              <span className="row-value">{summarize(o.cap, settings, s)}</span>
+              <span className="row-value">{summarize(o.cap, settings, s, state.apps)}</span>
             </div>
           ))}
         </div>

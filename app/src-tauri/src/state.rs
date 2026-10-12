@@ -144,6 +144,9 @@ pub struct UiState {
     /// Updates of the app itself: phase, the setting, what blocks them.
     pub update: UpdateStatus,
     pub grants: Vec<GrantDto>,
+    /// The owner's own apps this computer offers (no Mac app on
+    /// Windows), with the owner's switches.
+    pub apps: Vec<connect_core::apps::AppView>,
     pub prefs: PrefsDto,
     pub app: AppInfo,
 }
@@ -171,6 +174,7 @@ pub async fn build_state(ctx: &Ctx) -> UiState {
             .into_iter()
             .map(|(capability, scope, until)| GrantDto { capability, scope, until })
             .collect(),
+        apps: ctx.core.apps_views(),
         prefs: PrefsDto {
             onboarded: prefs.onboarded,
             language: prefs.language,

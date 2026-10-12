@@ -3,6 +3,7 @@ import { backend } from "./backend";
 import { shortcutText } from "./lib/format";
 import { useActiveEntry, useStore } from "./lib/store";
 import { Activity } from "./screens/Activity";
+import { Apps } from "./screens/Apps";
 import { Computer } from "./screens/Computer";
 import { Cookies } from "./screens/Cookies";
 import { Files } from "./screens/Files";
@@ -11,10 +12,10 @@ import { Internet } from "./screens/Internet";
 import { Onboarding, type Step } from "./screens/Onboarding";
 import { Status } from "./screens/Status";
 import { Sheet } from "./ui/controls";
-import { IconCookie, IconFolder, IconGlobe, IconList, IconPause, IconPlay, IconPointer, IconSliders, IconStatus } from "./ui/icons";
+import { IconApps, IconCookie, IconFolder, IconGlobe, IconList, IconPause, IconPlay, IconPointer, IconSliders, IconStatus } from "./ui/icons";
 
-export type Screen = "status" | "internet" | "computer" | "files" | "cookies" | "activity" | "general";
-const SCREENS: Screen[] = ["status", "internet", "cookies", "computer", "files", "activity", "general"];
+export type Screen = "status" | "internet" | "computer" | "files" | "apps" | "cookies" | "activity" | "general";
+const SCREENS: Screen[] = ["status", "internet", "cookies", "computer", "files", "apps", "activity", "general"];
 
 function Sidebar(props: { screen: Screen; go: (screen: Screen) => void }) {
   const { state, s, name, act } = useStore();
@@ -40,6 +41,7 @@ function Sidebar(props: { screen: Screen; go: (screen: Screen) => void }) {
     { screen: "cookies", icon: <IconCookie />, title: s.nav.cookies, off: !settings.cookies.enabled },
     { screen: "computer", icon: <IconPointer />, title: s.nav.computer, off: !settings.computer.enabled },
     { screen: "files", icon: <IconFolder />, title: s.nav.files, off: !settings.files.enabled },
+    { screen: "apps", icon: <IconApps />, title: s.nav.apps, off: !settings.apps.enabled },
     { screen: "activity", icon: <IconList />, title: s.nav.activity },
     { screen: "general", icon: <IconSliders />, title: s.nav.general },
   ];
@@ -138,6 +140,7 @@ export function App(props: { initialScreen?: string | null; initialStep?: Step }
         {screen === "cookies" ? <Cookies /> : null}
         {screen === "computer" ? <Computer /> : null}
         {screen === "files" ? <Files /> : null}
+        {screen === "apps" ? <Apps /> : null}
         {screen === "activity" ? <Activity /> : null}
         {screen === "general" ? <General /> : null}
       </main>

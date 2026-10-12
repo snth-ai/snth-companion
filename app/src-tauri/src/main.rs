@@ -95,6 +95,9 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
         journal_path: Some(data_dir.join("journal.jsonl")),
         approver: Arc::new(UiApprover { app: handle.clone(), approvals: approvals.clone() }),
         cookies: Arc::new(browsers::system_reader()),
+        // The owner's own apps on this system. Notifications go out as
+        // this app (its name and icon), like the app's own.
+        apps: connect_core::apps::system_backend(Some(Arc::new(ui::AppNotifier { app: handle.clone() }))),
         secret,
         hub: Arc::new(UreqHubClient),
         app_version: app.package_info().version.to_string(),
@@ -371,6 +374,8 @@ fn main() {
             commands::cua_check,
             commands::cua_grant_permissions,
             commands::cua_install,
+            commands::apps_check,
+            commands::apps_request_permission,
             commands::set_language,
             commands::set_autostart,
             commands::set_stop_shortcut,

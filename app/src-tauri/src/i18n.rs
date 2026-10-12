@@ -120,6 +120,12 @@ pub fn approval_body(lang: Lang, capability: &str, scope: &str) -> String {
         (Lang::Ru, "computer") => "Управлять этим компьютером для задачи".into(),
         (Lang::En, "files") => format!("Change a file: {}", file_name()),
         (Lang::Ru, "files") => format!("Изменить файл: {}", file_name()),
+        // Only the kind of action: what a message says is shown in the
+        // request window, not in a notification on the lock screen.
+        (Lang::En, "apps") if scope.starts_with("messages.send:") => "Send a message as you".into(),
+        (Lang::Ru, "apps") if scope.starts_with("messages.send:") => "Отправить сообщение от вашего имени".into(),
+        (Lang::En, "apps") => "Change something in your apps".into(),
+        (Lang::Ru, "apps") => "Изменить что-то в ваших приложениях".into(),
         (Lang::En, _) => "Open the request window to answer.".into(),
         (Lang::Ru, _) => "Откройте окно запроса, чтобы ответить.".into(),
     }

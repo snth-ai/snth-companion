@@ -34,6 +34,9 @@ const COMMANDS: &[&str] = &[
     "cua_check",
     "cua_grant_permissions",
     "cua_install",
+    // the owner's own apps
+    "apps_check",
+    "apps_request_permission",
     // general
     "set_language",
     "set_autostart",

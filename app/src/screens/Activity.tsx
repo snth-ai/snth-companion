@@ -1,15 +1,16 @@
 import { useMemo, useState } from "react";
 import { buildLines, dayLabel, formatClock, type LineKind } from "../lib/format";
 import { useStore } from "../lib/store";
-import { IconCookie, IconFolder, IconGlobe, IconLink, IconPointer, IconUpdate } from "../ui/icons";
+import { IconApps, IconCookie, IconFolder, IconGlobe, IconLink, IconPointer, IconUpdate } from "../ui/icons";
 
-type Filter = "all" | "net" | "cookies" | "computer" | "files";
+type Filter = "all" | "net" | "cookies" | "computer" | "files" | "apps";
 
 const ICONS: Record<LineKind, () => React.JSX.Element> = {
   net: IconGlobe,
   cookies: IconCookie,
   computer: IconPointer,
   files: IconFolder,
+  apps: IconApps,
   link: IconLink,
   app: IconUpdate,
 };
@@ -39,6 +40,7 @@ export function Activity() {
     { value: "cookies", title: t.cookies },
     { value: "computer", title: t.computer },
     { value: "files", title: t.files },
+    { value: "apps", title: t.apps },
   ];
 
   return (

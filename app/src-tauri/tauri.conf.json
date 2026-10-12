@@ -21,7 +21,7 @@
     "targets": "all",
     "category": "Utility",
     "shortDescription": "Link this computer to your synth, on your terms.",
-    "longDescription": "SNTH Connect links your computer to your cloud companion and lets you decide what it may do here: use this computer's internet, sign in to sites as you, control the computer, and work in folders you choose.",
+    "longDescription": "SNTH Connect links your computer to your cloud companion and lets you decide what it may do here: use this computer's internet, sign in to sites as you, control the computer, work in folders you choose, and use your own apps.",
     "copyright": "SNTH",
     "icon": [
       "icons/32x32.png",
@@ -31,7 +31,8 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "minimumSystemVersion": "12.0"
+      "minimumSystemVersion": "12.0",
+      "entitlements": "Entitlements.plist"
     },
     "windows": {
       "nsis": {

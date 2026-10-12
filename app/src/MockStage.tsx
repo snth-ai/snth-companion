@@ -43,6 +43,10 @@ export function MockStage(props: { approvalOnly?: boolean }) {
     ["computer", "task"],
     ["foreground", "screen"],
     ["files", "file"],
+    ["message", "message"],
+    ["event", "event"],
+    ["shortcutinput", "shortcut"],
+    ["openurl", "link"],
     ["other", "unknown"],
   ];
 

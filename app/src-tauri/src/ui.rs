@@ -41,6 +41,27 @@ fn notify(app: &AppHandle, title: &str, body: &str) {
     let _ = app.notification().builder().title(title).body(body).show();
 }
 
+/// Shows the notifications the synth asks for (`apps.notify.show`) as
+/// this app, the same way the app shows its own. The core has already
+/// bounded the texts and put the synth's name in front of the title.
+pub struct AppNotifier {
+    pub app: AppHandle,
+}
+
+impl connect_core::apps::Notifier for AppNotifier {
+    fn show(&self, title: String, body: String) -> connect_core::apps::notify::NotifyFuture {
+        let shown = self
+            .app
+            .notification()
+            .builder()
+            .title(title)
+            .body(body)
+            .show()
+            .map_err(|e| format!("the system did not show the notification: {e}"));
+        Box::pin(async move { shown })
+    }
+}
+
 pub fn notify_approval(app: &AppHandle, dto: &ApprovalDto) {
     let Some(ctx) = app.try_state::<std::sync::Arc<Ctx>>() else {
         return;

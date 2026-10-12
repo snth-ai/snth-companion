@@ -1561,7 +1561,7 @@ details.more .more-body {
 
 .mock-window.small {
   width: 440px;
-  height: 500px;
+  height: 640px;
 }
 
 .mock-caption {
@@ -1591,4 +1591,87 @@ details.more .more-body {
     animation: none !important;
     transition: none !important;
   }
+}
+
+/* ---------- the owner's apps ---------- */
+
+.app-row {
+  align-items: flex-start;
+}
+
+.app-row .switch {
+  margin-top: 2px;
+}
+
+.app-perm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px 8px;
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-2);
+}
+
+.app-perm > span {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.app-perm.yes {
+  color: var(--ok);
+}
+
+.app-perm.no {
+  color: var(--warn-text);
+}
+
+.app-perm .icon {
+  flex: none;
+  margin-top: 2px;
+}
+
+/* The request window: the thing itself (a message, an event), in full. */
+
+.exact {
+  margin-top: 12px;
+  padding: 9px 12px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface, var(--bg));
+}
+
+.exact-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.exact dl {
+  margin: 4px 0 0;
+}
+
+.exact-row {
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  gap: 2px 10px;
+  padding: 3px 0;
+}
+
+.exact dt {
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.exact dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.exact dd.long {
+  max-height: 112px;
+  overflow-y: auto;
 }

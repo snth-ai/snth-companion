@@ -1,4 +1,4 @@
-import type { Entry, Grant, Settings } from "../backend/types";
+import type { AppView, Entry, Grant, Settings } from "../backend/types";
 import type { Lang, Strings } from "../i18n";
 
 const locale = (lang: Lang) => (lang === "ru" ? "ru-RU" : "en-US");
@@ -150,9 +150,22 @@ export function acceleratorFromEvent(e: KeyboardEvent, os: string): string | nul
 
 // --- one-line summaries of what is allowed ---
 
-export function summarize(capability: "net" | "cookies" | "computer" | "files", settings: Settings, s: Strings): string {
+export function summarize(
+  capability: "net" | "cookies" | "computer" | "files" | "apps",
+  settings: Settings,
+  s: Strings,
+  apps: AppView[] = [],
+): string {
   const sum = s.status.sum;
   switch (capability) {
+    case "apps": {
+      if (!settings.apps.enabled) return sum.off;
+      // Only what this computer has and the owner left switched on.
+      const count = apps.filter((a) => a.on).length;
+      if (count === 0) return sum.appsNone;
+      const mode = settings.apps.mode === "ask" ? sum.appsAsk : settings.apps.mode === "ask_new" ? sum.appsAskNew : sum.appsAuto;
+      return `${sum.apps(count)}, ${mode}`;
+    }
     case "net":
       if (!settings.net.enabled) return sum.off;
       if (settings.net.mode === "all") return sum.netAll;
@@ -186,7 +199,7 @@ export function grantTime(grant: Grant, s: Strings, lang: Lang): string {
 
 // --- the activity journal in plain words ---
 
-export type LineKind = "net" | "cookies" | "computer" | "files" | "link" | "app";
+export type LineKind = "net" | "cookies" | "computer" | "files" | "apps" | "link" | "app";
 
 export interface Line {
   key: string;
@@ -205,7 +218,10 @@ function refusalReason(outcome: string, s: Strings): string {
   const o = outcome.toLowerCase();
   if (o.includes("no answer")) return why.noAnswer;
   if (o.includes("paused")) return why.paused;
-  if (o.includes("turned off on this computer")) return why.off;
+  if (o.includes("turned off on this computer") || o.includes("is turned off")) return why.off;
+  if (o.includes("too many notifications")) return why.tooMany;
+  if (o.includes("not opened")) return why.notDocument;
+  if (o.includes("no folder is shared")) return why.outsideFolders;
   if (o.includes("foreground delivery is turned off")) return why.screenOff;
   if (o.includes("foreground delivery is allowed only")) return why.screenAway;
   if (o.includes("did not allow") || o === "denied: owner") return why.youSaidNo;
@@ -272,6 +288,29 @@ export function describeEntry(entry: Entry, s: Strings, lang: Lang): Omit<Line, 
       if (refused) return { ...base, kind: "computer", text: j.toolRefused(what), note: why };
       return { ...base, kind: "computer", text: what, note: "" };
     }
+    case "apps": {
+      // "calendar.list", "open.url"... The target is a site, a file, an
+      // app or a shortcut name where there is one, and empty otherwise:
+      // what a message or a note says is never in the journal.
+      const what =
+        entry.action === "shortcuts.run"
+          ? j.appShortcut(entry.target)
+          : entry.action === "open.url"
+            ? j.appUrl(entry.target)
+            : entry.action === "open.file"
+              ? j.appFile(shortPath(entry.target))
+              : entry.action === "open.app"
+                ? j.appOpenApp(entry.target)
+                : (j.app[entry.action] ?? j.appOther(entry.action));
+      const appId = entry.action.split(".")[0] ?? "";
+      const appTitle = s.apps.title[appId] ?? appId;
+      if (refused) return { ...base, kind: "apps", text: j.appRefused(appTitle), note: why };
+      if (!ok) {
+        const notHere = entry.outcome.includes("not available") ? j.why.notHere : "";
+        return { ...base, kind: "apps", text: j.appFailed(appTitle), note: notHere };
+      }
+      return { ...base, kind: "apps", text: what, note: entry.count === undefined ? "" : j.appCount(entry.count) };
+    }
     case "link":
       return { ...base, kind: "link", text: j.linkUp, note: "" };
     case "app":
@@ -307,6 +346,7 @@ export interface TodayCounters {
   cookies: number;
   computer: number;
   files: number;
+  apps: number;
   refused: number;
 }
 
@@ -314,7 +354,7 @@ export function todayCounters(entries: Entry[]): TodayCounters {
   const midnight = new Date();
   midnight.setHours(0, 0, 0, 0);
   const from = midnight.getTime() / 1000;
-  const c: TodayCounters = { netCount: 0, netBytes: 0, cookies: 0, computer: 0, files: 0, refused: 0 };
+  const c: TodayCounters = { netCount: 0, netBytes: 0, cookies: 0, computer: 0, files: 0, apps: 0, refused: 0 };
   for (const e of entries) {
     if (e.time < from) continue;
     if (e.outcome.startsWith("denied")) {
@@ -328,6 +368,7 @@ export function todayCounters(entries: Entry[]): TodayCounters {
     } else if (e.capability === "cookies") c.cookies += 1;
     else if (e.capability === "computer" && e.action === "tools/call") c.computer += 1;
     else if (e.capability === "files") c.files += 1;
+    else if (e.capability === "apps") c.apps += 1;
   }
   return c;
 }

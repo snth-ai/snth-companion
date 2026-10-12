@@ -7,7 +7,13 @@ export type CookiesMode = "ask" | "ask_new" | "auto";
 export type ComputerMode = "ask" | "auto" | "away";
 export type Foreground = "never" | "idle" | "ask" | "always";
 export type Preset = "careful" | "balanced" | "full" | "custom";
-export type Capability = "net" | "cookies" | "computer" | "files";
+export type Capability = "net" | "cookies" | "computer" | "files" | "apps";
+/** When the app asks before a change in the owner's apps: every time,
+ * with the option to remember, or never. Reading never asks; sending a
+ * message always does. */
+export type AppsMode = "ask" | "ask_new" | "auto";
+/** The owner's own apps. Which of them exist depends on the system. */
+export type AppId = "messages" | "contacts" | "calendar" | "reminders" | "notes" | "shortcuts" | "notify" | "clipboard" | "open";
 
 export interface Root {
   path: string;
@@ -35,7 +41,40 @@ export interface Settings {
     tool_denylist: string[];
   };
   files: { enabled: boolean; roots: Root[]; ask_on_write: boolean };
+  apps: {
+    enabled: boolean;
+    mode: AppsMode;
+    /** Only the switches the owner moved away from the default (on,
+     * except Messages). */
+    apps: Record<string, boolean>;
+  };
   preset: Preset;
+}
+
+/** One app this computer has, with the owner's switch. */
+export interface AppView {
+  id: AppId;
+  on: boolean;
+  actions: string[];
+}
+
+export type AppPermissionKind = "automation" | "full_disk";
+/** granted / denied (only System Settings changes it) / not_asked (the
+ * system asks on first use) / unknown (cannot be told right now). */
+export type AppPermissionState = "granted" | "denied" | "not_asked" | "unknown";
+
+export interface AppPermission {
+  kind: AppPermissionKind;
+  state: AppPermissionState;
+}
+
+export interface AppStatus extends AppView {
+  /** The system permissions this app needs. Empty = none. */
+  permissions: AppPermission[];
+}
+
+export interface AppsStatus {
+  apps: AppStatus[];
 }
 
 export interface Snapshot {
@@ -98,6 +137,9 @@ export interface UiState {
   helper_retry_at: number | null;
   update: UpdateStatus;
   grants: Grant[];
+  /** The apps this computer offers (no Mac app on Windows), with the
+   * owner's switches. */
+  apps: AppView[];
   prefs: {
     onboarded: boolean;
     /** "en" / "ru" when the owner picked one; null = follow the system. */
@@ -130,6 +172,14 @@ export interface Entry {
   target: string;
   outcome: string;
   bytes?: number;
+  /** How many items a call in the owner's apps returned. */
+  count?: number;
+}
+
+/** One fact of the action the owner is asked about, shown in full. */
+export interface ApprovalDetail {
+  key: string;
+  value: string;
 }
 
 export interface ApprovalRequest {
@@ -140,6 +190,11 @@ export interface ApprovalRequest {
   summary: string;
   /** The synth's own words. Untrusted. */
   reason: string;
+  /** What will actually be sent or created (apps only; else empty). */
+  details: ApprovalDetail[];
+  /** What may be remembered: anything, only "always" for this exact
+   * scope, or nothing. */
+  remember: "any" | "always" | "never";
   asked_at_ms: number;
   expires_at_ms: number;
 }
@@ -186,7 +241,13 @@ export type UpdateStatus = UpdatePhase & {
   updated_from: string | null;
 };
 
-export type ExternalTarget = "privacy_accessibility" | "privacy_screen" | "helper" | "releases";
+export type ExternalTarget =
+  | "privacy_accessibility"
+  | "privacy_screen"
+  | "privacy_automation"
+  | "privacy_full_disk"
+  | "helper"
+  | "releases";
 
 export type UiEvent =
   | { type: "state" }
@@ -232,6 +293,11 @@ export interface Backend {
   cuaGrantPermissions(): Promise<void>;
   /** "Try again now" after a failed helper install. */
   cuaInstall(): Promise<void>;
+
+  /** The offered apps and where their system permissions stand. */
+  appsCheck(): Promise<AppsStatus>;
+  /** macOS asks whether SNTH Connect may control this app. */
+  appsRequestPermission(app: string): Promise<void>;
 
   setLanguage(language: string | null, resolved: string): Promise<UiState>;
   setAutostart(enabled: boolean): Promise<UiState>;

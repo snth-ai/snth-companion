@@ -223,6 +223,9 @@ pub async fn update_settings(ctx: Cx<'_>, settings: Settings) -> Result<UiState,
         (!a.is_empty() && a.len() <= 120).then(|| a.to_string())
     });
     next.computer.away_idle_minutes = next.computer.away_idle_minutes.clamp(1, 240);
+    // Only apps this build knows, and only the switches that differ from
+    // the default, so equal choices compare equal to a preset.
+    next.apps.normalize(connect_core::apps::APPS);
     ctx.core.mutate_settings(move |s| {
         next.files.roots = s.files.roots.clone();
         next.computer.tool_denylist = s.computer.tool_denylist.clone();
@@ -454,6 +457,59 @@ pub fn cua_install(ctx: Cx<'_>) {
     ctx.helper_retry.notify_one();
 }
 
+// --- the owner's own apps ---
+
+#[derive(Serialize)]
+pub struct AppStatusDto {
+    /// "calendar", "messages", "clipboard"...
+    id: &'static str,
+    /// The owner's switch for this app.
+    on: bool,
+    actions: Vec<&'static str>,
+    /// The system permissions this app needs and where they stand. Empty
+    /// = none needed.
+    permissions: Vec<connect_core::apps::Permission>,
+}
+
+#[derive(Serialize)]
+pub struct AppsDto {
+    /// Only the apps this computer has: no Mac app on Windows.
+    apps: Vec<AppStatusDto>,
+}
+
+/// What this computer offers and where each app's permission stands.
+/// Read-only: nothing is shown and no app is started.
+#[tauri::command]
+pub async fn apps_check(ctx: Cx<'_>) -> Result<AppsDto, String> {
+    let core = ctx.core.clone();
+    tauri::async_runtime::spawn_blocking(move || AppsDto {
+        apps: core
+            .apps_views()
+            .into_iter()
+            .map(|v| AppStatusDto { id: v.id, on: v.on, permissions: core.apps_permissions(v.id), actions: v.actions })
+            .collect(),
+    })
+    .await
+    .map_err(|e| format!("apps_check: {e}"))
+}
+
+/// Make macOS ask whether SNTH Connect may control one app (its own
+/// window comes up; the app in question is opened for it). Only from the
+/// owner's click. `app` must be one this computer offers.
+#[tauri::command]
+pub async fn apps_request_permission(ctx: Cx<'_>, app: String) -> Result<(), String> {
+    let core = ctx.core.clone();
+    if !core.apps_views().iter().any(|v| v.id == app) {
+        return Err("unknown_app".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        core.apps_request_permission(&app, connect_core::apps::PermissionKind::Automation)
+    })
+    .await
+    .map_err(|e| format!("helper_failed: {e}"))?
+    .map_err(|e| format!("helper_failed: {e}"))
+}
+
 // --- general ---
 
 /// `language`: "en" / "ru", or None to follow the OS again. `resolved` is
@@ -576,6 +632,8 @@ pub async fn diagnostics(ctx: Cx<'_>) -> Result<String, String> {
         format!("computer control: {} (mode {:?}, screen {:?}, away after {} min, {} blocked apps)",
             on(s.computer.enabled), s.computer.mode, s.computer.foreground, s.computer.away_idle_minutes, s.computer.app_blocklist.len()),
         format!("files: {} ({} folders, ask before writing {})", on(s.files.enabled), s.files.roots.len(), on(s.files.ask_on_write)),
+        format!("apps: {} (mode {:?}, on: {})", on(s.apps.enabled), s.apps.mode,
+            ctx.core.apps_views().iter().filter(|v| v.on).map(|v| v.id).collect::<Vec<_>>().join(" ")),
         format!("remembered permissions: {}", st.grants.len()),
         String::new(),
         format!("Cua Driver: {} (status {}, expected {})",
@@ -619,6 +677,12 @@ pub fn open_external(target: String) -> Result<(), String> {
         }
         "privacy_screen" => {
             "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+        }
+        "privacy_automation" => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"
+        }
+        "privacy_full_disk" => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
         }
         "helper" => "https://cua.ai/docs/cua-driver",
         "releases" => "https://github.com/snth-ai/snth-companion/releases/latest",

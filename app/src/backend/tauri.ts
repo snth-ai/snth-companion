@@ -37,6 +37,9 @@ export const tauriBackend: Backend = {
   cuaGrantPermissions: () => invoke("cua_grant_permissions"),
   cuaInstall: () => invoke("cua_install"),
 
+  appsCheck: () => invoke("apps_check"),
+  appsRequestPermission: (app) => invoke("apps_request_permission", { app }),
+
   setLanguage: (language, resolved) => invoke("set_language", { language, resolved }),
   setAutostart: (enabled) => invoke("set_autostart", { enabled }),
   setStopShortcut: (accelerator) => invoke("set_stop_shortcut", { accelerator }),

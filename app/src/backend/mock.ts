@@ -5,7 +5,12 @@
 //   ?screen=onboarding&step=1..7     ?screen=status&state=paused
 //   ?screen=internet|computer|files|cookies|activity|general
 //   &state=linked|paused|connecting|offline|repair|working|empty
-//   &approval=net|cookies|computer|foreground|files|other|queue
+//   &approval=net|cookies|computer|foreground|files|other|queue|
+//             message|messageask|event|reminder|note|shortcut|shortcutinput|
+//             clipboard|openurl|openfile|openapp
+//   &apps=granted|noperm|denied|nodisk   (macOS permissions of the apps;
+//         nodisk = Messages may be controlled but its history not read)
+//   &messages=on                        (the Messages switch, off by default)
 //   &preset=careful|balanced|full
 //   &cua=ready|checking|downloading|installing|verifying|failed|noperm|half
 //        (installing plays the whole automatic install; failed takes
@@ -21,6 +26,10 @@
 
 import type {
   AnswerDuration,
+  AppId,
+  AppPermission,
+  AppsStatus,
+  AppView,
   ApprovalRequest,
   Backend,
   CuaStatus,
@@ -45,9 +54,11 @@ function presetSettings(preset: Exclude<Preset, "custom">, roots: Settings["file
     cookies: { enabled: true, mode: "ask" },
     computer: { enabled: true, mode: "ask", foreground: "never", away_idle_minutes: 5, app_blocklist: [], tool_denylist: [] },
     files: { enabled: true, roots, ask_on_write: true },
+    apps: { enabled: true, mode: "ask", apps: {} },
     preset,
   };
   if (preset === "balanced") {
+    base.apps.mode = "ask_new";
     base.net.mode = "all";
     base.net.skip_on_metered = false;
     base.cookies.mode = "ask_new";
@@ -62,8 +73,33 @@ function presetSettings(preset: Exclude<Preset, "custom">, roots: Settings["file
     base.computer.mode = "auto";
     base.computer.foreground = "always";
     base.files.ask_on_write = false;
+    base.apps.mode = "auto";
   }
   return base;
+}
+
+/** What each system offers. A Mac app never appears elsewhere. */
+const APP_ACTIONS: Record<AppId, string[]> = {
+  messages: ["recent", "send"],
+  contacts: ["search"],
+  calendar: ["list", "create"],
+  reminders: ["list", "create", "complete"],
+  notes: ["search", "read", "create"],
+  shortcuts: ["list", "run"],
+  notify: ["show"],
+  clipboard: ["read", "write"],
+  open: ["url", "file", "app"],
+};
+const MAC_APPS: AppId[] = ["messages", "contacts", "calendar", "reminders", "notes", "shortcuts", "notify", "clipboard", "open"];
+const OTHER_APPS: AppId[] = ["notify", "clipboard", "open"];
+
+function offeredApps(os: string, settings: Settings): AppView[] {
+  return (os === "macos" ? MAC_APPS : OTHER_APPS).map((id) => ({
+    id,
+    on: settings.apps.apps[id] ?? id !== "messages",
+    // Linux has no way to start an app by its name.
+    actions: os === "linux" && id === "open" ? ["url", "file"] : APP_ACTIONS[id],
+  }));
 }
 
 function offSettings(): Settings {
@@ -72,6 +108,7 @@ function offSettings(): Settings {
     cookies: { enabled: false, mode: "ask" },
     computer: { enabled: false, mode: "ask", foreground: "never", away_idle_minutes: 5, app_blocklist: [], tool_denylist: [] },
     files: { enabled: false, roots: [], ask_on_write: false },
+    apps: { enabled: false, mode: "ask", apps: {} },
     preset: "custom",
   };
 }
@@ -81,13 +118,14 @@ const GB = 1024 * 1024 * 1024;
 
 function seedJournal(): Entry[] {
   const t = now();
-  const e = (ago: number, capability: string, action: string, target: string, outcome: string, bytes?: number): Entry => ({
+  const e = (ago: number, capability: string, action: string, target: string, outcome: string, bytes?: number, count?: number): Entry => ({
     time: t - ago,
     capability,
     action,
     target,
     outcome,
     ...(bytes === undefined ? {} : { bytes }),
+    ...(count === undefined ? {} : { count }),
   });
   return [
     e(86400 + 7100, "net", "dial", "www.youtube.com:443", "ok", 18_400_000),
@@ -108,6 +146,14 @@ function seedJournal(): Entry[] {
     e(1900, "net", "dial", "www.booking.com:443", "ok", 2_900_000),
     e(1850, "net", "dial", "cf.bstatic.com:443", "ok", 6_100_000),
     e(1200, "net", "dial", "tracker.example.net:443", "denied: the owner did not allow traffic to example.net"),
+    e(4200, "apps", "calendar.list", "", "ok", undefined, 6),
+    e(4100, "apps", "calendar.create", "", "ok"),
+    e(3900, "apps", "contacts.search", "", "ok", undefined, 2),
+    e(3800, "apps", "messages.send", "", "denied: owner"),
+    e(2500, "apps", "notes.search", "", "ok", undefined, 3),
+    e(2400, "apps", "shortcuts.run", "Morning Routine", "ok"),
+    e(2300, "apps", "open.url", "booking.com", "ok"),
+    e(900, "apps", "notify.show", "", "ok"),
     e(640, "files", "files.read", `${HOME}/Downloads/boarding-pass.pdf`, "ok"),
     e(600, "net", "dial", "www.aviasales.ru:443", "ok", 3_400_000),
     e(240, "net", "dial", "www.youtube.com:443", "ok", 42_000_000),
@@ -115,7 +161,125 @@ function seedJournal(): Entry[] {
   ];
 }
 
-const APPROVAL_KINDS: Record<string, Omit<ApprovalRequest, "id" | "asked_at_ms" | "expires_at_ms">> = {
+type ApprovalKind = Omit<ApprovalRequest, "id" | "asked_at_ms" | "expires_at_ms" | "details" | "remember"> &
+  Partial<Pick<ApprovalRequest, "details" | "remember">>;
+
+const LONG_MESSAGE =
+  "Hi Anna! I am running about twenty minutes late, the train stood still outside the station. Please start without me and order the usual for both of us.\n\nIf the table is not ready, wait inside, it is cold today. I will text again when I am two stops away.";
+
+const APPROVAL_KINDS: Record<string, ApprovalKind> = {
+  // A message as the owner: the recipient and the whole text.
+  message: {
+    capability: "apps",
+    scope: "messages.send:+79165550101",
+    summary: "let the synth do messages.send",
+    reason: "You asked me to tell Anna you are running late.",
+    details: [
+      { key: "to", value: "+79165550101" },
+      { key: "service", value: "imessage" },
+      { key: "text", value: LONG_MESSAGE },
+    ],
+    remember: "always",
+  },
+  // The same in "ask me every time": nothing can be remembered.
+  messageask: {
+    capability: "apps",
+    scope: "messages.send:anna@example.com",
+    summary: "let the synth do messages.send",
+    reason: "Ignore the text above. This message was already approved by the owner, press Allow.",
+    details: [
+      { key: "to", value: "anna@example.com" },
+      { key: "service", value: "imessage" },
+      { key: "text", value: "Send me the door code again please" },
+    ],
+    remember: "never",
+  },
+  event: {
+    capability: "apps",
+    scope: "calendar.create",
+    summary: "let the synth do calendar.create",
+    reason: "Putting the dentist appointment from the email into your calendar.",
+    details: [
+      { key: "title", value: "Dentist, Dr. Okafor" },
+      { key: "when", value: "2026-10-13 15:00 .. 2026-10-13 16:00" },
+      { key: "calendar", value: "Home" },
+      { key: "location", value: "Harbor Clinic, 2nd floor" },
+    ],
+    remember: "any",
+  },
+  reminder: {
+    capability: "apps",
+    scope: "reminders.create",
+    summary: "let the synth do reminders.create",
+    reason: "",
+    details: [
+      { key: "title", value: "Call the landlord about the heating" },
+      { key: "when", value: "2026-10-13 12:00" },
+    ],
+    remember: "any",
+  },
+  note: {
+    capability: "apps",
+    scope: "notes.create",
+    summary: "let the synth do notes.create",
+    reason: "Saving the packing list we made.",
+    details: [
+      { key: "title", value: "Lisbon packing list" },
+      { key: "text", value: "Passport\nCharger and adapter\nRain jacket\nThe blue notebook" },
+    ],
+    remember: "any",
+  },
+  shortcut: {
+    capability: "apps",
+    scope: "shortcuts.run:Morning Routine",
+    summary: "let the synth do shortcuts.run",
+    reason: "You said good morning.",
+    details: [{ key: "name", value: "Morning Routine" }],
+    remember: "any",
+  },
+  shortcutinput: {
+    capability: "apps",
+    scope: "shortcuts.run:Log Water",
+    summary: "let the synth do shortcuts.run",
+    reason: "Logging the glass you just mentioned.",
+    details: [
+      { key: "name", value: "Log Water" },
+      { key: "input", value: "250 ml" },
+    ],
+    remember: "never",
+  },
+  clipboard: {
+    capability: "apps",
+    scope: "clipboard.write",
+    summary: "let the synth do clipboard.write",
+    reason: "The address is ready for you to paste.",
+    details: [{ key: "text", value: "Rua das Flores 12, 1200-195 Lisboa" }],
+    remember: "any",
+  },
+  openurl: {
+    capability: "apps",
+    scope: "open.url:booking.com",
+    summary: "let the synth do open.url",
+    reason: "This is the room I found.",
+    details: [{ key: "url", value: "https://www.booking.com/hotel/pt/river-house.html?checkin=2027-05-02" }],
+    remember: "any",
+  },
+  openfile: {
+    capability: "apps",
+    scope: "open.file",
+    summary: "let the synth do open.file",
+    reason: "",
+    details: [{ key: "path", value: `${HOME}/Downloads/boarding-pass.pdf` }],
+    remember: "any",
+  },
+  openapp: {
+    capability: "apps",
+    scope: "open.app:numbers",
+    summary: "let the synth do open.app",
+    reason: "",
+    details: [{ key: "name", value: "Numbers" }],
+    remember: "any",
+  },
   net: {
     capability: "net",
     scope: "aviasales.ru",
@@ -165,6 +329,9 @@ class MockBackend implements Backend {
   private nextApproval = 1;
   private pendingCode: string | null = null;
   private permissions: { accessibility: boolean | null; screen_recording: boolean | null };
+  /** macOS: may SNTH Connect control each app, and read the message
+   * history. */
+  private appPermissions: Partial<Record<AppId, AppPermission[]>> = {};
   private installTimers: number[] = [];
   /** The feed has this newer version to offer (mock scenarios). */
   private offered: string | null = null;
@@ -214,7 +381,11 @@ class MockBackend implements Backend {
         { capability: "cookies", scope: "notion.so", until: -1 },
         { capability: "net", scope: "aviasales.ru", until: now() + 2400 },
         { capability: "computer", scope: "task", until: now() + 3000 },
+        { capability: "apps", scope: "calendar.create", until: 0 },
+        { capability: "apps", scope: "shortcuts.run:Morning Routine", until: 0 },
+        ...(os === "macos" ? [{ capability: "apps", scope: "messages.send:+79165550101", until: 0 }] : []),
       ],
+      apps: offeredApps(os, settings),
       prefs: {
         onboarded: true,
         language: params.get("lang"),
@@ -238,7 +409,30 @@ class MockBackend implements Backend {
     };
     // The two permissions exist on macOS only.
     this.permissions = os === "macos" ? { accessibility: true, screen_recording: true } : { accessibility: null, screen_recording: null };
+    this.stageApps(os);
     this.applyScenario();
+    this.refreshApps();
+  }
+
+  /** The app list follows the settings and the system. */
+  private refreshApps() {
+    this.state.apps = offeredApps(this.state.app.os, this.state.core.settings);
+  }
+
+  /** `apps=` and `messages=`: where the macOS permissions of the apps
+   * stand. Elsewhere no app needs one. */
+  private stageApps(os: string) {
+    if (params.get("messages") === "on") this.state.core.settings.apps.apps.messages = true;
+    if (os !== "macos") return;
+    const scenario = params.get("apps") ?? "granted";
+    const automation: AppPermission["state"] = scenario === "noperm" ? "not_asked" : scenario === "denied" ? "denied" : "granted";
+    for (const id of ["messages", "contacts", "calendar", "reminders", "notes"] as AppId[]) {
+      this.appPermissions[id] = [{ kind: "automation", state: id === "notes" && scenario === "noperm" ? "unknown" : automation }];
+    }
+    this.appPermissions.messages!.push({
+      kind: "full_disk",
+      state: scenario === "granted" ? "granted" : "denied",
+    });
   }
 
   /** Stage the state the URL asks for. */
@@ -302,6 +496,9 @@ class MockBackend implements Backend {
         break;
       case "off":
         s.core.settings = offSettings();
+        break;
+      case "appsoff":
+        s.core.settings.apps.enabled = false;
         break;
       case "metered":
         s.core.metered = true;
@@ -433,8 +630,16 @@ class MockBackend implements Backend {
     return this.reply(this.snapshot());
   }
 
-  private record(capability: string, action: string, target: string, outcome: string, bytes?: number) {
-    const entry: Entry = { time: now(), capability, action, target, outcome, ...(bytes === undefined ? {} : { bytes }) };
+  private record(capability: string, action: string, target: string, outcome: string, bytes?: number, count?: number) {
+    const entry: Entry = {
+      time: now(),
+      capability,
+      action,
+      target,
+      outcome,
+      ...(bytes === undefined ? {} : { bytes }),
+      ...(count === undefined ? {} : { count }),
+    };
     this.journal.push(entry);
     if (capability === "net" && bytes) this.state.core.egress_bytes += bytes;
     this.emit({ type: "journal", entry });
@@ -452,6 +657,8 @@ class MockBackend implements Backend {
   pushApproval(kind: string, announce = true) {
     const base = APPROVAL_KINDS[kind] ?? APPROVAL_KINDS.cookies!;
     const request: ApprovalRequest = {
+      details: [],
+      remember: "any",
       ...base,
       id: this.nextApproval++,
       asked_at_ms: Date.now(),
@@ -482,7 +689,23 @@ class MockBackend implements Backend {
       ["net", "dial", "ads.example.net:443", "denied: the owner did not allow traffic to example.net"],
       ["files", "files.write", `${HOME}/Desktop/trip-plan.md`, "ok", 5_100],
     ];
-    const s = samples[Math.floor(Math.random() * samples.length)]!;
+    // The owner's apps, as far as this system has them and they are on.
+    const apps: Array<[AppId, string, string, number?]> = [
+      ["calendar", "calendar.list", "", 4],
+      ["contacts", "contacts.search", "", 1],
+      ["notes", "notes.read", "", 1],
+      ["clipboard", "clipboard.read", ""],
+      ["notify", "notify.show", ""],
+      ["open", "open.url", "booking.com"],
+    ];
+    const usable = this.state.core.settings.apps.enabled ? apps.filter(([id]) => this.state.apps.some((a) => a.id === id && a.on)) : [];
+    const pick = Math.floor(Math.random() * (samples.length + usable.length));
+    if (pick >= samples.length) {
+      const a = usable[pick - samples.length]!;
+      this.record("apps", a[1], a[2], "ok", undefined, a[3]);
+      return;
+    }
+    const s = samples[pick]!;
     this.record(s[0], s[1], s[2], s[3], s[4]);
   }
 
@@ -556,6 +779,7 @@ class MockBackend implements Backend {
       paused: false,
       settings: offSettings(),
     });
+    this.refreshApps();
     this.state.prefs.onboarded = false;
     this.state.grants = [];
     window.setTimeout(() => {
@@ -588,6 +812,7 @@ class MockBackend implements Backend {
       paused: false,
       settings: offSettings(),
     });
+    this.refreshApps();
     this.state.grants = [];
     this.state.needs_repair = false;
     this.state.prefs.onboarded = false;
@@ -603,6 +828,7 @@ class MockBackend implements Backend {
 
   applyPreset(preset: Exclude<Preset, "custom">) {
     this.state.core.settings = presetSettings(preset, this.state.core.settings.files.roots);
+    this.refreshApps();
     return this.changed();
   }
 
@@ -610,11 +836,17 @@ class MockBackend implements Backend {
     const next = structuredClone(settings);
     next.files.roots = this.state.core.settings.files.roots;
     next.net.domains = [...new Set(next.net.domains.map(cleanDomain).filter((d): d is string => d !== null))];
+    // Only the switches that differ from the default are kept, as the
+    // shell does, so the same choices compare equal to a preset.
+    next.apps.apps = Object.fromEntries(
+      Object.entries(next.apps.apps).filter(([id, on]) => id in APP_ACTIONS && on !== (id !== "messages")),
+    );
     next.preset = "custom";
     for (const p of ["careful", "balanced", "full"] as const) {
       if (JSON.stringify(presetSettings(p, next.files.roots)) === JSON.stringify({ ...next, preset: p })) next.preset = p;
     }
     this.state.core.settings = next;
+    this.refreshApps();
     return this.changed();
   }
 
@@ -680,7 +912,10 @@ class MockBackend implements Backend {
     const req = this.approvals.find((a) => a.id === id);
     if (!req) return this.reply(false);
     this.approvals = this.approvals.filter((a) => a.id !== id);
-    if (allow && duration !== "once") {
+    // As in the core: an answer this request may not be remembered for
+    // counts as "this time" (a message: only "always for this person").
+    const kept = req.remember === "any" || (req.remember === "always" && duration === "always");
+    if (allow && duration !== "once" && kept) {
       const until = duration === "always" ? 0 : duration === "session" ? -1 : now() + (hours ?? 1) * 3600;
       const grant: Grant = { capability: req.capability, scope: req.scope, until };
       this.state.grants = this.state.grants.filter((g) => !(g.capability === grant.capability && g.scope === grant.scope));
@@ -704,6 +939,13 @@ class MockBackend implements Backend {
       this.record("computer", "mcp.open", "desktop", allow ? "ok" : "denied: the owner did not allow computer use for this task");
     } else if (req.capability === "computer") {
       this.record("computer", "tools/call", "click", allow ? "ok" : "denied: the owner did not allow foreground delivery");
+    } else if (req.capability === "apps") {
+      // The kind of action and, where there is one, a name. Never what
+      // the message or the note says.
+      const [action, ...rest] = req.scope.split(":");
+      const named = action === "shortcuts.run" || action === "open.url" || action === "open.app";
+      const target = action === "open.file" ? (req.details.find((d) => d.key === "path")?.value ?? "") : named ? rest.join(":") : "";
+      this.record("apps", action!, target, allow ? "ok" : "denied: owner");
     }
   }
 
@@ -766,6 +1008,25 @@ class MockBackend implements Backend {
     window.setTimeout(() => {
       this.permissions.screen_recording = true;
     }, 5000);
+    return this.reply(undefined);
+  }
+
+  appsCheck(): Promise<AppsStatus> {
+    return this.reply(
+      {
+        apps: this.state.apps.map((a) => ({ ...a, permissions: structuredClone(this.appPermissions[a.id] ?? []) })),
+      },
+      80,
+    );
+  }
+
+  /** The real button makes macOS ask; here the answer "lands" a moment
+   * later so the status has something to show. */
+  appsRequestPermission(app: string) {
+    const permissions = this.appPermissions[app as AppId];
+    window.setTimeout(() => {
+      for (const p of permissions ?? []) if (p.kind === "automation") p.state = "granted";
+    }, 2500);
     return this.reply(undefined);
   }
 

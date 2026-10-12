@@ -2,10 +2,15 @@
 // would happen; the synth's reason is shown after it, marked as the
 // synth's words. "Don't allow" has the focus, a closed window is a
 // refusal, and so is no answer within the countdown.
+//
+// For a change in the owner's apps the window also shows the thing
+// itself, in full and as it will go out: who a message is for and every
+// word of it, the title and time of an event, the name (and input) of a
+// shortcut. Those facts come from the core, not from the synth's reason.
 
 import { useEffect, useRef, useState } from "react";
 import { backend } from "../backend";
-import type { AnswerDuration, ApprovalRequest } from "../backend/types";
+import type { AnswerDuration, ApprovalDetail, ApprovalRequest } from "../backend/types";
 import { fileName, parentFolder } from "../lib/format";
 import { useNow, useStore } from "../lib/store";
 import { Segmented } from "../ui/controls";
@@ -27,6 +32,10 @@ interface Wording {
   spans: Span[];
   /** Shown when only "this time" is possible, to say why. */
   hint?: string;
+  /** Another label for a span ("Always for +7 916..."). */
+  labels?: Partial<Record<Span, string>>;
+  /** The facts of the action, shown in full under the body. */
+  details?: ApprovalDetail[];
   /** A request this version does not understand: Allow is not offered
    * as the obvious button. */
   unknown?: boolean;
@@ -53,9 +62,94 @@ function wording(req: ApprovalRequest, s: Strings, name: string, cookiesAskEvery
       break;
     case "files":
       return { title: t.fileTitle(fileName(req.scope)), body: t.fileBody(parentFolder(req.scope)), spans: ["once", "session", "always"] };
+    case "apps":
+      return appsWording(req, s);
   }
   // Something this version does not know: never remembered.
   return { title: t.otherTitle, body: t.otherBody(req.capability, req.scope), spans: ["once"], unknown: true };
+}
+
+/** A change in the owner's apps. The scope is the kind of change
+ * ("calendar.create", "messages.send:<recipient>"); what may be
+ * remembered is the core's call (`remember`), never this window's. */
+function appsWording(req: ApprovalRequest, s: Strings): Wording {
+  const t = s.approval;
+  const a = t.apps;
+  const [kind, ...rest] = req.scope.split(":");
+  const subject = rest.join(":");
+  const value = (key: string) => req.details.find((d) => d.key === key)?.value ?? "";
+  // The facts worth a line of their own (the subject is in the title).
+  const without = (...keys: string[]) => req.details.filter((d) => !keys.includes(d.key));
+
+  let spans: Span[] = req.remember === "any" ? ["once", "session", "always"] : req.remember === "always" ? ["once", "always"] : ["once"];
+  let hint: string | undefined = req.remember === "never" ? t.onceOnly : undefined;
+  let labels: Wording["labels"];
+  let words: { title: string; body: string; details: ApprovalDetail[] };
+
+  switch (kind) {
+    case "messages.send":
+      words = { title: a.messageTitle, body: a.messageBody(subject), details: req.details };
+      labels = { always: a.alwaysFor(subject) };
+      break;
+    case "calendar.create":
+      words = { title: a.eventTitle, body: "", details: req.details };
+      break;
+    case "reminders.create":
+      words = { title: a.reminderTitle, body: "", details: req.details };
+      break;
+    case "reminders.complete":
+      words = { title: a.reminderDoneTitle, body: a.reminderDoneBody, details: [] };
+      break;
+    case "notes.create":
+      words = { title: a.noteTitle, body: "", details: req.details };
+      break;
+    case "shortcuts.run": {
+      const input = value("input");
+      words = { title: a.shortcutTitle(subject), body: input ? a.shortcutInputBody : a.shortcutBody, details: without("name") };
+      if (input && req.remember === "never") hint = a.inputOnceOnly;
+      break;
+    }
+    case "clipboard.write":
+      words = { title: a.clipboardTitle, body: a.clipboardBody, details: req.details };
+      break;
+    case "open.url":
+      words = { title: a.urlTitle(subject), body: a.urlBody, details: req.details };
+      break;
+    case "open.file":
+      words = { title: a.fileTitle(fileName(value("path"))), body: a.fileBody, details: req.details };
+      break;
+    case "open.app":
+      words = { title: a.appTitle(value("name") || subject), body: a.appBody, details: [] };
+      break;
+    default:
+      // A kind of change this version does not know: shown as it is,
+      // never remembered.
+      words = { title: a.otherTitle, body: req.scope, details: req.details };
+      spans = ["once"];
+      hint = undefined;
+      return { ...words, spans, unknown: true };
+  }
+  return { ...words, spans, hint, labels };
+}
+
+function Details(props: { items: ApprovalDetail[]; s: Strings }) {
+  const a = props.s.approval.apps;
+  if (props.items.length === 0) return null;
+  return (
+    <div className="exact">
+      <div className="exact-label">{a.what}</div>
+      <dl>
+        {props.items.map((d) => (
+          <div className="exact-row" key={d.key}>
+            <dt>{a.detail[d.key] ?? d.key}</dt>
+            <dd className={`selectable${d.key === "text" || d.key === "input" || d.key === "notes" ? " long" : ""}`}>
+              {d.key === "service" ? (a.service[d.value] ?? d.value) : d.value}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
 }
 
 export function ApprovalView() {
@@ -144,7 +238,8 @@ export function ApprovalView() {
 
       <div className="approval-body">
         <h1>{words.title}</h1>
-        <p className="approval-what">{words.body}</p>
+        {words.body ? <p className="approval-what">{words.body}</p> : null}
+        {words.details ? <Details items={words.details} s={s} /> : null}
 
         <div className="says">
           <div className="says-label">{t.says(name)}</div>
@@ -159,7 +254,7 @@ export function ApprovalView() {
               label={t.howLong}
               value={chosen}
               onChange={setSpan}
-              options={words.spans.map((v) => ({ value: v, title: t[v] }))}
+              options={words.spans.map((v) => ({ value: v, title: words.labels?.[v] ?? t[v] }))}
             />
           </div>
         ) : words.hint ? (
