@@ -186,6 +186,16 @@ printf '%s\n' "$SIGN_INFO" | grep -E '^Timestamp=' >/dev/null ||
     die "the signature has no secure timestamp (notarization would refuse it)"
 note "signed by the Developer ID, hardened runtime, timestamped"
 
+# The Apps page (Calendar, Contacts, Reminders, Notes, Messages) sends
+# commands to other apps. Under the hardened runtime macOS refuses that
+# without this entitlement, and without the usage sentence it does not
+# even ask. Both come from app/src-tauri (Entitlements.plist, Info.plist).
+codesign -d --entitlements - --xml "$APP" 2>/dev/null | grep -F "com.apple.security.automation.apple-events" >/dev/null ||
+    die "the signed app lacks the com.apple.security.automation.apple-events entitlement (app/src-tauri/Entitlements.plist, bundle.macOS.entitlements in tauri.conf.json)"
+/usr/libexec/PlistBuddy -c 'Print :NSAppleEventsUsageDescription' "$APP/Contents/Info.plist" >/dev/null 2>&1 ||
+    die "the built app has no NSAppleEventsUsageDescription (app/src-tauri/Info.plist)"
+note "entitled to ask for control of other apps (Automation), with its usage sentence"
+
 mkdir -p "$OUT"
 
 # ---------------------------------------------------------------- notarize
