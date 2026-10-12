@@ -3,7 +3,9 @@
 # the Go `connect-spike` peer on loopback. Prints PASS/FAIL per line.
 #
 # It drives the headless `connectd` CLI (one link per instance) through a
-# control FIFO and the spike's admin API. Nothing is deployed; nothing
+# control FIFO and the spike's admin API. The owner's apps (instances 4 and
+# 5) run against connectd's in-memory stand-in (--apps mac / windows): no
+# real app, clipboard or notification is touched. Nothing is deployed; nothing
 # leaves this machine except the ipify probe. It binds 127.0.0.1 only,
 # kills only the PIDs it starts, and uses the user's Cua daemon READ-ONLY
 # (list_windows) when one is running, never touching its configuration.
@@ -15,6 +17,7 @@
 #   P1_SIZE_MB      proxy transfer size (default 4)
 #   P1_SKIP_BUILD=1 reuse existing binaries
 #   P1_SKIP_CUA=1   skip the Cua MCP checks
+#   P1_SKIP_INTERNET=1  skip the one check that reaches the internet
 #   P1_KEEP=1       keep the work dir
 #
 # Safety: strictly one build at a time; -j 4.
@@ -146,7 +149,10 @@ if OUT="$(spike wait -timeout 15s)"; then
   CAPS="$(echo "$OUT" | jq -r '.devices[0].capabilities|join(",")')"
   REV1="$(echo "$OUT" | jq -r '.devices[0].settings_rev')"
   MODE="$(echo "$OUT" | jq -r '.devices[0].settings.net.mode')"
-  if [ "$CAPS" = "net,cookies,computer,files" ] && [ "$MODE" = "all" ]; then
+  # The balanced preset turns apps on too; this instance offers no app
+  # (connectd's default), so the list in the hello is empty.
+  if [ "$CAPS" = "net,cookies,computer,files,apps" ] && [ "$MODE" = "all" ] &&
+     [ "$(echo "$OUT" | jq -r '.devices[0].settings.apps.apps // [] | length')" = "0" ]; then
     pass "1  protocol v1 hello: caps=$CAPS net.mode=$MODE rev=$REV1"
     info "$(echo "$OUT" | jq -c '.devices[0]|{os,arch,app_version,online}')"
   else
@@ -218,9 +224,14 @@ ctl "resume"; wait_log "OK resumed" 3; sleep 0.3
 BODY="$(curl -sS --noproxy '' -x "$PROXY" -m 10 "$ORIGIN/hello")"
 [ "$BODY" = "hello from testhttp" ] && pass "7b resume: proxy works again" || fail "7b resume: got \"$BODY\""
 
-# 8. real internet through the proxy
-IP="$(curl -sS --noproxy '' -x "$PROXY" -m 20 https://api.ipify.org 2>/dev/null)"
-echo "$IP" | grep -Eq '^[0-9a-fA-F:.]+$' && pass "8  real internet via proxy -> $IP" || fail "8  no IP via proxy: ${IP:-empty}"
+# 8. real internet through the proxy (the one request that leaves this
+#    machine; P1_SKIP_INTERNET=1 leaves it out)
+if [ "${P1_SKIP_INTERNET:-0}" = "1" ]; then
+  info "8  real internet check skipped (P1_SKIP_INTERNET=1)"
+else
+  IP="$(curl -sS --noproxy '' -x "$PROXY" -m 20 https://api.ipify.org 2>/dev/null)"
+  echo "$IP" | grep -Eq '^[0-9a-fA-F:.]+$' && pass "8  real internet via proxy -> $IP" || fail "8  no IP via proxy: ${IP:-empty}"
+fi
 
 # 6. settings change propagates (balanced -> careful flips net.mode all->ask).
 #    Done after the proxy checks: applying a preset also resets allow-local.
@@ -287,6 +298,135 @@ if [ "$SKIP_CUA" != "1" ]; then
   ML="$(spike mcp-list)"
   [ "$(echo "$ML" | jq -r '.tool_count' 2>/dev/null)" -ge 20 ] 2>/dev/null && pass "11c catalog stream served even under deny-all" || fail "11c catalog refused under deny-all: $ML"
 fi
+stop_connectd
+
+# ================================================================ INSTANCE 4
+# The owner's apps over the real link, against connectd's in-memory
+# stand-in for a Mac (--apps mac): no real app, clipboard or screen is
+# touched. The approver allows exactly two things: adding calendar events,
+# and messages to one recipient.
+say "== INSTANCE 4: apps (stand-in for a Mac), balanced, two approvals"
+start_connectd D --preset balanced --apps mac --root "${ROOT_P}" \
+  --approve 'apps:calendar.create' --approve 'apps:messages.send:+79161234567'
+spike wait -timeout 15s >/dev/null || fail "D  no hello"
+apps() { # $1 app $2 action $3 params-json ; prints the JSON answer (result shown)
+  local params="${3:-}"
+  [ -n "$params" ] || params='{}'
+  spike apps -app "$1" -action "$2" -params "$params" -show-result
+}
+aerr() { echo "$1" | jq -r '.error // empty' 2>/dev/null; }
+
+OUT="$(spike devices)"
+A="$(echo "$OUT" | jq -c '.devices[0].settings.apps')"
+IDS="$(echo "$A" | jq -r '[.apps[].id]|join(",")')"
+MSG_ON="$(echo "$A" | jq -r '.apps[]|select(.id=="messages")|.on')"
+if [ "$(echo "$A" | jq -r '.enabled')" = "true" ] && [ "$(echo "$A" | jq -r '.mode')" = "ask_new" ] &&
+   [ "$IDS" = "messages,contacts,calendar,reminders,notes,shortcuts,notify,clipboard,open" ] && [ "$MSG_ON" = "false" ]; then
+  pass "13a hello carries apps: mode=ask_new, 9 apps, Messages off by default"
+else
+  fail "13a apps in the hello: $A"
+fi
+
+R="$(apps calendar list '{"start":"2026-10-13","end":"2026-10-20"}')"
+[ "$(echo "$R" | jq -r '.result.events|length' 2>/dev/null)" = "2" ] &&
+  pass "13b a read (calendar.list) needs no approval: 2 events" || fail "13b calendar.list: $R"
+
+R="$(apps contacts search '{"query":"ann"}')"
+N="$(echo "$R" | jq -r '.result.contacts|length' 2>/dev/null)"
+R2="$(apps contacts search '{"query":"a"}')"
+case "$(aerr "$R2")" in
+  "bad request:"*) [ "$N" = "2" ] && pass "13c contacts.search: 2 matches for a real query; a one-letter query is refused" || fail "13c contacts.search returned $N: $R" ;;
+  *) fail "13c a one-letter contact query was not refused: $R2" ;;
+esac
+
+R="$(apps calendar create '{"title":"Dentist","start":"2026-10-21T15:00","end":"2026-10-21T16:00","reason":"from the email"}')"
+[ "$(echo "$R" | jq -r '.result.id' 2>/dev/null)" = "ev-new" ] && grep -q "ask cap=apps scope=calendar.create" "$CD_LOG" &&
+  pass "13d a change the owner allows (calendar.create) was asked about, then done" || fail "13d calendar.create: $R"
+
+R="$(apps notes create '{"title":"Plan","text":"NOTE-TEXT-e2e"}')"
+case "$(aerr "$R")" in
+  "denied: the owner did not allow it") pass "13e a change the owner refuses (notes.create) -> \"$(aerr "$R")\"" ;;
+  *) fail "13e notes.create was not refused: $R" ;;
+esac
+
+R="$(apps messages send '{"to":"+79161234567","text":"hi"}')"
+case "$(aerr "$R")" in
+  "denied: Messages is turned off"*) pass "13f Messages is off until switched on: \"$(aerr "$R" | cut -c1-60)...\"" ;;
+  *) fail "13f messages.send with Messages off: $R" ;;
+esac
+
+ctl "apps app messages on"; wait_log "OK apps" 3; sleep 0.6
+R="$(apps messages send '{"to":"+7 916 123-45-67","text":"MESSAGE-BODY-e2e","reason":"you asked"}')"
+R2="$(apps messages send '{"to":"+79160000000","text":"MESSAGE-BODY-e2e"}')"
+if [ "$(echo "$R" | jq -r '.result.sent' 2>/dev/null)" = "true" ] && [ "$(aerr "$R2")" = "denied: the owner did not allow it" ] &&
+   grep -q "ask cap=apps scope=messages.send:+79161234567" "$CD_LOG" && grep -q "ask cap=apps scope=messages.send:+79160000000" "$CD_LOG"; then
+  pass "13g a message is asked about per recipient: the allowed one is sent, another one is refused"
+else
+  fail "13g messages.send: allowed=$R other=$R2"
+fi
+
+# Without -show-result the spike prints the shape of an answer only.
+R="$(spike apps -app messages -action recent)"
+if [ "$(echo "$R" | jq -r '.shape.messages' 2>/dev/null)" = "4 items" ] && ! echo "$R" | grep -q "Thursday"; then
+  pass "13h messages.recent: 4 items; the spike prints the shape, not the texts"
+else
+  fail "13h messages.recent shape: $R"
+fi
+
+echo "%PDF-1.4" > "$ROOT/docs/paper.pdf"; printf '#!/bin/sh\n' > "$ROOT/docs/run.command"; echo "%PDF-1.4" > "$OUTSIDE/outside.pdf"
+ctl "apps on auto"; wait_log "OK apps" 3; sleep 0.6
+R="$(apps open file "{\"path\":\"$ROOT_P/docs/paper.pdf\"}")"
+R2="$(apps open file "{\"path\":\"$ROOT_P/docs/run.command\"}")"
+R3="$(apps open file "{\"path\":\"$ROOT_P/escape/outside.pdf\"}")"
+R4="$(apps open url '{"url":"file:///etc/passwd"}')"
+if [ "$(echo "$R" | jq -r '.result.opened' 2>/dev/null)" = "true" ]; then
+  case "$(aerr "$R2")|$(aerr "$R3")|$(aerr "$R4")" in
+    "denied: files of type"*"|denied: "*"|denied: "*) pass "13i open: a document in a shared folder opens; a script, a file behind a link out of the folder and a file: address are refused" ;;
+    *) fail "13i open refusals: script=$(aerr "$R2") outside=$(aerr "$R3") url=$(aerr "$R4")" ;;
+  esac
+else
+  fail "13i open.file: $R"
+fi
+
+# In auto mode a change is not asked about, but a message still is.
+ASKS_BEFORE="$(grep -c "ask cap=apps" "$CD_LOG")"
+apps notes create '{"title":"Plan"}' >/dev/null
+apps messages send '{"to":"anna@example.com","text":"hi"}' >/dev/null
+ASKS_AFTER="$(grep -c "ask cap=apps" "$CD_LOG")"
+[ "$((ASKS_AFTER-ASKS_BEFORE))" = "1" ] && grep -q "scope=messages.send:anna@example.com" "$CD_LOG" &&
+  pass "13j auto mode: a note is written without asking, a message still asks" || fail "13j auto mode asked $((ASKS_AFTER-ASKS_BEFORE)) times"
+
+# The journal: one line per call, never what a message, a contact or a note says.
+JF="$WORK/journal-D.jsonl"
+if grep -q '"capability":"apps"' "$JF" && ! grep -Eq 'MESSAGE-BODY-e2e|NOTE-TEXT-e2e|Petrova|Thursday|Dentist|9161234567|anna@example' "$JF"; then
+  pass "13k journal: $(grep -c '"capability":"apps"' "$JF") apps lines, no message, contact, note or event text in them"
+else
+  fail "13k journal holds content (or no apps lines): $(grep -Ec 'MESSAGE-BODY-e2e|NOTE-TEXT-e2e|Petrova|Thursday|Dentist' "$JF") hits"
+fi
+
+ctl "apps off"; wait_log "OK apps rev" 3; sleep 0.6
+R="$(apps clipboard read)"
+[ "$(spike devices | jq -r '.devices[0].settings.apps.enabled')" = "false" ] && [ "$(aerr "$R")" = "denied: apps are turned off on this computer" ] &&
+  pass "13l apps switched off: the synth is told, and a call is refused" || fail "13l apps off: $R"
+stop_connectd
+
+# ================================================================ INSTANCE 5
+say "== INSTANCE 5: apps (stand-in for a Windows computer): no Mac app anywhere"
+start_connectd E --preset full --apps windows
+spike wait -timeout 15s >/dev/null || fail "E  no hello"
+A="$(spike devices | jq -c '.devices[0].settings.apps')"
+IDS="$(echo "$A" | jq -r '[.apps[].id]|join(",")')"
+R="$(apps calendar list '{"start":"2026-10-13","end":"2026-10-20"}')"
+R2="$(apps messages send '{"to":"+79161234567","text":"hi"}')"
+case "$IDS|$(aerr "$R")|$(aerr "$R2")" in
+  "notify,clipboard,open|unavailable: "*"|unavailable: "*) pass "14a a Windows computer offers notify, clipboard, open; Calendar and Messages are unavailable" ;;
+  *) fail "14a windows apps: ids=$IDS calendar=$(aerr "$R") messages=$(aerr "$R2")" ;;
+esac
+apps clipboard write '{"text":"clipboard text e2e"}' >/dev/null
+R="$(apps clipboard read)"
+R2="$(apps notify show '{"title":"Done","body":"all set"}')"
+[ "$(echo "$R" | jq -r '.result.text' 2>/dev/null)" = "clipboard text e2e" ] && [ "$(echo "$R2" | jq -r '.result.shown' 2>/dev/null)" = "true" ] &&
+  pass "14b clipboard round trip and a notification through the rpc path" || fail "14b clipboard=$R notify=$R2"
 stop_connectd
 
 # ---------------------------------------------------------------- Cua unchanged
