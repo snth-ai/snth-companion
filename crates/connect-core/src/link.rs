@@ -326,8 +326,26 @@ where
     write_json_line(wr, &msg).await
 }
 
+/// Counts a stream as open for as long as its task lives, however it ends
+/// (finished, refused, aborted by a pause or a dropped link).
+pub(crate) struct OpenStream(Arc<Shared>);
+
+impl OpenStream {
+    pub(crate) fn begin(shared: &Arc<Shared>) -> OpenStream {
+        shared.streams_open.fetch_add(1, Ordering::AcqRel);
+        OpenStream(shared.clone())
+    }
+}
+
+impl Drop for OpenStream {
+    fn drop(&mut self) {
+        self.0.streams_open.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// Read a synth-opened stream's header and hand it to its handler.
 async fn serve_stream(stream: yamux::Stream, shared: Arc<Shared>) {
+    let _open = OpenStream::begin(&shared);
     let mut s: MuxStream = BufReader::with_capacity(64 * 1024, stream.compat());
     let line = match tokio::time::timeout(HEADER_TIMEOUT, read_line(&mut s, MAX_HEADER_LINE)).await {
         Ok(Ok(Some(line))) => line,

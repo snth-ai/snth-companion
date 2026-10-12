@@ -65,6 +65,7 @@ Everything on `Core` is `Send + Sync`; clone the handle freely (it is an
 | `Core::default_roots() -> Vec<Root>` | Desktop + Downloads, for onboarding |
 | `grant_list()` / `revoke(cap, scope)` | live grants (`until`: 0 = always, -1 = this session, else a unix second) |
 | `is_paired()` | a confirmed pairing exists (link up or not) |
+| `active_streams()` | how many streams the synth has open right now (0 = nothing in flight; the host may restart for an update) |
 | `set_metered(bool)` | the host reports a metered connection (the core cannot detect it) |
 | `flush()` | write batched state (egress counters) before exit |
 | `pause().await` / `resume()` | pause closes streams, refuses new ones, stops our Cua daemon, reports `paused:true`; resume is explicit |

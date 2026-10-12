@@ -5,7 +5,7 @@
 //! single instance behind its managed state.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -129,6 +129,8 @@ pub struct Shared {
     paused: AtomicBool,
     metered: AtomicBool,
     pub(crate) stopping: AtomicBool, // unpair asked the link loop to stop reconnecting
+    /// Streams the synth has open right now (see `Core::active_streams`).
+    pub(crate) streams_open: AtomicUsize,
     counters: Mutex<Counters>,
 
     identity: RwLock<Option<Pending>>, // confirmed pairing (url, id, token-in-secret)
@@ -544,6 +546,7 @@ impl Core {
             paused: AtomicBool::new(false),
             metered: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
+            streams_open: AtomicUsize::new(0),
             counters: Mutex::new(Counters {
                 month,
                 bytes: egress_bytes,
@@ -663,6 +666,15 @@ impl Core {
     }
 
     // --- connection facts the host observes ---
+
+    /// How many streams the synth has open on this computer right now: a
+    /// connection through its internet, a computer-control session, a
+    /// file or cookie request being answered. Zero means nothing is in
+    /// flight, so a host may pick that moment to restart itself (an
+    /// update) without cutting work short.
+    pub fn active_streams(&self) -> usize {
+        self.shared.streams_open.load(Ordering::Acquire)
+    }
 
     /// The host tells the core whether the current connection is metered
     /// (the core has no portable way to know). Reported in presence and
@@ -1336,6 +1348,26 @@ mod tests {
         assert!(!core.is_paired());
         assert!(!core.snapshot().await.paired);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn open_streams_are_counted_until_they_end() {
+        let (core, _) = test_core();
+        assert_eq!(core.active_streams(), 0);
+        let a = crate::link::OpenStream::begin(&core.shared());
+        let b = crate::link::OpenStream::begin(&core.shared());
+        assert_eq!(core.active_streams(), 2);
+        drop(a);
+        assert_eq!(core.active_streams(), 1);
+        // A task that is aborted (pause, a dropped link) frees its count too.
+        let task = tokio::spawn(async move {
+            let _open = b;
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        task.abort();
+        let _ = task.await;
+        assert_eq!(core.active_streams(), 0);
     }
 
     #[tokio::test]
