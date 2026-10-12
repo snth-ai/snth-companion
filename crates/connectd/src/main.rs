@@ -13,9 +13,10 @@
 //!   connectd pause | resume | unpair           (REPL commands under `run`)
 //!   connectd make-cookie-fixture --db <p> --key <pw> --domain <d> --name <n> --value <v>
 //!   connectd selftest cua [--root <dir>] [--keep]   (see selftest.rs)
+//!   connectd selftest apps [--touch]                (see selftest.rs)
 //!
 //! `run` reads command lines from stdin (pause / resume / unpair /
-//! preset <name> / addroot <path>[:rw] / status / quit) so a test script
+//! preset <name> / addroot <path>[:rw] / apps ... / status / quit) so a test script
 //! can drive it; approvals come from the chosen approver, never stdin,
 //! when a rule set is given.
 
@@ -76,6 +77,7 @@ fn print_usage() {
          \u{20}  connectd preset <careful|balanced|full> [--settings <p>]\n\
          \u{20}  connectd make-cookie-fixture --db <p> --key <pw> --domain <d> --name <n> --value <v>\n\
          \u{20}  connectd selftest cua [--root <dir>] [--keep]\n\
+         \u{20}  connectd selftest apps [--touch]\n\
          \n\
          run options:\n\
          \u{20}  --settings <p>        settings.json path (default: in-memory)\n\
@@ -84,6 +86,9 @@ fn print_usage() {
          \u{20}  --preset <name>       apply a preset before linking\n\
          \u{20}  --root <path>[:rw]    share a folder (append :rw for write)\n\
          \u{20}  --cua-attach <user|private>   which Cua daemon (default: user)\n\
+         \u{20}  --apps <none|mac|windows|system>  the owner's apps: none (default), an\n\
+         \u{20}                        in-memory stand-in for a Mac or a Windows computer,\n\
+         \u{20}                        or the real apps of this computer\n\
          \u{20}  --approve <spec>      auto-allow rule, repeatable (cap | cap:scope | *)\n\
          \u{20}  --deny-all           auto-deny every ask\n\
          \u{20}  --cookie-chromium <name>=<db>  a Chromium cookie DB fixture\n\
@@ -245,11 +250,26 @@ fn build_core(a: &Args, approver: Arc<dyn Approver>) -> Core {
         _ => CuaAttach::User,
     };
 
+    // The owner's apps. A debugging tool must not reach the real ones by
+    // accident, so the default offers none; `--apps system` is explicit.
+    let apps: Arc<dyn connect_core::apps::Backend> = match a.get("--apps") {
+        Some("system") => connect_core::apps::system_backend(None),
+        Some(kind) => match connect_core::apps::stub::StubBackend::named(kind) {
+            Some(stub) => Arc::new(stub),
+            None => {
+                eprintln!("connectd: unknown --apps value {kind:?} (none, mac, windows, system)");
+                std::process::exit(2);
+            }
+        },
+        None => Arc::new(connect_core::apps::stub::StubBackend::offering(&[])),
+    };
+
     let core = Core::new(CoreConfig {
         settings_path,
         journal_path,
         approver,
         cookies: cookie_source,
+        apps,
         secret,
         hub: Arc::new(connect_core::UreqHubClient),
         app_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -279,7 +299,7 @@ async fn cmd_run(args: &[String]) -> i32 {
         &[
             "--url", "--token", "--settings", "--secret-file", "--journal", "--preset",
             "--root", "--cua-attach", "--cua-bin", "--approve", "--cookie-chromium",
-            "--cookie-firefox", "--cookie-key",
+            "--cookie-firefox", "--cookie-key", "--apps",
         ],
         &["--deny-all", "--allow-local"],
     );
@@ -401,6 +421,37 @@ async fn run_command(core: &Core, line: &str) -> bool {
             };
             let rev = core.add_root(PathBuf::from(path), write);
             println!("OK addroot rev={rev}");
+        }
+        // apps on <ask|ask_new|auto> | apps off | apps app <id> <on|off>
+        "apps" => {
+            use connect_core::settings::AppsMode;
+            let words: Vec<&str> = rest.split_whitespace().collect();
+            let rev = match words.as_slice() {
+                ["off"] => Some(core.mutate_settings(|s| s.apps.enabled = false)),
+                ["on", mode] => match *mode {
+                    "ask" => Some(AppsMode::Ask),
+                    "ask_new" => Some(AppsMode::AskNew),
+                    "auto" => Some(AppsMode::Auto),
+                    _ => None,
+                }
+                .map(|m| {
+                    core.mutate_settings(|s| {
+                        s.apps.enabled = true;
+                        s.apps.mode = m;
+                    })
+                }),
+                ["app", id, state @ ("on" | "off")] => {
+                    let (id, on) = (id.to_string(), *state == "on");
+                    Some(core.mutate_settings(move |s| {
+                        s.apps.apps.insert(id, on);
+                    }))
+                }
+                _ => None,
+            };
+            match rev {
+                Some(rev) => println!("OK apps rev={rev}"),
+                None => println!("ERR usage: apps on <ask|ask_new|auto> | apps off | apps app <id> <on|off>"),
+            }
         }
         "status" => {
             let snap = core.snapshot().await;

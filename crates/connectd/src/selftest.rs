@@ -1,3 +1,5 @@
+//! Two self-tests. `connectd selftest apps` is at the end of this file.
+//!
 //! `connectd selftest cua`: the computer-control path, end to end, the way
 //! the app runs it, on the machine it is run on.
 //!
@@ -54,6 +56,16 @@ pub async fn run(args: &[String]) -> i32 {
                 1
             }
         },
+        Some("apps") => match apps(&args[1..]).await {
+            Ok(()) => {
+                println!("SELFTEST OK");
+                0
+            }
+            Err(why) => {
+                eprintln!("SELFTEST FAILED: {why}");
+                1
+            }
+        },
         // The child half of the console check: says whether THIS process
         // was given a console window.
         Some("console-child") => {
@@ -61,7 +73,7 @@ pub async fn run(args: &[String]) -> i32 {
             0
         }
         _ => {
-            eprintln!("usage: connectd selftest cua [--root <dir>] [--keep]");
+            eprintln!("usage: connectd selftest cua [--root <dir>] [--keep]\n       connectd selftest apps [--touch]");
             2
         }
     }
@@ -104,6 +116,7 @@ async fn cua(args: &[String]) -> Result<(), String> {
             keys: Arc::new(cookies::fixtures::NoKey),
         }),
         secret: Arc::new(MemSecretStore::new()),
+        apps: Arc::new(connect_core::apps::stub::StubBackend::offering(&[])),
         hub: Arc::new(connect_core::UreqHubClient),
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         cua_bin: String::new(),
@@ -323,4 +336,203 @@ fn short(value: &Value) -> String {
         out.push_str("...");
     }
     out.replace('\n', " ")
+}
+
+// ---------------------------------------------------------------------
+// `connectd selftest apps`: the owner's apps, through the same gate the
+// synth's calls go through, against the REAL backend of this system.
+//
+// Always (nothing on the computer is touched):
+//   1. what this system offers: never a Mac app outside macOS
+//   2. the gate refuses what is not offered, what is not a document, and
+//      a file outside the shared folder
+//
+// With `--touch` (the Windows CI job passes it; by hand it shows one
+// notification, puts a test text on the clipboard and puts back what was
+// there, and opens one small text file):
+//   3. a notification is shown
+//   4. the clipboard round trip: write a text with non-ASCII letters,
+//      read the same text back
+//   5. open: a text file inside a shared folder is handed to the system;
+//      on Windows the Start menu can be listed and an app in it resolved
+// ---------------------------------------------------------------------
+
+struct AllowOnce;
+impl Approver for AllowOnce {
+    fn ask(&self, _req: ApprovalRequest) -> ApprovalFuture {
+        Box::pin(async { Approval::once() })
+    }
+}
+
+async fn apps(args: &[String]) -> Result<(), String> {
+    use connect_core::apps;
+    use connect_core::settings::AppsMode;
+
+    let touch = args.iter().any(|a| a == "--touch");
+    if let Some(other) = args.iter().find(|a| a.as_str() != "--touch") {
+        return Err(format!("unknown option {other}"));
+    }
+    let root = std::env::temp_dir().join(format!("connect apps selftest é {}", std::process::id()));
+    let shared_dir = root.join("shared");
+    let outside_dir = root.join("outside");
+    std::fs::create_dir_all(&shared_dir).map_err(|e| format!("create {}: {e}", shared_dir.display()))?;
+    std::fs::create_dir_all(&outside_dir).map_err(|e| format!("create {}: {e}", outside_dir.display()))?;
+    let note = shared_dir.join("snth-connect-selftest.txt");
+    std::fs::write(&note, "SNTH Connect self-test. You can close this.\r\n").map_err(|e| e.to_string())?;
+    let script = shared_dir.join(if cfg!(windows) { "run.bat" } else { "run.command" });
+    std::fs::write(&script, "echo should never run\r\n").map_err(|e| e.to_string())?;
+    let secret = outside_dir.join("outside.txt");
+    std::fs::write(&secret, "outside").map_err(|e| e.to_string())?;
+
+    let backend = apps::system_backend(None);
+    let core = Core::new(CoreConfig {
+        settings_path: None,
+        journal_path: None,
+        approver: Arc::new(AllowOnce),
+        cookies: Arc::new(MultiReader {
+            chromium: vec![],
+            firefox: vec![],
+            keys: Arc::new(cookies::fixtures::NoKey),
+        }),
+        apps: backend,
+        secret: Arc::new(MemSecretStore::new()),
+        hub: Arc::new(connect_core::UreqHubClient),
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        cua_bin: "cua-driver".into(),
+        cua_private_root: None,
+        cua_attach: CuaAttach::User,
+    });
+    core.mutate_settings(|s| {
+        s.apps.enabled = true;
+        s.apps.mode = AppsMode::Auto;
+    });
+    core.add_root(shared_dir.clone(), false);
+    let shared = core.shared();
+    let call = |method: &'static str, params: Value| {
+        let shared = shared.clone();
+        async move { apps::handle(&shared, method, &params).await }
+    };
+
+    let result = async {
+        step("what this system offers");
+        let offered: Vec<&str> = core.apps_views().iter().map(|v| v.id).collect();
+        println!("offered: {offered:?}");
+        if !cfg!(target_os = "macos") {
+            if let Some(mac_app) = offered.iter().find(|id| apps::MAC_ONLY.contains(id)) {
+                return Err(format!("a Mac app is offered on this system: {mac_app}"));
+            }
+        }
+        if cfg!(windows) && offered != ["notify", "clipboard", "open"] {
+            return Err(format!("Windows must offer notify, clipboard and open, got {offered:?}"));
+        }
+
+        step("the gate refuses what does not belong here");
+        if !cfg!(target_os = "macos") {
+            let e = call("apps.calendar.list", json!({"start": "2026-10-13", "end": "2026-10-14"}))
+                .await
+                .err()
+                .unwrap_or_default();
+            if !e.starts_with("unavailable: ") {
+                return Err(format!("Calendar outside macOS must be unavailable, got {e:?}"));
+            }
+            println!("calendar.list: {e}");
+        }
+        if offered.contains(&"open") {
+            for (what, path, want) in [
+                ("a script", &script, "denied: files of type"),
+                ("a file outside the shared folder", &secret, "denied: "),
+            ] {
+                let e = call("apps.open.file", json!({"path": path.to_string_lossy()}))
+                    .await
+                    .err()
+                    .unwrap_or_default();
+                if !e.starts_with(want) {
+                    return Err(format!("opening {what} must be refused, got {e:?}"));
+                }
+                println!("open.file ({what}): refused");
+            }
+            let e = call("apps.open.url", json!({"url": "file:///C:/Windows/win.ini"})).await.err().unwrap_or_default();
+            if !e.starts_with("denied: ") {
+                return Err(format!("a file: address must be refused, got {e:?}"));
+            }
+        }
+
+        if !touch {
+            println!("skipped: notification, clipboard, open (pass --touch to run them on this computer)");
+            return Ok(());
+        }
+
+        if offered.contains(&"notify") {
+            step("show a notification");
+            call("apps.notify.show", json!({"title": "Self-test", "body": "SNTH Connect can show notifications."}))
+                .await
+                .map_err(|e| format!("notify.show: {e}"))?;
+            println!("notify.show: shown");
+        }
+
+        if offered.contains(&"clipboard") {
+            step("clipboard round trip");
+            let before = call("apps.clipboard.read", json!({})).await.map_err(|e| format!("clipboard.read: {e}"))?;
+            let marker = format!("SNTH Connect self-test \u{43f}\u{440}\u{438}\u{432}\u{435}\u{442} \u{2713} {}", std::process::id());
+            call("apps.clipboard.write", json!({"text": marker})).await.map_err(|e| format!("clipboard.write: {e}"))?;
+            let after = call("apps.clipboard.read", json!({})).await.map_err(|e| format!("clipboard.read: {e}"))?;
+            let got = after.get("text").and_then(Value::as_str).unwrap_or("");
+            // Put back what was there before judging.
+            if let Some(old) = before.get("text").and_then(Value::as_str).filter(|t| !t.is_empty()) {
+                let _ = call("apps.clipboard.write", json!({"text": old})).await;
+            }
+            if got != marker {
+                return Err(format!("the clipboard returned {got:?}, expected {marker:?}"));
+            }
+            println!("clipboard: wrote and read back {} characters, with non-ASCII letters", marker.chars().count());
+        }
+
+        if offered.contains(&"open") {
+            step("open a text file inside the shared folder");
+            let opened = call("apps.open.file", json!({"path": note.to_string_lossy()}))
+                .await
+                .map_err(|e| format!("open.file: {e}"))?;
+            println!("open.file: {opened}");
+            #[cfg(windows)]
+            {
+                step("the Start menu can be listed and an app in it resolved");
+                let listed = apps::win::start_apps().await.map_err(|e| format!("Get-StartApps: {e}"))?;
+                println!("Start menu: {} apps", listed.len());
+                if listed.is_empty() {
+                    return Err("the Start menu list is empty".into());
+                }
+                let known = ["Notepad", "Paint", "Calculator", "Command Prompt", "Windows PowerShell"];
+                let present = known
+                    .iter()
+                    .copied()
+                    .find(|k| listed.iter().any(|(name, _)| name.as_str() == *k));
+                match present {
+                    Some(name) => {
+                        let opened = apps::handle(&shared, "apps.open.app", &json!({"name": name}))
+                            .await
+                            .map_err(|e| format!("open.app {name}: {e}"))?;
+                        println!("open.app: {opened}");
+                    }
+                    None => println!("open.app: none of {known:?} is in this Start menu, not started"),
+                }
+                let e = apps::handle(&shared, "apps.open.app", &json!({"name": "No Such App 4f1c"}))
+                    .await
+                    .err()
+                    .unwrap_or_default();
+                if !e.starts_with("not found: ") {
+                    return Err(format!("an app that does not exist must be not found, got {e:?}"));
+                }
+            }
+        }
+        Ok(())
+    }
+    .await;
+
+    // One journal line per call, and none of them holds the test text.
+    let journal = serde_json::to_string(&core.recent_journal()).unwrap_or_default();
+    if journal.contains("self-test") || journal.contains("Self-test") {
+        return Err("the journal holds text of a call".into());
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    result
 }
