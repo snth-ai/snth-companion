@@ -218,12 +218,14 @@ pub async fn build_state(ctx: &Ctx) -> UiState {
 /// Which preset, if any, these settings are exactly (so the UI can show
 /// "Careful" again after the owner undoes a hand edit). How computer
 /// control looks is not part of a preset: a cursor colour does not make
-/// the settings "custom".
+/// the settings "custom". Neither is the owner's choice of apps, which a
+/// preset keeps as it keeps the shared folders.
 pub fn matching_preset(s: &Settings) -> Preset {
     for p in [Preset::Careful, Preset::Balanced, Preset::Full] {
         let mut probe = Settings::from_preset(p, s.files.roots.clone());
         probe.preset = s.preset;
         probe.computer.look = s.computer.look.clone();
+        probe.computer.apps = s.computer.apps.clone();
         if &probe == s {
             return p;
         }

@@ -134,6 +134,13 @@ export function Status(props: { go: (screen: Screen) => void }) {
             <div className="now-line">
               {active ? describeEntry(active, s, lang).text : last ? s.status.nothingNow : s.status.neverActive(name)}
             </div>
+            {/* The name the synth gave its computer task: its own words,
+                cut by the app to what the helper shows under the pointer. */}
+            {active && active.capability === "computer" && core.computer_task ? (
+              <div className="now-task" title={s.status.taskTitle(name)}>
+                {s.status.task(core.computer_task)}
+              </div>
+            ) : null}
           </div>
         </div>
       )}

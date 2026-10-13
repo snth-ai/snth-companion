@@ -248,7 +248,7 @@ export function Sheet(props: { title: string; onCancel: () => void; children: Re
       if (e.key === "Escape") props.onCancel();
       if (e.key !== "Tab" || !ref.current) return;
       // Keep Tab inside the sheet.
-      const focusable = ref.current.querySelectorAll<HTMLElement>("button:not(:disabled)");
+      const focusable = ref.current.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled)");
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
       if (!first || !last) return;

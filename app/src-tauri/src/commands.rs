@@ -218,10 +218,10 @@ fn clean_list(items: Vec<String>, max: usize, f: impl Fn(&str) -> Option<String>
 pub async fn update_settings(ctx: Cx<'_>, settings: Settings) -> Result<UiState, String> {
     let mut next = settings;
     next.net.domains = clean_list(next.net.domains, 500, clean_domain);
-    next.computer.app_blocklist = clean_list(next.computer.app_blocklist, 200, |a| {
-        let a = a.trim();
-        (!a.is_empty() && a.len() <= 120).then(|| a.to_string())
-    });
+    // The owner's choice of apps: bounded lists of plain entries. The old
+    // blocked-apps words can only come from an old settings file.
+    next.computer.app_blocklist.clear();
+    next.computer.apps.normalize();
     next.computer.away_idle_minutes = next.computer.away_idle_minutes.clamp(1, 240);
     // Only the choices the app offers for how computer control looks.
     next.computer.look.normalize();
@@ -457,6 +457,39 @@ pub fn cua_grant_permissions(app: AppHandle, ctx: Cx<'_>) -> Result<(), String> 
 #[tauri::command]
 pub fn cua_install(ctx: Cx<'_>) {
     ctx.helper_retry.notify_one();
+}
+
+#[derive(Serialize)]
+pub struct ComputerAppsDto {
+    /// Every app the helper lists on this computer, running ones first.
+    apps: Vec<connect_core::cua_apps::AppChoice>,
+    /// What a list of exceptions starts with: the password managers and
+    /// the system's own security settings that this computer has.
+    suggested: Vec<connect_core::AppRef>,
+}
+
+/// The owner's picker for "which apps": read now from the helper, by the
+/// app itself. Takes a few seconds on a computer with many apps. Nothing
+/// is started on the screen and the synth is not involved.
+#[tauri::command]
+pub async fn computer_apps(ctx: Cx<'_>) -> Result<ComputerAppsDto, String> {
+    let apps = ctx.core.computer_apps().await.map_err(|e| {
+        if e == "not_installed" {
+            e
+        } else {
+            format!("helper_failed: {}", without_home(&e))
+        }
+    })?;
+    let suggested = connect_core::cua_apps::default_exclusions(&apps);
+    Ok(ComputerAppsDto { apps, suggested })
+}
+
+/// "Check the helper": the driver's own health report from the app's own
+/// daemon. Read-only; raises no system prompt; nothing leaves the
+/// computer.
+#[tauri::command]
+pub async fn cua_health_check(ctx: Cx<'_>) -> Result<connect_core::cua_health::Report, String> {
+    Ok(ctx.core.cua_health().await)
 }
 
 // --- the owner's own apps ---
@@ -739,8 +772,10 @@ pub async fn diagnostics(ctx: Cx<'_>) -> Result<String, String> {
                     Some(why) => format!("not served ({})", without_home(why)),
                 }),
         }),
-        format!("computer control: {} (mode {:?}, screen {:?}, away after {} min, {} blocked apps)",
-            on(s.computer.enabled), s.computer.mode, s.computer.foreground, s.computer.away_idle_minutes, s.computer.app_blocklist.len()),
+        // How many apps, never which.
+        format!("computer control: {} (mode {:?}, screen {:?}, away after {} min, apps {:?}: {} excepted, {} chosen)",
+            on(s.computer.enabled), s.computer.mode, s.computer.foreground, s.computer.away_idle_minutes,
+            s.computer.apps.policy, s.computer.apps.except.len(), s.computer.apps.only.len()),
         format!("files: {} ({} folders, ask before writing {})", on(s.files.enabled), s.files.roots.len(), on(s.files.ask_on_write)),
         format!("apps: {} (mode {:?}, on: {})", on(s.apps.enabled), s.apps.mode,
             ctx.core.apps_views().iter().filter(|v| v.on).map(|v| v.id).collect::<Vec<_>>().join(" ")),
@@ -854,6 +889,17 @@ mod tests {
         assert!(matches!(matching_preset(&s), Preset::Balanced));
         // A policy change still does.
         s.computer.foreground = connect_core::settings::Foreground::Never;
+        assert!(matches!(matching_preset(&s), Preset::Custom));
+    }
+
+    #[test]
+    fn the_choice_of_apps_does_not_make_the_settings_custom() {
+        use connect_core::{AppRef, AppsPolicy};
+        let mut s = Settings::from_preset(Preset::Full, vec![]);
+        s.computer.apps.policy = AppsPolicy::Only;
+        s.computer.apps.only = vec![AppRef { id: "com.apple.Safari".into(), name: "Safari".into(), loose: false }];
+        assert!(matches!(matching_preset(&s), Preset::Full));
+        s.computer.mode = connect_core::settings::ComputerMode::Ask;
         assert!(matches!(matching_preset(&s), Preset::Custom));
     }
 

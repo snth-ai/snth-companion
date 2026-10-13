@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { backend } from "../backend";
-import type { UiState } from "../backend/types";
+import type { HealthItem, HealthReport, UiState } from "../backend/types";
 import { acceleratorFromEvent, formatClock, hostOf, shortcutKeys } from "../lib/format";
 import { useStore } from "../lib/store";
 import { Keys, More, Notice, Row, Section, Segmented, Sheet, SwitchRow } from "../ui/controls";
-import { IconX } from "../ui/icons";
+import { IconBlock, IconCheck, IconX } from "../ui/icons";
 
 type LangChoice = "system" | "en" | "ru";
 
@@ -220,6 +220,92 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
+/** "Check the helper": what the helper for computer control says about
+ * itself, line by line, in the owner's words. The helper's own English
+ * goes into "Copy details" only. */
+function HelperCheck() {
+  const { state, s, name } = useStore();
+  const t = s.general.health;
+  const [phase, setPhase] = useState<"idle" | "running" | "failed">("idle");
+  const [report, setReport] = useState<HealthReport | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const run = () => {
+    setPhase("running");
+    backend
+      .cuaHealthCheck()
+      .then((next) => {
+        setReport(next);
+        setPhase("idle");
+      })
+      .catch(() => setPhase("failed"));
+  };
+
+  const note = (item: HealthItem): string => {
+    const keys = [`${item.id}:${item.code}`, `${item.id}:${item.verdict}:${state.app.os}`, `${item.id}:${item.verdict}`];
+    for (const key of keys) {
+      const make = t.notes[key];
+      if (make) return make(name, item.value);
+    }
+    return "";
+  };
+
+  return (
+    <div className="health">
+      <div className="health-head">
+        <div>
+          <div className="health-title">{t.title}</div>
+          <div>{t.lead}</div>
+        </div>
+        <button type="button" className="btn small" disabled={phase === "running"} onClick={run}>
+          {phase === "running" ? t.running : report ? t.again : t.run}
+        </button>
+      </div>
+      {phase === "failed" ? (
+        <div className="error-text" role="alert">
+          {t.failed}
+        </div>
+      ) : null}
+      {report ? (
+        <div aria-live="polite">
+          <div className={`health-overall ${report.overall}`}>{t.overall[report.overall] ?? report.overall}</div>
+          <ul className="health-list">
+            {report.items.map((item) => {
+              const text = note(item);
+              return (
+                <li key={item.id} className={`health-item ${item.verdict}`}>
+                  <span className="health-mark" title={t.mark[item.verdict]} aria-label={t.mark[item.verdict]}>
+                    {item.verdict === "ok" ? <IconCheck /> : item.verdict === "fail" ? <IconBlock /> : <span aria-hidden="true">-</span>}
+                  </span>
+                  <span className="health-text">
+                    <span className="health-name">{item.id === "pointer" ? s.computer.cursor(name) : (t.items[item.id] ?? t.other(item.id))}</span>
+                    {text ? <span className="health-note">{text}</span> : null}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+          <div className="onb-actions">
+            <button
+              type="button"
+              className="btn small"
+              onClick={() =>
+                void copyText(report.details).then((ok) => {
+                  setCopied(ok);
+                  window.setTimeout(() => setCopied(false), 2500);
+                })
+              }
+            >
+              {copied ? s.general.copied : t.copy}
+            </button>
+            <span>{t.copyNote}</span>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function Diagnostics() {
   const { state, s } = useStore();
   const t = s.general;
@@ -276,6 +362,7 @@ function Diagnostics() {
         </button>
         <span>{t.copyNote}</span>
       </div>
+      <HelperCheck />
     </More>
   );
 }

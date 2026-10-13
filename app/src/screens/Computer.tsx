@@ -1,7 +1,9 @@
-import { useState } from "react";
-import type { ComputerMode, CursorColor, CursorSpeed, Foreground, ReducedMotion } from "../backend/types";
+import { useEffect, useMemo, useState } from "react";
+import { backend } from "../backend";
+import type { AppChoice, AppRef, AppsPolicy, ComputerMode, CursorColor, CursorSpeed, Foreground, ReducedMotion } from "../backend/types";
 import { useStore } from "../lib/store";
-import { ChoiceList, ListEditor, Notice, Row, Section, Segmented, SwitchRow } from "../ui/controls";
+import { ChoiceList, Notice, Row, Section, Segmented, Sheet, SwitchRow } from "../ui/controls";
+import { IconPlus, IconX } from "../ui/icons";
 import { HelperStatus } from "./HelperStatus";
 import { Remembered } from "./Remembered";
 
@@ -70,6 +72,206 @@ function ColorChoice(props: { label: string; value: CursorColor; names: Record<C
         </button>
       ))}
     </div>
+  );
+}
+
+const sameApp = (a: { id: string }, b: { id: string }) => a.id.toLowerCase() === b.id.toLowerCase();
+
+type PickerState = { phase: "loading" } | { phase: "failed"; missing: boolean } | { phase: "ready"; apps: AppChoice[] };
+
+/** The apps of this computer, to tick. The list comes from the helper and
+ * takes a few seconds; it is read when the sheet opens. */
+function AppPicker(props: { policy: "except" | "only"; picked: AppRef[]; onToggle: (app: AppChoice) => void; onClose: () => void }) {
+  const { s } = useStore();
+  const t = s.computer;
+  const [list, setList] = useState<PickerState>({ phase: "loading" });
+  const [query, setQuery] = useState("");
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    let alive = true;
+    setList({ phase: "loading" });
+    backend
+      .computerApps()
+      .then((found) => {
+        if (alive) setList({ phase: "ready", apps: found.apps });
+      })
+      .catch((e: unknown) => {
+        if (alive) setList({ phase: "failed", missing: String(e instanceof Error ? e.message : e).includes("not_installed") });
+      });
+    return () => {
+      alive = false;
+    };
+  }, [attempt]);
+
+  const shown = useMemo(() => {
+    if (list.phase !== "ready") return [];
+    const q = query.trim().toLowerCase();
+    return q ? list.apps.filter((a) => a.name.toLowerCase().includes(q) || a.id.toLowerCase().includes(q)) : list.apps;
+  }, [list, query]);
+
+  return (
+    <Sheet
+      title={props.policy === "except" ? t.pickerTitleExcept : t.pickerTitleOnly}
+      onCancel={props.onClose}
+      actions={
+        <button type="button" className="btn primary" onClick={props.onClose}>
+          {t.pickerDone}
+        </button>
+      }
+    >
+      <input
+        className="input picker-search"
+        type="search"
+        data-autofocus
+        value={query}
+        placeholder={t.pickerSearch}
+        aria-label={t.pickerSearch}
+        spellCheck={false}
+        autoCapitalize="off"
+        autoCorrect="off"
+        onChange={(e) => setQuery(e.target.value)}
+      />
+      <div className="picker-list" role="group" aria-label={props.policy === "except" ? t.pickerTitleExcept : t.pickerTitleOnly} aria-busy={list.phase === "loading"}>
+        {list.phase === "loading" ? (
+          <div className="empty" role="status">
+            {t.pickerLoading}
+          </div>
+        ) : list.phase === "failed" ? (
+          <div className="empty" role="alert">
+            {list.missing ? t.pickerMissing : t.pickerFailed}
+            {list.missing ? null : (
+              <div style={{ marginTop: 8 }}>
+                <button type="button" className="btn small" onClick={() => setAttempt((n) => n + 1)}>
+                  {s.common.retry}
+                </button>
+              </div>
+            )}
+          </div>
+        ) : shown.length === 0 ? (
+          <div className="empty">{t.pickerNone}</div>
+        ) : (
+          shown.map((app) => {
+            const on = props.picked.some((p) => !p.loose && sameApp(p, app));
+            return (
+              <label className="picker-row" key={app.id}>
+                <input type="checkbox" checked={on} onChange={() => props.onToggle(app)} />
+                <span className="item-text" title={app.path ?? app.id}>
+                  {app.name}
+                </span>
+                {app.sensitive ? <span className="tag">{t.pickerSensitive}</span> : null}
+                {app.running ? <span className="tag">{t.pickerRunning}</span> : null}
+              </label>
+            );
+          })
+        )}
+      </div>
+    </Sheet>
+  );
+}
+
+/** Which apps the synth may use: every app, every app except some, only
+ * some. The list of the chosen kind is edited under the choice. */
+function WhichApps() {
+  const { state, s, name, edit } = useStore();
+  const t = s.computer;
+  const scope = state.core.settings.computer.apps;
+  const [picking, setPicking] = useState(false);
+  const [prefilled, setPrefilled] = useState(false);
+  const policy = scope.policy;
+  const list = policy === "only" ? scope.only : scope.except;
+
+  const choose = (next: AppsPolicy) => {
+    edit((d) => void (d.computer.apps.policy = next));
+    setPrefilled(false);
+    // A list of exceptions that has nothing on it yet starts with the
+    // password managers and security settings this computer has.
+    if (next === "except" && scope.except.length === 0) {
+      void backend
+        .computerApps()
+        .then((found) => {
+          if (found.suggested.length === 0) return;
+          edit((d) => {
+            const apps = d.computer.apps;
+            if (apps.policy === "except" && apps.except.length === 0) apps.except = found.suggested;
+          });
+          setPrefilled(true);
+        })
+        .catch(() => undefined);
+    }
+  };
+
+  const toggle = (app: AppChoice) =>
+    edit((d) => {
+      const apps = d.computer.apps;
+      const key = apps.policy === "only" ? "only" : "except";
+      const has = apps[key].some((p) => !p.loose && sameApp(p, app));
+      apps[key] = has ? apps[key].filter((p) => p.loose || !sameApp(p, app)) : [...apps[key], { id: app.id, name: app.name }];
+    });
+
+  const remove = (app: AppRef) =>
+    edit((d) => {
+      const apps = d.computer.apps;
+      const key = apps.policy === "only" ? "only" : "except";
+      apps[key] = apps[key].filter((p) => !(sameApp(p, app) && Boolean(p.loose) === Boolean(app.loose)));
+    });
+
+  const editor =
+    policy === "all" ? undefined : (
+      <div className="group app-list" style={{ marginTop: 8 }}>
+        {list.length === 0 ? (
+          <div className="empty">{policy === "only" ? t.appsEmptyOnly(name) : t.appsEmptyExcept}</div>
+        ) : (
+          list.map((app) => (
+            <div className="item" key={`${app.loose ? "w" : "a"}:${app.id}`}>
+              <span className="item-text selectable" title={app.loose ? t.appsLooseTitle : app.id}>
+                {app.name || app.id}
+              </span>
+              {app.loose ? (
+                <span className="tag" title={t.appsLooseTitle}>
+                  {t.appsLoose}
+                </span>
+              ) : null}
+              <button type="button" className="btn quiet icon-only" aria-label={`${s.common.remove}: ${app.name || app.id}`} title={s.common.remove} onClick={() => remove(app)}>
+                <IconX />
+              </button>
+            </div>
+          ))
+        )}
+        <div className="add-row">
+          <button type="button" className="btn" onClick={() => setPicking(true)}>
+            <IconPlus />
+            {t.appsAdd}
+          </button>
+        </div>
+      </div>
+    );
+
+  return (
+    <Section title={t.appsTitle} note={t.appsNote(name)}>
+      <ChoiceList<AppsPolicy>
+        label={t.appsTitle}
+        value={policy}
+        onChange={choose}
+        options={[
+          { value: "all", title: t.appsAll, desc: t.appsAllDesc(name) },
+          { value: "except", title: t.appsExcept, desc: t.appsExceptDesc(name) },
+          { value: "only", title: t.appsOnly, desc: t.appsOnlyDesc(name) },
+        ]}
+      />
+      {editor}
+      {policy === "except" && prefilled ? (
+        <div style={{ marginTop: 8 }}>
+          <Notice kind="info">{t.appsPrefilled(name)}</Notice>
+        </div>
+      ) : null}
+      {policy !== "all" ? (
+        <div style={{ marginTop: 8 }}>
+          <Notice kind="info">{policy === "only" ? t.appsLimitsOnly(name) : t.appsLimitsExcept(name)}</Notice>
+        </div>
+      ) : null}
+      {picking && policy !== "all" ? <AppPicker policy={policy} picked={list} onToggle={toggle} onClose={() => setPicking(false)} /> : null}
+    </Section>
   );
 }
 
@@ -147,22 +349,7 @@ export function Computer() {
           </div>
         </Section>
 
-        <Section title={t.blockedTitle} note={t.blockedDesc(name)}>
-          <ListEditor
-            items={c.app_blocklist.map((a) => ({ key: a, label: a }))}
-            placeholder={t.blockedPlaceholder}
-            addLabel={s.common.add}
-            removeLabel={s.common.remove}
-            emptyText={t.blockedEmpty}
-            onAdd={(value) => {
-              edit((d) => {
-                if (!d.computer.app_blocklist.some((a) => a.toLowerCase() === value.toLowerCase())) d.computer.app_blocklist.push(value);
-              });
-              return null;
-            }}
-            onRemove={(key) => edit((d) => void (d.computer.app_blocklist = d.computer.app_blocklist.filter((a) => a !== key)))}
-          />
-        </Section>
+        <WhichApps />
 
         <Section title={t.lookTitle} note={t.lookNote(name)}>
           <div className="group">

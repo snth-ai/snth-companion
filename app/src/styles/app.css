@@ -975,6 +975,111 @@ details.more .more-body {
   color: var(--text-2);
 }
 
+/* ---------- which apps: the list and the picker ---------- */
+
+.app-list .add-row {
+  padding: 8px 10px;
+}
+
+.picker-search {
+  width: 100%;
+  margin-top: 12px;
+}
+
+.picker-list {
+  margin-top: 8px;
+  max-height: min(46vh, 340px);
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.picker-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.picker-row + .picker-row {
+  border-top: 1px solid var(--border);
+}
+
+.picker-row input {
+  flex: none;
+}
+
+/* ---------- check the helper ---------- */
+
+.health {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.health-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.health-title {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.health-overall {
+  margin-top: 10px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.health-overall.problems {
+  color: var(--danger);
+}
+
+.health-list {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+
+.health-item {
+  display: flex;
+  gap: 8px;
+  line-height: 1.4;
+}
+
+.health-mark {
+  flex: none;
+  width: 16px;
+  margin-top: 1px;
+  text-align: center;
+  color: var(--text-2);
+}
+
+.health-item.ok .health-mark {
+  color: var(--ok);
+}
+
+.health-item.fail .health-mark {
+  color: var(--danger);
+}
+
+.health-name {
+  display: block;
+  color: var(--text);
+}
+
+.health-note {
+  display: block;
+}
+
 /* ---------- status ---------- */
 
 .status-head {
@@ -1015,6 +1120,16 @@ details.more .more-body {
   margin-top: 1px;
   font-size: 14px;
   font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The name the synth gave its computer task. */
+.now-task {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--text-2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

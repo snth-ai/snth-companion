@@ -23,6 +23,60 @@ export type CursorSpeed = "fast" | "normal" | "relaxed";
  * (always still), or always. */
 export type ReducedMotion = "system" | "always" | "never";
 
+/** Which apps the synth may use through computer control: every app,
+ * every app except the ones on a list, or only the ones on a list. */
+export type AppsPolicy = "all" | "except" | "only";
+
+/** One app the owner picked. */
+export interface AppRef {
+  /** What the helper knows the app by: a bundle id on macOS, the path of
+   * the program on Windows and Linux. */
+  id: string;
+  name: string;
+  /** A word typed by hand in an older version of the app: it stands for
+   * every app whose name or id contains it. Only among the exceptions. */
+  loose?: boolean;
+}
+
+/** One app in the picker. */
+export interface AppChoice {
+  id: string;
+  name: string;
+  running: boolean;
+  /** Where the app is, when that is not the id already. */
+  path: string | null;
+  /** A password manager or a place where the system's security is set. */
+  sensitive: boolean;
+}
+
+export interface ComputerApps {
+  apps: AppChoice[];
+  /** What a list of exceptions starts with on this computer. */
+  suggested: AppRef[];
+}
+
+/** One line of "Check the helper". */
+export interface HealthItem {
+  /** installed, daemon, pointer, apps, or one of the helper's own checks
+   * (platform_supported, tcc_accessibility, ax_capability, ...). */
+  id: string;
+  verdict: "ok" | "fail" | "skip";
+  /** Why, as a fixed word (not_installed, wrong_version, off, paused,
+   * no_start, no_answer, switched_off, not_probed, all, except, only_pipe,
+   * bounded, not_bounded). */
+  code: string;
+  /** A version or a number to show next to it. */
+  value: string;
+}
+
+export interface HealthReport {
+  overall: "ok" | "problems" | "not_run";
+  items: HealthItem[];
+  /** Plain text for "Copy details": no secrets, no window titles, no path
+   * outside the app's own data folder. */
+  details: string;
+}
+
 /** How computer control looks on this screen. The app's own: the synth is
  * told none of it and cannot change it. */
 export interface Look {
@@ -70,7 +124,9 @@ export interface Settings {
     mode: ComputerMode;
     foreground: Foreground;
     away_idle_minutes: number;
-    app_blocklist: string[];
+    /** Which apps the synth may use. Both lists are kept, so switching
+     * between the choices loses nothing. */
+    apps: { policy: AppsPolicy; except: AppRef[]; only: AppRef[] };
     tool_denylist: string[];
     look: Look;
   };
@@ -126,6 +182,10 @@ export interface Snapshot {
   settings_rev: number;
   cua_version: string;
   cua_status: string;
+  /** The name the synth gave the computer-control task it is running, as
+   * the helper shows it under the synth's pointer (28 characters at
+   * most). The synth's own words. null when nothing is running. */
+  computer_task: string | null;
   /** "YYYY-MM" */
   egress_month: string;
   egress_bytes: number;
@@ -398,6 +458,11 @@ export interface Backend {
   cuaGrantPermissions(): Promise<void>;
   /** "Try again now" after a failed helper install. */
   cuaInstall(): Promise<void>;
+  /** The apps on this computer, for the "which apps" picker. Takes a few
+   * seconds. Rejects with "not_installed" or "helper_failed: ...". */
+  computerApps(): Promise<ComputerApps>;
+  /** "Check the helper": the helper's own health report. */
+  cuaHealthCheck(): Promise<HealthReport>;
 
   /** The offered apps and where their system permissions stand. */
   appsCheck(): Promise<AppsStatus>;

@@ -34,6 +34,19 @@
 //         speed, when it hides, its animation; under Advanced the largest
 //         screenshot and the preview window, which exists with &os=macos
 //         only. &shot and &pip=on open Advanced.)
+//   &which=all|except|only   (Computer control, "Which apps": every app,
+//         every app except some, only some; except is the default here)
+//   &picker=ok|slow|failed|missing|bare
+//        (what "Add apps" finds: the apps of this computer; slow = still
+//         reading; failed = the helper did not answer; missing = no helper
+//         yet; bare = a computer with no password manager, so a new list
+//         of exceptions starts empty)
+//   &task=<label>   (with &state=working: the name the synth gave its
+//         computer task, shown on Status; default "Mia: flights")
+//   &health=ok|noperm|half|nopointer|off|paused|missing|nodaemon|bounded|
+//           notbounded|slow|unknown
+//        (General, Diagnostics, "Check the helper": what the check finds;
+//         unknown = the helper reports a check this app has no words for)
 //   &wayland=1   (with &os=linux: a desktop that draws the pointer itself,
 //         so only the on/off switch is offered)
 //   &cua=ready|checking|downloading|installing|verifying|failed|noperm|half
@@ -50,7 +63,12 @@
 
 import type {
   AnswerDuration,
+  AppChoice,
   AppId,
+  AppRef,
+  ComputerApps,
+  HealthItem,
+  HealthReport,
   Look,
   LookSupport,
   BrowserRow,
@@ -107,11 +125,144 @@ function lookSupport(os: string): LookSupport {
   return { cursor: true, color: !shellPointer, motion: !shellPointer, preview_window: os === "macos" };
 }
 
+/** The apps the helper would list on each system, for the picker. */
+function installedApps(os: string): AppChoice[] {
+  const mac: [string, string, boolean, boolean][] = [
+    ["Safari", "com.apple.Safari", true, false],
+    ["Finder", "com.apple.finder", true, false],
+    ["Notes", "com.apple.Notes", true, false],
+    ["1Password", "com.1password.1password", true, true],
+    ["Calendar", "com.apple.iCal", false, false],
+    ["Google Chrome", "com.google.Chrome", false, false],
+    ["Keychain Access", "com.apple.keychainaccess", false, true],
+    ["Mail", "com.apple.mail", false, false],
+    ["Numbers", "com.apple.iWork.Numbers", false, false],
+    ["Passwords", "com.apple.Passwords", false, true],
+    ["Preview", "com.apple.Preview", false, false],
+    ["System Settings", "com.apple.systempreferences", false, true],
+    ["Telegram", "ru.keepcoder.Telegram", false, false],
+    ["Terminal", "com.apple.Terminal", false, false],
+  ];
+  const win: [string, string, boolean, boolean][] = [
+    ["Microsoft Edge", "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe", true, false],
+    ["File Explorer", "C:\\Windows\\explorer.exe", true, false],
+    ["Notepad", "C:\\Windows\\System32\\notepad.exe", true, false],
+    ["1Password", "C:\\Users\\alex\\AppData\\Local\\1Password\\app\\8\\1Password.exe", false, true],
+    ["Excel", "C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE", false, false],
+    ["Settings", "C:\\Windows\\ImmersiveControlPanel\\SystemSettings.exe", false, true],
+    ["Telegram", "C:\\Users\\alex\\AppData\\Roaming\\Telegram Desktop\\Telegram.exe", false, false],
+    ["Windows Security", "C:\\Windows\\System32\\SecurityHealthHost.exe", false, true],
+  ];
+  const linux: [string, string, boolean, boolean][] = [
+    ["Firefox", "/usr/lib/firefox/firefox", true, false],
+    ["Files", "/usr/bin/nautilus", true, false],
+    ["KeePassXC", "/usr/bin/keepassxc", false, true],
+    ["Passwords and Keys", "/usr/bin/seahorse", false, true],
+    ["Text Editor", "/usr/bin/gnome-text-editor", false, false],
+  ];
+  const rows = os === "macos" ? mac : os === "windows" ? win : linux;
+  return rows.map(([name, id, running, sensitive]) => ({
+    id,
+    name,
+    running,
+    // macOS: the id is the bundle id, and the app has a place as well.
+    path: os === "macos" ? `/Applications/${name}.app` : null,
+    sensitive,
+  }));
+}
+
+/** What "Check the helper" finds, staged. */
+function healthReport(stage: string, state: UiState): HealthReport {
+  const mac = state.app.os === "macos";
+  const item = (id: string, verdict: HealthItem["verdict"], code = "", value = ""): HealthItem => ({ id, verdict, code, value });
+  const scope = state.core.settings.computer.apps;
+  const header = [`SNTH Connect ${state.app.version}: helper check`, `system: ${state.app.os} ${state.app.arch}`];
+  const done = (overall: HealthReport["overall"], items: HealthItem[], lines: string[]): HealthReport => ({
+    overall,
+    items,
+    details: [...header, `overall: ${overall}`, ...lines].join("\n"),
+  });
+  if (stage === "missing") {
+    return done("not_run", [item("installed", "fail", "not_installed", "0.33.1")], ["[fail] installed: no helper found (expected 0.33.1)"]);
+  }
+  const installed = item("installed", "ok", "", "0.33.1");
+  const installedLine = "[ok] installed: cua-driver 0.33.1 (expected 0.33.1)";
+  if (stage === "off" || stage === "paused" || !state.core.settings.computer.enabled || state.core.paused) {
+    const code = stage === "paused" || state.core.paused ? "paused" : "off";
+    return done("not_run", [installed, item("daemon", "skip", code)], [installedLine, `[skip] daemon: not started (${code === "paused" ? "the app is paused" : "computer control is switched off"})`]);
+  }
+  if (stage === "nodaemon") {
+    return done(
+      "problems",
+      [installed, item("daemon", "fail", "no_start")],
+      [installedLine, "[fail] daemon: unavailable: start private Cua daemon: the helper daemon was not listening after 20 s"],
+    );
+  }
+  const access = stage !== "noperm" && stage !== "half";
+  const screen = stage !== "noperm";
+  const items: HealthItem[] = [installed, item("daemon", "ok"), item("platform_supported", "ok")];
+  const lines = [
+    installedLine,
+    "daemon: the app's own, on a private endpoint",
+    "[ok] daemon: answers (driver 0.33.1, report ok, schema 1)",
+    "[pass] binary_version: cua-driver 0.33.1",
+    `[pass] platform_supported: ${mac ? "macOS 26.1 (arm64)" : state.app.os === "windows" ? "Windows 11 (x86_64)" : "Linux (x86_64)"}`,
+    "[pass] session_active: MCP session is active.",
+  ];
+  if (mac) {
+    items.push(item("bundle_identity", "ok"), item("tcc_accessibility", access ? "ok" : "fail"), item("tcc_screen_recording", screen ? "ok" : "fail"));
+    lines.push(
+      "[pass] bundle_identity: Embedded host ai.snth.connect.",
+      "       executable_path: <app-data>/cua/releases/0.33.1/cua-driver",
+      `[${access ? "pass" : "fail"}] tcc_accessibility: Accessibility is ${access ? "granted" : "NOT granted for this process"}.`,
+      `[${screen ? "pass" : "fail"}] tcc_screen_recording: Screen Recording is ${screen ? "granted" : "NOT granted for this process"}.`,
+    );
+  }
+  items.push(item("ax_capability", access ? "ok" : "fail"));
+  lines.push(`[${access ? "pass" : "fail"}] ax_capability: ${access ? "AX is trusted and reachable." : "AX is not trusted; UI inspection and event posting will fail."}`);
+  if (mac) {
+    items.push(item("screen_capture_capability", "skip", "not_probed"));
+    lines.push("[skip] screen_capture_capability: Direct ScreenCaptureKit readiness was not probed because health_report is read-only.");
+  } else {
+    items.push(item("screen_capture_capability", "ok"));
+    lines.push("[pass] screen_capture_capability: capture works.");
+  }
+  if (stage === "unknown") {
+    items.push(item("gpu_compositor", "fail"));
+    lines.push("[fail] gpu_compositor: compositor handshake failed.");
+  }
+  if (!state.core.settings.computer.look.cursor) {
+    items.push(item("pointer", "skip", "switched_off"));
+    lines.push("[skip] pointer: switched off by the owner");
+  } else if (stage === "nopointer") {
+    items.push(item("pointer", "fail"));
+    lines.push("[fail] pointer: agent cursor overlay is unavailable (facility_unavailable)");
+  } else {
+    items.push(item("pointer", "ok"));
+    lines.push("[ok] pointer: enabled true, theme cua.default");
+  }
+  const count = String(scope.policy === "only" ? scope.only.length : scope.except.length);
+  if (stage === "notbounded") {
+    items.push(item("apps", "fail", "not_bounded", count));
+    lines.push(`[fail] apps: only ${count}, but the helper did not refuse the list of every window (it answered)`);
+  } else if (stage === "bounded" || scope.policy === "only") {
+    items.push(item("apps", "ok", "bounded", stage === "bounded" && scope.policy !== "only" ? "2" : count));
+    lines.push(`[ok] apps: only ${count} (the helper runs in bounded mode and refuses the rest itself)`);
+  } else if (scope.policy === "except") {
+    items.push(item("apps", "ok", "except", count));
+    lines.push(`[ok] apps: every app except ${count} (held by the app, call by call)`);
+  } else {
+    items.push(item("apps", "ok", "all"));
+    lines.push("[ok] apps: every app");
+  }
+  return done(items.some((i) => i.verdict === "fail") ? "problems" : "ok", items, lines);
+}
+
 function presetSettings(preset: Exclude<Preset, "custom">, roots: Settings["files"]["roots"]): Settings {
   const base: Settings = {
     net: { enabled: true, mode: "ask", domains: [], allow_local_network: false, monthly_cap_bytes: 0, skip_on_metered: true },
     cookies: { enabled: true, mode: "ask" },
-    computer: { enabled: true, mode: "ask", foreground: "never", away_idle_minutes: 5, app_blocklist: [], tool_denylist: [], look: defaultLook() },
+    computer: { enabled: true, mode: "ask", foreground: "never", away_idle_minutes: 5, apps: { policy: "all", except: [], only: [] }, tool_denylist: [], look: defaultLook() },
     files: { enabled: true, roots, ask_on_write: true },
     apps: { enabled: true, mode: "ask", apps: {} },
     preset,
@@ -165,7 +316,7 @@ function offSettings(): Settings {
   return {
     net: { enabled: false, mode: "ask", domains: [], allow_local_network: false, monthly_cap_bytes: 0, skip_on_metered: false },
     cookies: { enabled: false, mode: "ask" },
-    computer: { enabled: false, mode: "ask", foreground: "never", away_idle_minutes: 5, app_blocklist: [], tool_denylist: [], look: defaultLook() },
+    computer: { enabled: false, mode: "ask", foreground: "never", away_idle_minutes: 5, apps: { policy: "all", except: [], only: [] }, tool_denylist: [], look: defaultLook() },
     files: { enabled: false, roots: [], ask_on_write: false },
     apps: { enabled: false, mode: "ask", apps: {} },
     preset: "custom",
@@ -535,8 +686,15 @@ class MockBackend implements Backend {
     const settings = presetSettings(preset, roots);
     settings.net.domains = ["wikipedia.org", "github.com"];
     settings.net.monthly_cap_bytes = 10 * GB;
-    settings.computer.app_blocklist = ["Mail", "1Password"];
     const os = params.get("os") ?? "macos";
+    const known = installedApps(os);
+    const pickApp = (name: string): AppRef[] => known.filter((a) => a.name === name).map((a) => ({ id: a.id, name: a.name }));
+    settings.computer.apps = {
+      policy: oneOf(params.get("which"), ["all", "except", "only"] as const, "except"),
+      // One picked from the list, one word typed by hand in an older version.
+      except: [...pickApp("1Password"), ...pickApp(os === "macos" ? "Keychain Access" : "Settings"), { id: "mail", name: "mail", loose: true }],
+      only: [...pickApp(os === "macos" ? "Safari" : "Microsoft Edge"), ...pickApp(os === "macos" ? "Notes" : "Notepad")],
+    };
     settings.computer.look = stagedLook();
     // The preview window exists on macOS only.
     if (os !== "macos") settings.computer.look.preview_window = false;
@@ -556,6 +714,7 @@ class MockBackend implements Backend {
         settings_rev: 14,
         cua_version: "0.33.1",
         cua_status: "ok",
+        computer_task: null,
         egress_month: new Date().toISOString().slice(0, 7),
         egress_bytes: 3.4 * GB,
       },
@@ -677,6 +836,9 @@ class MockBackend implements Backend {
         s.needs_repair = true;
         break;
       case "working":
+        // The synth named its task; the label is its own text, cut as the
+        // helper cuts it under the pointer.
+        s.core.computer_task = (params.get("task") ?? "Mia: flights").slice(0, 28);
         this.startWork();
         break;
       case "empty":
@@ -684,7 +846,7 @@ class MockBackend implements Backend {
         s.grants = [];
         s.core.settings.net.domains = [];
         s.core.settings.files.roots = [];
-        s.core.settings.computer.app_blocklist = [];
+        s.core.settings.computer.apps = { policy: "all", except: [], only: [] };
         s.core.egress_bytes = 0;
         break;
       case "off":
@@ -1276,6 +1438,23 @@ class MockBackend implements Backend {
       },
       80,
     );
+  }
+
+  computerApps(): Promise<ComputerApps> {
+    const stage = params.get("picker") ?? "ok";
+    if (stage === "slow") return new Promise<ComputerApps>(() => undefined);
+    if (stage === "missing") return this.reply(undefined, 300).then(() => Promise.reject(new Error("not_installed")));
+    if (stage === "failed") return this.reply(undefined, 900).then(() => Promise.reject(new Error("helper_failed: the helper did not answer list_apps in time")));
+    const apps = installedApps(this.state.app.os).filter((a) => stage !== "bare" || !a.sensitive);
+    const suggested = apps.filter((a) => a.sensitive).map((a) => ({ id: a.id, name: a.name }));
+    // The real list takes a few seconds on a computer with many apps.
+    return this.reply({ apps, suggested }, 1400);
+  }
+
+  cuaHealthCheck(): Promise<HealthReport> {
+    const stage = params.get("health") ?? "ok";
+    if (stage === "slow") return new Promise<HealthReport>(() => undefined);
+    return this.reply(healthReport(stage, this.state), 1100);
   }
 
   cuaGrantPermissions() {

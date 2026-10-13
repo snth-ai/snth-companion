@@ -185,9 +185,18 @@ export function summarize(
       return sum.cookiesAuto;
     case "computer":
       if (!settings.computer.enabled) return sum.off;
-      if (settings.computer.mode === "ask") return sum.computerAsk;
-      if (settings.computer.mode === "auto") return sum.computerAuto;
-      return sum.computerAway(settings.computer.away_idle_minutes);
+      {
+        const when =
+          settings.computer.mode === "ask"
+            ? sum.computerAsk
+            : settings.computer.mode === "auto"
+              ? sum.computerAuto
+              : sum.computerAway(settings.computer.away_idle_minutes);
+        const scope = settings.computer.apps;
+        if (scope.policy === "only") return `${when}, ${sum.computerOnly(scope.only.length)}`;
+        if (scope.policy === "except" && scope.except.length > 0) return `${when}, ${sum.computerExcept(scope.except.length)}`;
+        return when;
+      }
     case "files": {
       if (!settings.files.enabled) return sum.off;
       const count = settings.files.roots.length;
@@ -248,6 +257,13 @@ function refusalReason(outcome: string, s: Strings): string {
   if (o.includes("the look is the owner's")) return why.yourLook;
   if (o.includes("never allowed")) return why.never;
   if (o.includes("blocklist") || o.includes("denylist")) return why.blockedApp;
+  if (o.includes("an app the owner excluded")) return why.appExcluded;
+  if (o.includes("not one of the apps the owner chose")) return why.appNotChosen;
+  if (o.includes("the whole screen, while apps are limited")) return why.wholeScreen;
+  if (o.includes("no window named")) return why.noWindow;
+  if (o.includes("a window of no known app")) return why.unknownApp;
+  if (o.includes("while apps are limited") || o.includes("while only chosen apps are allowed") || o.includes("the app cannot place") || o.includes("while one is excluded"))
+    return why.limitedApps;
   if (o.includes("only while you are away")) return why.away;
   if (o.includes("outside the shared folders")) return why.outsideFolders;
   if (o.includes("read-only")) return why.readOnly;

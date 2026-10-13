@@ -36,6 +36,8 @@ export const tauriBackend: Backend = {
   cuaCheck: () => invoke("cua_check"),
   cuaGrantPermissions: () => invoke("cua_grant_permissions"),
   cuaInstall: () => invoke("cua_install"),
+  computerApps: () => invoke("computer_apps"),
+  cuaHealthCheck: () => invoke("cua_health_check"),
 
   appsCheck: () => invoke("apps_check"),
   appsRequestPermission: (app) => invoke("apps_request_permission", { app }),

@@ -397,6 +397,8 @@ fn main() {
             commands::cua_check,
             commands::cua_grant_permissions,
             commands::cua_install,
+            commands::computer_apps,
+            commands::cua_health_check,
             commands::apps_check,
             commands::apps_request_permission,
             commands::logins_refresh,
