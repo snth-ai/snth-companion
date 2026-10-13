@@ -14,9 +14,13 @@
 //!   connectd make-cookie-fixture --db <p> --key <pw> --domain <d> --name <n> --value <v>
 //!   connectd selftest cua [--root <dir>] [--keep]   (see selftest.rs)
 //!   connectd selftest apps [--touch]                (see selftest.rs)
+//!   connectd selftest host [--helper <p>] [--system] (see selftest_host.rs)
+//!   connectd browser-manifest --dir <NativeMessagingHosts dir> --helper <p>
 //!
 //! `run` reads command lines from stdin (pause / resume / unpair /
-//! preset <name> / addroot <path>[:rw] / apps ... / status / quit) so a test script
+//! preset <name> / addroot <path>[:rw] / apps ... / browsers / link-browser <id> /
+//! unlink-browser <id> / vault-list / vault-forget <site> / revoke <cap> <scope> /
+//! status / quit) so a test script
 //! can drive it; approvals come from the chosen approver, never stdin,
 //! when a rule set is given.
 
@@ -32,6 +36,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::watch;
 
 mod selftest;
+mod selftest_host;
 
 const TOKEN_KEY: &str = "pairing_token";
 
@@ -51,6 +56,7 @@ fn main() {
             "settings" => cmd_settings(&args[1..]).await,
             "preset" => cmd_preset(&args[1..]).await,
             "make-cookie-fixture" => cmd_make_fixture(&args[1..]),
+            "browser-manifest" => cmd_browser_manifest(&args[1..]),
             "selftest" => selftest::run(&args[1..]).await,
             "-h" | "--help" | "help" | "" => {
                 print_usage();
@@ -78,6 +84,8 @@ fn print_usage() {
          \u{20}  connectd make-cookie-fixture --db <p> --key <pw> --domain <d> --name <n> --value <v>\n\
          \u{20}  connectd selftest cua [--root <dir>] [--keep]\n\
          \u{20}  connectd selftest apps [--touch]\n\
+         \u{20}  connectd selftest host [--helper <path>] [--system]\n\
+         \u{20}  connectd browser-manifest --dir <NativeMessagingHosts dir> --helper <path>\n\
          \n\
          run options:\n\
          \u{20}  --settings <p>        settings.json path (default: in-memory)\n\
@@ -93,7 +101,10 @@ fn print_usage() {
          \u{20}  --deny-all           auto-deny every ask\n\
          \u{20}  --cookie-chromium <name>=<db>  a Chromium cookie DB fixture\n\
          \u{20}  --cookie-firefox <db>          a Firefox cookie DB fixture\n\
-         \u{20}  --cookie-key <pw>              Safe Storage password for the fixtures\n"
+         \u{20}  --cookie-key <pw>              Safe Storage password for the fixtures\n\
+         \u{20}  --browser-endpoint <path>      serve the SNTH Vault extension's helper on this\n\
+         \u{20}                        endpoint (a socket path; a pipe name on Windows)\n\
+         \u{20}  --cookies-extension-first      ask a linked browser before reading browser files\n"
     );
 }
 
@@ -304,9 +315,9 @@ async fn cmd_run(args: &[String]) -> i32 {
         &[
             "--url", "--token", "--settings", "--secret-file", "--journal", "--preset",
             "--root", "--cua-attach", "--cua-bin", "--approve", "--cookie-chromium",
-            "--cookie-firefox", "--cookie-key", "--apps",
+            "--cookie-firefox", "--cookie-key", "--apps", "--browser-endpoint",
         ],
-        &["--deny-all", "--allow-local"],
+        &["--deny-all", "--allow-local", "--cookies-extension-first"],
     );
     let url = match a.get("--url") {
         Some(u) => u.to_string(),
@@ -327,7 +338,23 @@ async fn cmd_run(args: &[String]) -> i32 {
     if a.has("--allow-local") {
         core.mutate_settings(|s| s.net.allow_local_network = true);
     }
+    if a.has("--cookies-extension-first") {
+        core.set_cookies_extension_first(true);
+    }
     let (stop_tx, stop_rx) = watch::channel(false);
+
+    // The browser link: the extension's helper connects here. Only when
+    // asked for, and only on the endpoint given: a debugging tool never
+    // takes the endpoint of an installed app.
+    if let Some(path) = a.get("--browser-endpoint") {
+        let endpoint = connect_host::endpoint::Endpoint::at(path);
+        let (browser_core, browser_stop) = (core.clone(), stop_rx.clone());
+        tokio::spawn(async move {
+            if let Err(e) = browser_core.run_browser_link(&endpoint, browser_stop).await {
+                eprintln!("connectd: browser link on {endpoint}: {e}");
+            }
+        });
+    }
 
     let link_core = core.clone();
     let link = tokio::spawn(async move {
@@ -458,6 +485,31 @@ async fn run_command(core: &Core, line: &str) -> bool {
                 None => println!("ERR usage: apps on <ask|ask_new|auto> | apps off | apps app <id> <on|off>"),
             }
         }
+        "browsers" => {
+            println!("BROWSERS {}", serde_json::to_string(&core.browsers()).unwrap_or_default());
+        }
+        "link-browser" => match core.browser_link(rest.trim()).await {
+            Ok(()) => println!("OK link-browser"),
+            Err(why) => println!("ERR link-browser {}", why.code()),
+        },
+        "unlink-browser" => match core.browser_unlink(rest.trim()).await {
+            Ok(()) => println!("OK unlink-browser"),
+            Err(why) => println!("ERR unlink-browser {why}"),
+        },
+        // Names and dates only: there is no command that prints a login.
+        "vault-list" => match core.vault_list().await {
+            Ok(list) => println!("VAULT {}", serde_json::to_string(&list).unwrap_or_default()),
+            Err(why) => println!("ERR vault-list {why}"),
+        },
+        "vault-forget" => match core.vault_forget(rest.trim()).await {
+            Ok(()) => println!("OK vault-forget"),
+            Err(why) => println!("ERR vault-forget {why}"),
+        },
+        "revoke" => {
+            let (cap, scope) = rest.trim().split_once(' ').unwrap_or((rest.trim(), ""));
+            core.revoke(cap, scope.trim());
+            println!("OK revoke");
+        }
         "status" => {
             let snap = core.snapshot().await;
             println!("SNAPSHOT {}", serde_json::to_string(&snap).unwrap_or_default());
@@ -544,6 +596,39 @@ async fn cmd_preset(args: &[String]) -> i32 {
     let rev = core.apply_preset(p);
     println!("applied {name}, settings_rev={rev}");
     0
+}
+
+/// Write a host manifest into one folder: the `NativeMessagingHosts`
+/// folder of a throwaway browser profile in a test. Never a real
+/// browser's folder: the app registers itself there, not this tool.
+fn cmd_browser_manifest(args: &[String]) -> i32 {
+    let a = parse(args, &["--dir", "--helper"], &[]);
+    let (Some(dir), Some(helper)) = (a.get("--dir"), a.get("--helper")) else {
+        eprintln!("browser-manifest: --dir and --helper are required");
+        return 2;
+    };
+    let helper = match std::fs::canonicalize(helper) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("browser-manifest: {helper}: {e}");
+            return 1;
+        }
+    };
+    match connect_host::install::write_manifest(
+        std::path::Path::new(dir),
+        connect_host::HOST_NAME,
+        &helper,
+        connect_host::EXTENSION_IDS,
+    ) {
+        Ok(file) => {
+            println!("wrote {}", file.display());
+            0
+        }
+        Err(e) => {
+            eprintln!("browser-manifest: {e}");
+            1
+        }
+    }
 }
 
 fn cmd_make_fixture(args: &[String]) -> i32 {

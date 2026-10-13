@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 description = "Headless CLI over connect-core: pair / run / status / settings / pause / resume / unpair, with a terminal approver. For tests and debugging."
 publish = false
+default-run = "connectd"
 
 [[bin]]
 name = "connectd"
@@ -13,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 connect-core = { path = "../connect-core" }
+connect-host = { path = "../connect-host" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
