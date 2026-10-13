@@ -24,12 +24,19 @@
 //! admits the same user only. Everything that arrives is untrusted input
 //! and is bounded here (`frame`) before the app parses it.
 //!
+//! Safari has no helper process: its extension ships inside the app, and
+//! the extension's own native handler (Swift, `app/safari`) plays the
+//! helper's part over a second endpoint of the same kind, in the folder
+//! of the app group the app and the extension share (`safari`). The two
+//! endpoints are two doors (`Door`): each admits only its own callers.
+//!
 //! Nothing in this crate knows what the messages mean.
 
 pub mod endpoint;
 pub mod frame;
 pub mod host;
 pub mod install;
+pub mod safari;
 pub mod transport;
 #[cfg(windows)]
 mod win;
@@ -58,9 +65,45 @@ pub fn origin_allowed(origin: &str) -> bool {
     EXTENSION_IDS.iter().any(|id| origin == origin_of(id))
 }
 
+/// Which endpoint a connection came in on. The Chromium helper connects
+/// to the app's own endpoint, the Safari extension's handler to the one in
+/// the app group folder. A door admits its own callers only: an origin
+/// that is right for one is refused on the other, so the second door adds
+/// a way in for Safari and for nobody else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Door {
+    Chromium,
+    Safari,
+}
+
+impl Door {
+    /// Is this the origin a caller on this door must name in its first
+    /// line? Exact match.
+    pub fn admits(self, origin: &str) -> bool {
+        match self {
+            Door::Chromium => origin_allowed(origin),
+            Door::Safari => origin == safari::ORIGIN,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_door_admits_its_own_callers_only() {
+        let chrome = origin_of(EXTENSION_IDS[0]);
+        assert!(Door::Chromium.admits(&chrome));
+        assert!(Door::Safari.admits(safari::ORIGIN));
+        // The right origin on the wrong door is refused.
+        assert!(!Door::Chromium.admits(safari::ORIGIN));
+        assert!(!Door::Safari.admits(&chrome));
+        for bad in ["", "safari-web-extension://ai.snth.connect.safari", "safari-web-extension://ai.snth.vault.Extension/", "https://ai.snth.connect.safari/"] {
+            assert!(!Door::Safari.admits(bad), "{bad}");
+            assert!(!Door::Chromium.admits(bad), "{bad}");
+        }
+    }
 
     #[test]
     fn only_our_extension_is_an_allowed_origin() {

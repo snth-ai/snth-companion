@@ -49,6 +49,15 @@ impl Listener {
     pub async fn accept(&mut self) -> io::Result<Conn> {
         self.inner.accept().await
     }
+
+    /// For a test of the refusal only: take callers that run as `uid`
+    /// instead of the current user, so a real caller of this user is
+    /// "another user" to the listener. The app never calls this.
+    #[cfg(unix)]
+    #[doc(hidden)]
+    pub fn expect_peer_uid(&mut self, uid: u32) {
+        self.inner.peer_uid = uid;
+    }
 }
 
 /// The helper's side. An error means the app is not running (or the
@@ -79,6 +88,8 @@ mod imp {
     pub struct Listener {
         listener: UnixListener,
         path: PathBuf,
+        /// Who a caller must run as: the current user.
+        pub(super) peer_uid: u32,
     }
 
     impl Listener {
@@ -113,7 +124,7 @@ mod imp {
             }
             let listener = UnixListener::bind(&path)?;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-            Ok(Listener { listener, path })
+            Ok(Listener { listener, path, peer_uid: uid() })
         }
 
         pub async fn accept(&mut self) -> io::Result<Conn> {
@@ -122,7 +133,7 @@ mod imp {
                 // The folder already keeps other users out; this is the
                 // same rule checked on the connection itself.
                 match stream.peer_cred() {
-                    Ok(cred) if cred.uid() == uid() => return Ok(conn(stream)),
+                    Ok(cred) if cred.uid() == self.peer_uid => return Ok(conn(stream)),
                     _ => continue,
                 }
             }
@@ -276,6 +287,36 @@ mod tests {
         drop(listener);
         assert!(!dir.join("browser/app.sock").exists(), "the socket file goes with the listener");
         assert!(connect(&ep).await.is_err(), "no app, no connection");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_caller_of_another_user_is_dropped_unheard() {
+        let dir = temp_dir("uid");
+        let ep = Endpoint::at(dir.join("app.sock").to_string_lossy());
+        let mut listener = Listener::bind(&ep).unwrap();
+        // Nobody can connect as another user in a test, so the listener is
+        // told to expect one: this user's own caller is then the stranger.
+        listener.expect_peer_uid(unsafe { libc::getuid() } + 1);
+        let client = tokio::spawn({
+            let ep = ep.clone();
+            async move {
+                // Hung up on at once: the caller either sees the connection
+                // fail (the other end is gone before it is looked at) or
+                // gets it closed without a byte of answer.
+                match connect(&ep).await {
+                    Err(_) => 0,
+                    Ok(mut c) => {
+                        let _ = c.writer.write_all(b"hello\n").await;
+                        let mut buf = [0u8; 1];
+                        c.reader.read(&mut buf).await.unwrap_or(0)
+                    }
+                }
+            }
+        });
+        let accepted = tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept()).await;
+        assert!(accepted.is_err(), "a caller of another user must never be handed to the app");
+        assert_eq!(client.await.unwrap(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

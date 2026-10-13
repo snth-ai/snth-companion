@@ -6,8 +6,22 @@
 	     commands to another app (Calendar, Contacts, Reminders, Notes,
 	     Messages: the Apps page) is refused outright unless this is set.
 	     With it, macOS asks the owner once per app ("SNTH Connect wants
-	     to control Calendar"). Nothing else is requested here. -->
+	     to control Calendar"). -->
 	<key>com.apple.security.automation.apple-events</key>
 	<true/>
+	<!-- The app group the app shares with its Safari extension
+	     (Contents/PlugIns/SNTH Vault.appex). The extension is sandboxed
+	     and reaches the running app through a socket in this group's
+	     folder (~/Library/Group Containers/<group>/run). The id starts
+	     with the team id: macOS takes that form without a provisioning
+	     profile and lets only programs signed by this team into the
+	     folder. The app itself is not sandboxed; it names the group so
+	     that macOS lets it create and open that folder without asking.
+	     The same id is in safari/Extension/Extension.entitlements and in
+	     crates/connect-host/src/safari.rs. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>CZAP38JFAE.ai.snth.connect</string>
+	</array>
 </dict>
 </plist>
