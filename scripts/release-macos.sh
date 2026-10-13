@@ -132,6 +132,9 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/snth-connect-release.XXXXXX")"
 # inside: the copies this script makes (the build tree, the disk image's
 # folder, the unpacked updater bundle) would show up in Safari's settings next
 # to the installed app's own. Take every copy off the system's list again.
+# The temp copies are deleted right after; the one in the build tree stays
+# on disk, where macOS could find it again later, so it loses its extension:
+# the disk image and the updater bundle are the release, not that folder.
 forget_copies() {
     local copy
     for copy in "$APP" "$WORK/dmg/$APP_NAME" "$WORK/unpacked/$APP_NAME"; do
@@ -139,6 +142,7 @@ forget_copies() {
         pluginkit -r "$copy/$APPEX_REL" >/dev/null 2>&1 || true
         "$LSREGISTER" -u "$copy" >/dev/null 2>&1 || true
     done
+    rm -rf "$APP/Contents/PlugIns"
 }
 trap 'forget_copies; rm -rf "$WORK"' EXIT
 
@@ -464,6 +468,7 @@ else
 fi
 
 step "Done"
+note "the app in the build tree is left WITHOUT its Safari extension (so macOS does not offer that copy to Safari)"
 note "first install: $DMG"
 note "updater:       $TARBALL"
 note "signature:     $SIGNATURE"

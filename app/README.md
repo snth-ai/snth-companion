@@ -200,7 +200,9 @@ runtime and a timestamp, sandboxed, in the app group
 app is in the same group and kept the entitlements Tauri signed it with; and
 the updater bundle, unpacked, still carries it signed and sandboxed. The
 copies of the app the script makes are taken off the system's list of apps
-at the end, so Safari on the release Mac does not show their extensions.
+at the end, and the one that stays in the build tree loses its extension,
+so Safari on the release Mac does not show an extension from a build folder.
+The disk image and the updater bundle are the release.
 
 ### What an installed copy does with an update
 
