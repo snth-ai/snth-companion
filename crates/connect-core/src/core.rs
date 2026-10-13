@@ -64,6 +64,9 @@ pub enum CoreEvent {
     /// A browser's extension connected, left, was linked or unlinked, or
     /// the sites it may read changed.
     Browsers,
+    /// The name of the computer-control task that is running changed (or
+    /// there is none any more): see `Core::computer_task`.
+    ComputerTask,
 }
 
 /// After a failed start of our daemon the next try waits: 5 s, 15 s, 1 min,
@@ -176,6 +179,14 @@ pub struct Shared {
     /// Computer-control sessions that hold our daemon right now (see
     /// `CuaSession`). The daemon is replaced only while this is zero.
     cua_sessions: AtomicUsize,
+    /// The apps and windows of this computer as the driver lists them: the
+    /// app's own reading, for the owner's picker and for telling which app
+    /// a call is about (`cua_apps.rs`). The synth never reaches it.
+    pub(crate) cua_dir: crate::cua_apps::Directory,
+    /// The label the synth gave the task it is running, as the driver
+    /// shows it under the agent's cursor, and when it was last used.
+    /// Memory only: never in the journal, never on disk.
+    cua_task: Mutex<Option<(String, Instant)>>,
     counters: Mutex<Counters>,
 
     identity: RwLock<Option<Pending>>, // confirmed pairing (url, id, token-in-secret)
@@ -450,10 +461,13 @@ impl Shared {
     /// answer holds our daemon until it is dropped, so the daemon is not
     /// replaced under a session that is running.
     pub async fn cua_session(self: &Arc<Self>) -> Result<CuaSession, Refusal> {
-        let (socket, embedded) = self.cua_endpoint(true).await?;
+        let at = self.cua_endpoint_at(true).await?;
         Ok(CuaSession {
-            socket,
-            embedded,
+            socket: at.socket,
+            embedded: at.embedded,
+            scope: at.scope,
+            look: at.look,
+            started: at.started,
             shared: self.clone(),
         })
     }
@@ -463,9 +477,14 @@ impl Shared {
         self.cua_sessions.load(Ordering::Acquire)
     }
 
+    async fn cua_endpoint(self: &Arc<Self>, session: bool) -> Result<(String, bool), Refusal> {
+        let at = self.cua_endpoint_at(session).await?;
+        Ok((at.socket, at.embedded))
+    }
+
     /// `session`: count the caller as a session. Counted while the daemon
     /// lock is held, so no other caller can replace the daemon in between.
-    async fn cua_endpoint(self: &Arc<Self>, session: bool) -> Result<(String, bool), Refusal> {
+    async fn cua_endpoint_at(self: &Arc<Self>, session: bool) -> Result<Endpoint, Refusal> {
         if self.paused() {
             return Err(Refusal::Denied("computer use is paused by the owner".into()));
         }
@@ -478,7 +497,15 @@ impl Shared {
                 if session {
                     self.cua_sessions.fetch_add(1, Ordering::AcqRel);
                 }
-                Ok((socket, false))
+                // A daemon of the user's own: nothing of ours limits it,
+                // so the owner's choice of apps is held by the pipe alone.
+                Ok(Endpoint {
+                    socket,
+                    embedded: false,
+                    scope: Arc::new(crate::cua_apps::Scope::of(&self.settings())),
+                    look: None,
+                    started: Instant::now(),
+                })
             }
             CuaAttach::Private => {
                 let mut guard = self.cua_daemon.lock().await;
@@ -489,16 +516,27 @@ impl Shared {
                     }
                 }
                 let s = self.settings();
-                // The look is the daemon's start flags, so a new look needs
-                // a new daemon. It is replaced here, where a session is
-                // about to start, and only when no other session holds it:
-                // work in progress keeps the look it began with.
+                // The look is the daemon's start flags, and the owner's
+                // choice of apps is its permission mode and manifest: a
+                // new look or a new choice needs a new daemon. So does a
+                // bounded daemon whose day is half over. It is replaced
+                // here, where a session is about to start, and only when no
+                // other session holds it: work in progress keeps what it
+                // began with.
                 if self.cua_sessions.load(Ordering::Acquire) == 0 {
-                    let stale = guard.as_ref().is_some_and(|d| {
-                        d.look != crate::cua_look::resolve(&s.computer.look, &self.cua_env)
+                    let why = guard.as_ref().and_then(|d| {
+                        if d.look != crate::cua_look::resolve(&s.computer.look, &self.cua_env) {
+                            Some("the look changed")
+                        } else if *d.scope != crate::cua_apps::Scope::of(&s) {
+                            Some("the owner's choice of apps changed")
+                        } else if lease_old(&d.scope, d.started) {
+                            Some("its permissions are half a day old")
+                        } else {
+                            None
+                        }
                     });
-                    if stale {
-                        crate::logln!("cua daemon: the look changed, starting a new one");
+                    if let Some(why) = why {
+                        crate::logln!("cua daemon: {why}, starting a new one");
                         if let Some(old) = guard.take() {
                             old.stop(&self.cua_bin, &self.cua_env).await;
                         }
@@ -539,9 +577,58 @@ impl Shared {
                 if session {
                     self.cua_sessions.fetch_add(1, Ordering::AcqRel);
                 }
-                Ok((guard.as_ref().unwrap().socket.clone(), true))
+                let d = guard.as_ref().unwrap();
+                Ok(Endpoint {
+                    socket: d.socket.clone(),
+                    embedded: true,
+                    scope: d.scope.clone(),
+                    look: Some(d.look.clone()),
+                    started: d.started,
+                })
             }
         }
+    }
+
+    /// The owner's choice of apps our running daemon was started with;
+    /// None when no daemon of ours runs.
+    pub async fn cua_daemon_scope(&self) -> Option<Arc<crate::cua_apps::Scope>> {
+        self.cua_daemon.lock().await.as_ref().map(|d| d.scope.clone())
+    }
+
+    /// The apps and windows of this computer, as the app itself reads them
+    /// from the driver.
+    pub fn cua_directory(&self) -> &crate::cua_apps::Directory {
+        &self.cua_dir
+    }
+
+    /// The synth used this label on a call just now.
+    pub(crate) fn note_task(&self, raw: Option<&str>) {
+        let Some(label) = raw.and_then(task_label) else {
+            return;
+        };
+        let changed = {
+            let mut task = self.cua_task.lock().unwrap();
+            let changed = task.as_ref().is_none_or(|(have, at)| *have != label || at.elapsed() >= TASK_LABEL_TTL);
+            *task = Some((label, Instant::now()));
+            changed
+        };
+        if changed {
+            self.emit(CoreEvent::ComputerTask);
+        }
+    }
+
+    /// The computer-control session ended: its task has no name any more.
+    pub(crate) fn clear_task(&self) {
+        if self.cua_task.lock().unwrap().take().is_some() {
+            self.emit(CoreEvent::ComputerTask);
+        }
+    }
+
+    /// The label of the computer-control task that is running, if the
+    /// synth named it and used the name in the last few minutes.
+    pub fn computer_task(&self) -> Option<String> {
+        let task = self.cua_task.lock().unwrap();
+        task.as_ref().filter(|(_, at)| at.elapsed() < TASK_LABEL_TTL).map(|(label, _)| label.clone())
     }
 
     /// The look flags our running daemon was started with; None when no
@@ -615,7 +702,67 @@ impl Shared {
         if let Some(d) = d {
             d.stop(&self.cua_bin, &self.cua_env).await;
         }
+        self.cua_dir.stop().await;
+        self.clear_task();
     }
+}
+
+/// Where a daemon is and what it was started with.
+struct Endpoint {
+    socket: String,
+    embedded: bool,
+    scope: Arc<crate::cua_apps::Scope>,
+    /// None for a daemon of the user's own: its look is not ours.
+    look: Option<Vec<String>>,
+    started: Instant,
+}
+
+/// A bounded daemon lives a day (`cua_apps::LEASE`). After half of it, it
+/// is replaced the next time nobody holds it.
+fn lease_old(scope: &crate::cua_apps::Scope, started: Instant) -> bool {
+    scope.policy == crate::settings::AppsPolicy::Only && started.elapsed() >= crate::cua_apps::RENEW_AFTER
+}
+
+/// How long a task label counts as "running" after its last call: the
+/// driver ends a named session after five minutes without one.
+const TASK_LABEL_TTL: Duration = Duration::from_secs(5 * 60);
+
+/// The most the driver shows of a session label (`cursor-overlay`,
+/// `MAX_SESSION_LABEL_CHARS`).
+pub const TASK_LABEL_CHARS: usize = 28;
+
+/// A session label as the driver itself shows it under the agent's cursor
+/// (`cursor-overlay/src/session_badge.rs`, `sanitize_session_label`):
+/// control characters are dropped, every run of white space becomes one
+/// space, and what is longer than 28 characters is cut to 27 and an
+/// ellipsis. None when nothing is left. The label is the synth's own
+/// text: the app shows it to the owner in exactly this bounded form and
+/// keeps it nowhere.
+pub fn task_label(raw: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut gap = false;
+    for c in raw.chars().take(4096) {
+        if c.is_control() {
+            continue;
+        }
+        if c.is_whitespace() {
+            gap = !out.is_empty();
+            continue;
+        }
+        if gap {
+            out.push(' ');
+            gap = false;
+        }
+        out.push(c);
+    }
+    if out.is_empty() {
+        return None;
+    }
+    if out.chars().count() > TASK_LABEL_CHARS {
+        out = out.chars().take(TASK_LABEL_CHARS - 1).collect();
+        out.push('\u{2026}');
+    }
+    Some(out)
 }
 
 /// One computer-control session's hold on the daemon it talks to. While
@@ -626,7 +773,33 @@ pub struct CuaSession {
     pub socket: String,
     /// Our own embedded daemon (true) or the user's (false).
     pub embedded: bool,
+    /// Which apps the synth may use, as this session's daemon was started
+    /// with it. The pipe decides every call of the session by this, so a
+    /// change of the owner's choice starts with the next session, like the
+    /// look.
+    pub scope: Arc<crate::cua_apps::Scope>,
+    /// The look flags of the daemon; None for a daemon of the user's own.
+    look: Option<Vec<String>>,
+    /// When the daemon was started.
+    started: Instant,
     shared: Arc<Shared>,
+}
+
+impl CuaSession {
+    /// Would a session that starts now get another daemon than this one:
+    /// the owner changed the look or the choice of apps, or a bounded
+    /// daemon's day is half over? The pipe asks before a call that comes
+    /// after a quiet spell, and ends the session there so that the change
+    /// applies (`mcp::handle`).
+    pub fn outdated(&self) -> bool {
+        let s = self.shared.settings();
+        *self.scope != crate::cua_apps::Scope::of(&s)
+            || (self.embedded && lease_old(&self.scope, self.started))
+            || self
+                .look
+                .as_ref()
+                .is_some_and(|look| *look != crate::cua_look::resolve(&s.computer.look, &self.shared.cua_env))
+    }
 }
 
 impl Drop for CuaSession {
@@ -725,6 +898,7 @@ impl Core {
             None => (cfg.cua_bin, DriverEnv::default(), None),
         };
 
+        let cua_dir = crate::cua_apps::Directory::driver(cua_bin.clone(), cua_env.clone());
         let shared = Arc::new(Shared {
             persisted: RwLock::new(persisted),
             settings_path: cfg.settings_path,
@@ -748,6 +922,8 @@ impl Core {
             stopping: AtomicBool::new(false),
             streams_open: AtomicUsize::new(0),
             cua_sessions: AtomicUsize::new(0),
+            cua_dir,
+            cua_task: Mutex::new(None),
             counters: Mutex::new(Counters {
                 month,
                 bytes: egress_bytes,
@@ -828,14 +1004,41 @@ impl Core {
 
     /// A preset is a policy. How computer control looks is not part of
     /// one (every preset has the same, default look), so the look the
-    /// owner chose stays, like the shared folders.
+    /// owner chose stays, like the shared folders. So does the owner's
+    /// choice of apps: a preset says when the synth may act and whether it
+    /// asks, never which apps, and a list the owner made by hand must not
+    /// be lost to a click on a preset.
     pub fn apply_preset(&self, preset: Preset) -> u64 {
         self.mutate_settings(|s| {
             let roots = s.files.roots.clone();
             let look = s.computer.look.clone();
+            let apps = s.computer.apps.clone();
             *s = Settings::from_preset(preset, roots);
             s.computer.look = look;
+            s.computer.apps = apps;
         })
+    }
+
+    /// The owner's picker: every app the driver lists on this computer,
+    /// read now by the app's own runtime of the driver (never through the
+    /// synth's daemon, which may be limited to a few apps). Slow on a
+    /// computer with many apps (a few seconds).
+    pub async fn computer_apps(&self) -> Result<Vec<crate::cua_apps::AppChoice>, String> {
+        if self.shared.cua_installer.is_some() && !std::path::Path::new(&self.shared.cua_bin).is_file() {
+            return Err("not_installed".into());
+        }
+        let rows = self.shared.cua_dir.apps_fresh().await;
+        // Nobody is being served by it: let the runtime go.
+        if self.shared.cua_sessions_open() == 0 {
+            self.shared.cua_dir.stop().await;
+        }
+        Ok(crate::cua_apps::choices(&rows?))
+    }
+
+    /// The label of the computer-control task that is running (see
+    /// `Shared::computer_task`).
+    pub fn computer_task(&self) -> Option<String> {
+        self.shared.computer_task()
     }
 
     /// What this computer's driver can show of the look settings, so the
@@ -1266,6 +1469,7 @@ impl Core {
             settings_rev: self.shared.settings_rev(),
             cua_version,
             cua_status,
+            computer_task: self.shared.computer_task(),
             egress_month: counters.0,
             egress_bytes: counters.1,
         }
@@ -1309,6 +1513,10 @@ pub struct Snapshot {
     pub settings_rev: u64,
     pub cua_version: String,
     pub cua_status: String,
+    /// The label the synth gave the computer-control task it is running,
+    /// cut to what the driver shows under the agent's cursor. The synth's
+    /// own words: show them as such. None when nothing is running.
+    pub computer_task: Option<String>,
     pub egress_month: String,
     pub egress_bytes: u64,
 }
@@ -1515,6 +1723,7 @@ mod tests {
                 v["error"]["message"].as_str().unwrap_or("").to_string()
             }
             Gate::Forward(b) => panic!("forwarded: {}", String::from_utf8_lossy(&b)),
+            Gate::Answer(v) => panic!("answered by the app: {v}"),
             Gate::Drop(why) => panic!("dropped: {why}"),
         };
 
@@ -1553,14 +1762,208 @@ mod tests {
         assert_eq!(journal.iter().filter(|e| e.outcome == "denied: outside the shared folders").count(), 2);
     }
 
+    /// A directory of a test's own in place of the driver: a unit test
+    /// never starts a driver process.
+    fn fixed_apps(core: &Core) {
+        use crate::cua_apps::{AppRow, WinRow};
+        let app = |pid: i64, name: &str, bundle_id: &str| AppRow {
+            pid,
+            name: name.into(),
+            bundle_id: Some(bundle_id.into()),
+            path: Some(format!("/Applications/{name}.app")),
+            running: pid > 0,
+        };
+        core.shared().cua_directory().fix(
+            vec![app(200, "Safari", "com.apple.Safari"), app(300, "1Password", "com.1password.1password"), app(0, "Mail", "com.apple.mail")],
+            vec![WinRow { window_id: 21, pid: 200 }, WinRow { window_id: 31, pid: 300 }],
+        );
+    }
+
+    #[tokio::test]
+    async fn the_pipe_holds_the_owners_choice_of_apps() {
+        use crate::cua_apps::Scope;
+        use crate::mcp::{filter_line, filter_scoped, Gate};
+        use crate::settings::{AppRef, AppsPolicy};
+        use serde_json::json;
+        let (core, _) = test_core();
+        core.apply_preset(Preset::Full);
+        fixed_apps(&core);
+        let sh = core.shared();
+        let line = |tool: &str, args: serde_json::Value| {
+            serde_json::to_vec(&json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": tool, "arguments": args}})).unwrap()
+        };
+        let secret_window = json!({"session": "Mia: flights", "pid": 300, "window_id": 31});
+
+        // Every app: the call goes to the driver as it is.
+        assert!(matches!(filter_line(&sh, false, &line("get_window_state", secret_window.clone())).await, Gate::Forward(_)));
+        assert!(matches!(filter_line(&sh, false, &line("get_desktop_state", json!({}))).await, Gate::Forward(_)));
+
+        // Every app except the password manager.
+        core.mutate_settings(|s| {
+            s.computer.apps.policy = AppsPolicy::Except;
+            s.computer.apps.except = vec![AppRef { id: "com.1password.1password".into(), name: "1Password".into(), loose: false }];
+        });
+        match filter_line(&sh, false, &line("get_window_state", secret_window.clone())).await {
+            Gate::Refuse(v) => {
+                assert_eq!(v["id"], 4);
+                let said = v["error"]["message"].as_str().unwrap();
+                assert!(said.starts_with("denied: ") && said.contains("owner"), "{said}");
+                assert!(!said.to_lowercase().contains("1password"), "the synth is not told the list: {said}");
+            }
+            _ => panic!("the excluded app's window was not refused"),
+        }
+        assert!(matches!(filter_line(&sh, false, &line("click", json!({"x": 5, "y": 5, "scope": "desktop"}))).await, Gate::Refuse(_)));
+        assert!(matches!(filter_line(&sh, false, &line("get_desktop_state", json!({}))).await, Gate::Refuse(_)));
+        assert!(matches!(filter_line(&sh, false, &line("get_window_state", json!({"pid": 200, "window_id": 21}))).await, Gate::Forward(_)));
+        // The list is the app's own answer, with the call's id, and the
+        // excluded app is not on it.
+        match filter_line(&sh, false, &line("list_windows", json!({}))).await {
+            Gate::Answer(v) => {
+                assert_eq!(v["id"], 4);
+                assert_eq!(v["jsonrpc"], "2.0");
+                let windows = v["result"]["structuredContent"]["windows"].as_array().unwrap();
+                assert_eq!(windows.len(), 1);
+                assert_eq!(windows[0]["pid"], 200);
+            }
+            _ => panic!("list_windows was not answered by the app"),
+        }
+        // A catalog stream calls nothing, lists included.
+        assert!(matches!(filter_line(&sh, true, &line("list_windows", json!({}))).await, Gate::Refuse(_)));
+        // What is never allowed stays never allowed, whichever app.
+        assert!(matches!(filter_line(&sh, false, &line("start_recording", json!({"output_dir": "/tmp/r"}))).await, Gate::Refuse(_)));
+
+        // A session decides by the choice its daemon was started with,
+        // not by a change the owner made meanwhile.
+        let began_open = Scope::open();
+        assert!(matches!(filter_scoped(&sh, &began_open, false, &line("get_window_state", secret_window.clone())).await, Gate::Forward(_)));
+
+        // The journal: what happened, never which app or which window.
+        let journal = serde_json::to_string(&core.recent_journal()).unwrap();
+        assert!(journal.contains("denied: an app the owner excluded"));
+        assert!(journal.contains("denied: the whole screen, while apps are limited"));
+        for word in ["1Password", "1password", "Safari", "Mia", "flights", "\"31\"", "300"] {
+            assert!(!journal.contains(word), "the journal holds {word}: {journal}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_preset_keeps_the_owners_choice_of_apps_and_a_change_of_it_is_a_settings_change() {
+        use crate::settings::{AppRef, AppsPolicy};
+        let (core, _) = test_core();
+        let rev = core.apply_preset(Preset::Balanced);
+        let next = core.mutate_settings(|s| {
+            s.computer.apps.policy = AppsPolicy::Only;
+            s.computer.apps.only = vec![AppRef { id: "com.apple.Safari".into(), name: "Safari".into(), loose: false }];
+        });
+        assert_eq!(next, rev + 1);
+        core.apply_preset(Preset::Careful);
+        let scope = core.settings().computer.apps;
+        assert_eq!(scope.policy, AppsPolicy::Only);
+        assert_eq!(scope.only.len(), 1);
+        // The synth is told nothing of it: no list, no choice.
+        let caps = wire::capabilities_value(&core.settings(), "0.33.1", "ok", core.shared().apps.backend().as_ref()).to_string();
+        for word in ["Safari", "safari", "only", "except", "policy"] {
+            assert!(!caps.contains(word), "the capabilities mention {word}: {caps}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_is_out_of_date_when_the_owners_choice_moved_on() {
+        use crate::cua_apps::Scope;
+        use crate::settings::{AppRef, AppsPolicy};
+        let (core, _) = test_core();
+        core.apply_preset(Preset::Full);
+        let sh = core.shared();
+        let held = |scope: Scope, started: Instant| CuaSession {
+            socket: "s".into(),
+            embedded: true,
+            scope: Arc::new(scope),
+            look: None,
+            started,
+            shared: sh.clone(),
+        };
+        sh.cua_sessions.fetch_add(3, Ordering::AcqRel);
+        let now = Instant::now();
+        let a = held(Scope::of(&core.settings()), now);
+        assert!(!a.outdated());
+        core.mutate_settings(|s| {
+            s.computer.apps.policy = AppsPolicy::Only;
+            s.computer.apps.only = vec![AppRef { id: "com.apple.Safari".into(), name: "Safari".into(), loose: false }];
+        });
+        assert!(a.outdated(), "the session began with every app, the owner now allows one");
+        // A session of the new choice is current, until its bounded daemon
+        // is half a day old.
+        let b = held(Scope::of(&core.settings()), now);
+        assert!(!b.outdated());
+        if let Some(long_ago) = now.checked_sub(crate::cua_apps::RENEW_AFTER + Duration::from_secs(1)) {
+            let c = held(Scope::of(&core.settings()), long_ago);
+            assert!(c.outdated(), "a bounded daemon is renewed after half its day");
+            // Only a bounded daemon has a day to run out.
+            core.mutate_settings(|s| s.computer.apps.policy = AppsPolicy::All);
+            assert!(!held(Scope::open(), long_ago).outdated());
+        }
+    }
+
+    #[tokio::test]
+    async fn the_task_label_is_shown_as_the_driver_shows_it_and_kept_nowhere() {
+        use crate::mcp::filter_line;
+        use serde_json::json;
+        assert_eq!(task_label("Mia: flights").as_deref(), Some("Mia: flights"));
+        // Exactly the driver's rule: a control character (a line break
+        // and a tab are two) is dropped, not turned into a space.
+        assert_eq!(task_label("  Mia:\n\tflights \u{7} to   Lisbon ").as_deref(), Some("Mia:flights to Lisbon"));
+        assert_eq!(task_label("  Research\n\t run \u{7} ").as_deref(), Some("Research run"));
+        assert_eq!(task_label("\u{41c}\u{438}\u{44f}: \u{431}\u{438}\u{43b}\u{435}\u{442}\u{44b}").as_deref(), Some("\u{41c}\u{438}\u{44f}: \u{431}\u{438}\u{43b}\u{435}\u{442}\u{44b}"));
+        assert_eq!(task_label(""), None);
+        assert_eq!(task_label(" \n\t"), None);
+        // 28 characters at most: 27 and an ellipsis, as under the cursor.
+        let long = task_label("Mia: a label that is much longer than the driver shows").unwrap();
+        assert_eq!(long.chars().count(), TASK_LABEL_CHARS);
+        assert_eq!(long, "Mia: a label that is much l\u{2026}");
+        assert_eq!(task_label("abcdefghijklmnopqrstuvwxyz01").unwrap().chars().count(), 28);
+
+        let (core, _) = test_core();
+        core.apply_preset(Preset::Full);
+        let sh = core.shared();
+        let mut events = core.subscribe();
+        assert_eq!(core.computer_task(), None);
+        let line = |args: serde_json::Value| {
+            serde_json::to_vec(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "get_screen_size", "arguments": args}})).unwrap()
+        };
+        filter_line(&sh, false, &line(json!({"session": "Mia:  flights\n<b>now</b>"}))).await;
+        assert_eq!(core.computer_task().as_deref(), Some("Mia: flights<b>now</b>"));
+        assert_eq!(core.snapshot().await.computer_task.as_deref(), Some("Mia: flights<b>now</b>"));
+        assert!(matches!(events.try_recv(), Ok(CoreEvent::ComputerTask)));
+        // The same label again is no news; a call without one changes nothing.
+        filter_line(&sh, false, &line(json!({"session": "Mia:  flights\n<b>now</b>"}))).await;
+        filter_line(&sh, false, &line(json!({}))).await;
+        assert!(events.try_recv().is_err());
+        assert_eq!(core.computer_task().as_deref(), Some("Mia: flights<b>now</b>"));
+        // The journal says which tool, never what the synth called the task.
+        let journal = serde_json::to_string(&core.recent_journal()).unwrap();
+        assert!(journal.contains("get_screen_size") && !journal.contains("Mia") && !journal.contains("flights"), "{journal}");
+        // The session ended: no task.
+        sh.clear_task();
+        assert_eq!(core.computer_task(), None);
+        assert!(matches!(events.try_recv(), Ok(CoreEvent::ComputerTask)));
+    }
+
     #[tokio::test]
     async fn a_session_holds_the_daemon_until_it_ends() {
         let (core, _) = test_core();
         let sh = core.shared();
         assert_eq!(sh.cua_sessions_open(), 0);
-        let a = CuaSession { socket: "a".into(), embedded: true, shared: sh.clone() };
+        let held = |socket: &str| CuaSession {
+            socket: socket.into(),
+            embedded: true,
+            scope: Arc::new(crate::cua_apps::Scope::open()),
+            look: None,
+            started: Instant::now(),
+            shared: sh.clone(),
+        };
+        let a = held("a");
         sh.cua_sessions.fetch_add(1, Ordering::AcqRel);
-        let b = CuaSession { socket: "b".into(), embedded: true, shared: sh.clone() };
+        let b = held("b");
         sh.cua_sessions.fetch_add(1, Ordering::AcqRel);
         assert_eq!(sh.cua_sessions_open(), 2);
         drop(a);

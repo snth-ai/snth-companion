@@ -1,5 +1,6 @@
-//! Cua Driver: detection, our own private daemon, settings -> Cua policy,
-//! and the gate predicates the mcp pipe uses.
+//! Cua Driver: detection, our own private daemon (started with the owner's
+//! look and the owner's choice of apps), and the gate predicates the mcp
+//! pipe uses.
 //!
 //! The app runs its OWN daemon instance on a private socket and never
 //! touches the user's own daemon (findings 5.2). Our instance runs
@@ -163,40 +164,6 @@ pub async fn permissions_status(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
-/// Compile the shared-folder roots into a Cua capability manifest (YAML).
-/// Files map to the manifest `resources.files` read/write dirs; the owner
-/// app blocklist is NOT a manifest concept (deny-by-list), it is enforced
-/// by our pipe filter, so the manifest here narrows file resources only.
-pub fn compile_manifest(settings: &Settings) -> String {
-    let mut y = String::from("version: 3\n");
-    y.push_str("resources:\n  files:\n");
-    let read: Vec<&PathBuf> = settings.files.roots.iter().map(|r| &r.path).collect();
-    let write: Vec<&PathBuf> = settings
-        .files
-        .roots
-        .iter()
-        .filter(|r| r.write)
-        .map(|r| &r.path)
-        .collect();
-    if read.is_empty() {
-        y.push_str("    read: []\n");
-    } else {
-        y.push_str("    read:\n");
-        for p in read {
-            y.push_str(&format!("      - dir: {}\n        recursive: true\n", p.display()));
-        }
-    }
-    if write.is_empty() {
-        y.push_str("    write: []\n");
-    } else {
-        y.push_str("    write:\n");
-        for p in write {
-            y.push_str(&format!("      - dir: {}\n        recursive: true\n", p.display()));
-        }
-    }
-    y
-}
-
 /// How long a freshly started daemon may take to open its endpoint. The
 /// first start of a new binary can be slow (the OS scans it).
 const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(20);
@@ -216,6 +183,13 @@ pub struct PrivateDaemon {
     /// The look flags it was started with (`cua_look::resolve`). They hold
     /// for its whole life: a different look needs a new daemon.
     pub look: Vec<String>,
+    /// Which apps it lets the synth use (`cua_apps::Scope`). For "only
+    /// these" it runs in the driver's bounded mode with a manifest that is
+    /// read once at start, so this too holds for its whole life.
+    pub scope: std::sync::Arc<crate::cua_apps::Scope>,
+    /// When it was started: a bounded daemon's permissions run out a day
+    /// later (`cua_apps::LEASE`).
+    pub started: std::time::Instant,
     /// Windows: the daemon's stdin, held open for as long as the app wants
     /// the daemon. The daemon was started with `--parent-liveness-stdio`,
     /// so the day this end closes (we stop it, or the app dies in any way)
@@ -291,12 +265,20 @@ impl PrivateDaemon {
     /// The owner's look (cursor on or off, its colour, speed, idle hide,
     /// reduced motion, the preview window) goes in as start flags: they are
     /// the driver's template for the cursor of every session.
+    ///
+    /// The owner's choice of apps goes in too. "Only these" starts the
+    /// daemon in the driver's bounded mode with a capability manifest,
+    /// which the launcher has to approve on the command line: the owner
+    /// did, by choosing the apps. A daemon that will not take the manifest
+    /// does not start, and the error says so: there is no falling back to
+    /// a daemon that allows every app.
     pub async fn start(
         bin: &str,
         settings: &Settings,
         env: &DriverEnv,
     ) -> std::io::Result<PrivateDaemon> {
         let look = crate::cua_look::resolve(&settings.computer.look, env);
+        let scope = crate::cua_apps::Scope::of(settings);
         let dir = std::env::temp_dir().join(format!(
             "connect-cua-{}-{}",
             std::process::id(),
@@ -326,6 +308,16 @@ impl PrivateDaemon {
             &pid_file.to_string_lossy(),
         ]);
         cmd.args(&look);
+        if let Some(manifest) = scope.manifest() {
+            // In the daemon's own folder, which only this user can read
+            // and which goes away with the daemon.
+            let path = dir.join("apps.yaml");
+            if let Err(e) = std::fs::write(&path, manifest) {
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err(e);
+            }
+            cmd.args(bounded_args(&path.to_string_lossy()));
+        }
         env.apply(&mut cmd);
         cmd.env("CUA_DRIVER_EMBEDDED", "1")
             .env("CUA_DRIVER_HOST_BUNDLE_ID", HOST_BUNDLE_ID)
@@ -390,6 +382,8 @@ impl PrivateDaemon {
             pid,
             dir,
             look,
+            scope: std::sync::Arc::new(scope),
+            started: std::time::Instant::now(),
             liveness,
         })
     }
@@ -431,6 +425,20 @@ impl PrivateDaemon {
         let _ = tokio::time::timeout(Duration::from_secs(1), self.child.wait()).await;
         let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+/// The start flags of a daemon that allows only what a capability manifest
+/// lists (the driver's bounded permission mode). The third flag is the
+/// launcher's word that a person reviewed this manifest: without it the
+/// driver does not start.
+pub fn bounded_args(manifest: &str) -> Vec<String> {
+    vec![
+        "--permission-mode".into(),
+        "bounded".into(),
+        "--capability-manifest".into(),
+        manifest.to_string(),
+        "--approve-capability-manifest".into(),
+    ]
 }
 
 /// Telemetry off for our instance (findings 5: default-on otherwise).
@@ -490,22 +498,6 @@ pub fn tool_name(msg: &serde_json::Value) -> Option<&str> {
     msg.get("params").and_then(|p| p.get("name")).and_then(|n| n.as_str())
 }
 
-/// Any app identifier a `tools/call`'s arguments name (bundle id or app
-/// name), lowercased, so the blocklist can be matched. Empty when the
-/// call does not name an app.
-pub fn named_apps(msg: &serde_json::Value) -> Vec<String> {
-    let mut out = Vec::new();
-    if let Some(args) = msg.get("params").and_then(|p| p.get("arguments")) {
-        for key in ["bundle_id", "app", "app_name", "name"] {
-            if let Some(v) = args.get(key).and_then(|x| x.as_str()) {
-                // "name" is also the tool arg for launch_app's app name.
-                out.push(v.to_ascii_lowercase());
-            }
-        }
-    }
-    out
-}
-
 /// Does `mode` + idle allow a call right now (the `away` gate)?
 pub fn away_allows(mode: ComputerMode, away_idle_minutes: u64, idle_seconds: u64) -> bool {
     match mode {
@@ -533,7 +525,6 @@ pub fn foreground_decision(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::{Preset, Root};
 
     #[test]
     fn foreground_scan() {
@@ -550,13 +541,14 @@ mod tests {
     }
 
     #[test]
-    fn apps_and_tool() {
+    fn the_tool_of_a_call() {
         let m: serde_json::Value = serde_json::from_str(
             r#"{"method":"tools/call","params":{"name":"launch_app","arguments":{"bundle_id":"com.apple.Mail"}}}"#,
         )
         .unwrap();
         assert_eq!(tool_name(&m), Some("launch_app"));
-        assert_eq!(named_apps(&m), vec!["com.apple.mail".to_string()]);
+        let other: serde_json::Value = serde_json::from_str(r#"{"method":"tools/list","params":{}}"#).unwrap();
+        assert_eq!(tool_name(&other), None);
     }
 
     #[test]
@@ -573,19 +565,6 @@ mod tests {
     }
 
     #[test]
-    fn manifest_lists_roots() {
-        let mut s = Settings::from_preset(Preset::Balanced, vec![]);
-        s.files.roots = vec![
-            Root { path: PathBuf::from("/Users/x/Desktop"), write: false },
-            Root { path: PathBuf::from("/Users/x/Downloads"), write: true },
-        ];
-        let y = compile_manifest(&s);
-        assert!(y.contains("/Users/x/Desktop"));
-        assert!(y.contains("/Users/x/Downloads"));
-        assert!(y.contains("write:"));
-    }
-
-    #[test]
     fn argv_builders() {
         assert_eq!(install_argv("cua-driver"), ["cua-driver", "update", "--apply"]);
         assert_eq!(
@@ -595,6 +574,10 @@ mod tests {
         assert_eq!(
             mcp_argv("cua-driver", "/tmp/s.sock", false),
             ["cua-driver", "mcp", "--socket", "/tmp/s.sock"]
+        );
+        assert_eq!(
+            bounded_args("/tmp/d/apps.yaml"),
+            ["--permission-mode", "bounded", "--capability-manifest", "/tmp/d/apps.yaml", "--approve-capability-manifest"]
         );
     }
 }

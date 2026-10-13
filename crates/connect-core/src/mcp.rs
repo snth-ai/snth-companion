@@ -13,7 +13,11 @@
 //!    grant for "task"; `away` passes only while the owner is idle;
 //!    `auto` passes);
 //!  - per `tools/call`: a catalog stream refuses every call; the tool
-//!    denylist and app blocklist refuse; a foreground-delivery call
+//!    denylist refuses; the owner's choice of apps holds (`cua_apps`:
+//!    "every app except these" is decided here, call by call, and the two
+//!    lists are answered by the app itself, cut down; "only these" is the
+//!    driver's own bounded mode, and decided here once more); a
+//!    foreground-delivery call
 //!    follows `computer.foreground` (never / idle / ask / always); what
 //!    the synth may never trigger is refused whatever the settings say
 //!    (`cua_guard`: recording the screen, installing software, updating or
@@ -24,11 +28,17 @@
 //!    the owner's limit).
 //!
 //! A stream holds our daemon for as long as it lives (`CuaSession`), so a
-//! new look, which needs a new daemon, never cuts a session short.
+//! new look or a new choice of apps, which need a new daemon, never cut a
+//! task short. The synth keeps its stream open between tasks, though, so
+//! "the next session" would never come: a call that arrives after a quiet
+//! spell (`TASK_GAP`, the time after which the driver has ended every
+//! named session anyway) on a daemon that is out of date is answered with
+//! a labeled error and the stream is closed. The synth's next call opens a
+//! new one, on a new daemon.
 
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncWriteExt, BufReader};
@@ -46,6 +56,14 @@ use crate::logln;
 
 /// One JSON-RPC line. A screenshot result is a few MiB of base64.
 const MAX_RPC_LINE: usize = 64 * 1024 * 1024;
+
+/// A stream with no call for this long is between tasks: the driver ends
+/// a named session after five minutes without one.
+const TASK_GAP: Duration = Duration::from_secs(5 * 60);
+
+/// What the synth is told when its stream is closed so that a change of
+/// the owner's applies.
+const REOPEN: &str = "unavailable: SNTH Connect is restarting its helper so that the owner's current settings for computer control apply; this connection is closed and nothing was done; call again, starting with a fresh list_windows";
 
 /// Start the `cua-driver mcp` proxy for one session against a daemon's
 /// endpoint. It speaks line-delimited JSON-RPC on its stdin / stdout and
@@ -133,9 +151,12 @@ pub async fn handle(mut s: MuxStream, hdr: StreamHeader, shared: &Arc<Shared>) {
     let sw = Arc::new(Mutex::new(sw));
 
     let shared_for_gate = shared.clone();
+    let session_ref = &session;
     let to_driver = async {
         let mut forwarded = 0u64;
         let mut refused = 0u64;
+        // When this stream last carried a call.
+        let mut last_call: Option<Instant> = None;
         loop {
             let line = match read_line(&mut sr, MAX_RPC_LINE).await {
                 Ok(Some(l)) => l,
@@ -145,13 +166,44 @@ pub async fn handle(mut s: MuxStream, hdr: StreamHeader, shared: &Arc<Shared>) {
                     break;
                 }
             };
-            match filter_line(&shared_for_gate, is_catalog, &line).await {
+            if !is_catalog {
+                if let Some(id) = call_id(&line) {
+                    // Between tasks, on a daemon the owner's settings have
+                    // moved on from, and nobody else holds it: end here so
+                    // the next call starts on a new one.
+                    if between_tasks(last_call.map(|at| at.elapsed()), shared_for_gate.cua_sessions_open())
+                        && session_ref.outdated()
+                    {
+                        logln!("mcp: the settings changed since this session began; closing it between tasks");
+                        let mut b = serde_json::to_vec(&jsonrpc_error(id, REOPEN.into())).unwrap_or_default();
+                        b.push(b'\n');
+                        let mut w = sw.lock().await;
+                        let _ = w.write_all(&b).await;
+                        let _ = w.flush().await;
+                        refused += 1;
+                        break;
+                    }
+                    last_call = Some(Instant::now());
+                }
+            }
+            match filter_scoped(&shared_for_gate, &session_ref.scope, is_catalog, &line).await {
                 Gate::Forward(bytes) => {
                     forwarded += 1;
                     if child_in.write_all(&bytes).await.is_err()
                         || child_in.write_all(b"\n").await.is_err()
                         || child_in.flush().await.is_err()
                     {
+                        break;
+                    }
+                }
+                Gate::Answer(answer) => {
+                    // The app's own answer (a list cut down to the apps
+                    // the synth may use): the driver is not asked.
+                    forwarded += 1;
+                    let mut b = serde_json::to_vec(&answer).unwrap_or_default();
+                    b.push(b'\n');
+                    let mut w = sw.lock().await;
+                    if w.write_all(&b).await.is_err() || w.flush().await.is_err() {
                         break;
                     }
                 }
@@ -201,6 +253,29 @@ pub async fn handle(mut s: MuxStream, hdr: StreamHeader, shared: &Arc<Shared>) {
     let _ = child.start_kill();
     let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
     logln!("mcp: session closed (forwarded {forwarded}, refused {refused})");
+    drop(session);
+    if !is_catalog {
+        shared.clear_task();
+    }
+    if shared.cua_sessions_open() == 0 {
+        // Nobody needs the app's own reading of the apps any more.
+        shared.cua_directory().stop().await;
+    }
+}
+
+/// Is a stream between tasks, so that ending it cuts nothing short? It
+/// has carried a call before, the last one was `TASK_GAP` ago or more
+/// (`since_last_call`), and no other session holds the daemon (ending this
+/// one would not free it otherwise).
+fn between_tasks(since_last_call: Option<Duration>, sessions_open: usize) -> bool {
+    since_last_call.is_some_and(|gap| gap >= TASK_GAP) && sessions_open <= 1
+}
+
+/// The id of a `tools/call`, when this line is one.
+fn call_id(line: &[u8]) -> Option<Value> {
+    let msg = serde_json::from_slice::<Value>(line).ok()?;
+    cua::tool_name(&msg)?;
+    Some(msg.get("id").cloned().unwrap_or(Value::Null))
 }
 
 /// The open gate for a working stream.
@@ -249,6 +324,9 @@ async fn open_gate(shared: &Arc<Shared>, hdr: &StreamHeader) -> Result<(), Refus
 pub enum Gate {
     /// Hand these bytes (one JSON-RPC message, no newline) to the driver.
     Forward(Vec<u8>),
+    /// Do not hand it over; answer the synth with this JSON-RPC result,
+    /// which the app made itself.
+    Answer(Value),
     /// Do not hand it over; answer the synth with this JSON-RPC error.
     Refuse(Value),
     /// Not a message at all: say nothing.
@@ -259,13 +337,27 @@ fn jsonrpc_error(id: Value, message: String) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32001, "message": message}})
 }
 
-/// Decide one line from the synth. Only `tools/call` is gated; everything
-/// else (initialize, tools/list, ...) is forwarded, re-serialized so the
-/// driver reads exactly what was checked.
+/// Decide one line from the synth by the owner's settings as they are now.
+/// A session decides by the choice of apps its daemon was started with
+/// (`filter_scoped`); this is for a caller that holds no session.
 ///
 /// Public for the self-test, which sends a synth's lines through the very
 /// filter the app uses and hands the driver only what comes out.
 pub async fn filter_line(shared: &Arc<Shared>, is_catalog: bool, line: &[u8]) -> Gate {
+    let scope = crate::cua_apps::Scope::of(&shared.settings());
+    filter_scoped(shared, &scope, is_catalog, line).await
+}
+
+/// Decide one line from the synth. Only `tools/call` is gated; everything
+/// else (initialize, tools/list, ...) is forwarded, re-serialized so the
+/// driver reads exactly what was checked. `scope`: which apps the synth
+/// may use in this session.
+pub async fn filter_scoped(
+    shared: &Arc<Shared>,
+    scope: &crate::cua_apps::Scope,
+    is_catalog: bool,
+    line: &[u8],
+) -> Gate {
     let Ok(mut msg) = serde_json::from_slice::<Value>(line) else {
         return Gate::Drop("not valid JSON");
     };
@@ -318,24 +410,22 @@ pub async fn filter_line(shared: &Arc<Shared>, is_catalog: bool, line: &[u8]) ->
         ));
     }
 
-    // App blocklist, as far as the arguments name an app.
-    let apps = cua::named_apps(&msg);
-    for a in &apps {
-        if s.computer
-            .app_blocklist
-            .iter()
-            .any(|b| a.contains(&b.to_ascii_lowercase()))
-        {
-            shared.journal().record(Entry::new(
-                "computer",
-                "tools/call",
-                tool,
-                "denied: app on the blocklist",
-            ));
-            return Gate::Refuse(jsonrpc_error(
-                id,
-                format!("denied: app {a:?} is on this computer's blocklist"),
-            ));
+    // The label the synth gave this task, for the owner's status line.
+    // Kept in memory in the bounded form the driver itself shows; the
+    // journal never gets it.
+    shared.note_task(msg.pointer("/params/arguments/session").and_then(Value::as_str));
+
+    // The owner's choice of apps: which app is this call about, and may
+    // the synth use it? (Nothing is decided here for "every app".)
+    match crate::cua_apps::decide(scope, tool, &msg, shared.cua_directory()).await {
+        crate::cua_apps::Verdict::Pass => {}
+        crate::cua_apps::Verdict::Refuse { tell, journal } => {
+            shared.journal().record(Entry::new("computer", "tools/call", tool, journal));
+            return Gate::Refuse(jsonrpc_error(id, tell));
+        }
+        crate::cua_apps::Verdict::Answer(result) => {
+            shared.journal().record(Entry::new("computer", "tools/call", tool, "ok"));
+            return Gate::Answer(json!({"jsonrpc": "2.0", "id": id, "result": result}));
         }
     }
 
@@ -419,7 +509,33 @@ pub async fn filter_line(shared: &Arc<Shared>, is_catalog: bool, line: &[u8]) ->
 #[cfg(test)]
 mod tests {
     // The per-line decision is exercised through the pure predicates in
-    // `cua` (cua::wants_foreground, tool_name, named_apps, gates) and
-    // through the core's net/computer policy tests. A full pipe test needs
-    // a live driver and belongs in the e2e script.
+    // `cua` (cua::wants_foreground, tool_name, gates), through `cua_apps`
+    // (the owner's choice of apps) and through the core's net/computer
+    // policy tests. A full pipe test needs a live driver and is
+    // `connectd selftest cua`.
+    use super::*;
+
+    #[test]
+    fn a_stream_is_ended_for_a_change_only_between_tasks() {
+        // The first call of a stream is never the end of it.
+        assert!(!between_tasks(None, 1));
+        // A task in progress: calls a few seconds or minutes apart.
+        assert!(!between_tasks(Some(Duration::from_secs(3)), 1));
+        assert!(!between_tasks(Some(TASK_GAP - Duration::from_secs(1)), 1));
+        // Quiet for as long as the driver keeps a named session alive.
+        assert!(between_tasks(Some(TASK_GAP), 1));
+        assert!(between_tasks(Some(Duration::from_secs(3600)), 1));
+        // Another session holds the daemon: ending this one frees nothing.
+        assert!(!between_tasks(Some(Duration::from_secs(3600)), 2));
+    }
+
+    #[test]
+    fn the_id_of_a_call_is_found_and_nothing_else_is_a_call() {
+        let call = br#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"click","arguments":{}}}"#;
+        assert_eq!(call_id(call), Some(Value::from(7)));
+        assert_eq!(call_id(br#"{"jsonrpc":"2.0","id":8,"method":"tools/list"}"#), None);
+        assert_eq!(call_id(b"not json"), None);
+        // The synth is told to call again, in the label it knows.
+        assert!(REOPEN.starts_with("unavailable: ") && REOPEN.contains("call again"));
+    }
 }

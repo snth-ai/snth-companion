@@ -211,6 +211,102 @@ impl LookSettings {
     }
 }
 
+/// Which apps the synth may use through computer control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AppsPolicy {
+    /// Every app on this computer.
+    #[default]
+    All,
+    /// Every app except the ones on the `except` list. The driver has no
+    /// such mode (its manifest only allows): the app's own pipe resolves
+    /// every call to an app and refuses the listed ones (`cua_apps.rs`).
+    Except,
+    /// Only the apps on the `only` list. Enforced by the driver itself:
+    /// our daemon runs in bounded mode with a capability manifest.
+    Only,
+}
+
+/// One app the owner picked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppRef {
+    /// What the driver knows the app by: the bundle id on macOS
+    /// (`com.apple.Safari`), the path of the program on Windows and Linux.
+    pub id: String,
+    /// The app's name as the driver listed it, for the owner to read.
+    #[serde(default)]
+    pub name: String,
+    /// A word the owner typed by hand before the app list existed (the old
+    /// "blocked apps"): it matches any app whose name or id contains it.
+    /// Only ever on the `except` list.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub loose: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// How many apps one list holds at most.
+pub const MAX_APPS: usize = 200;
+
+/// The owner's choice of apps for computer control. Both lists are kept,
+/// so switching between the choices loses nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AppScope {
+    #[serde(default)]
+    pub policy: AppsPolicy,
+    /// For `Except`: the apps the synth may not use.
+    #[serde(default)]
+    pub except: Vec<AppRef>,
+    /// For `Only`: the apps the synth may use.
+    #[serde(default)]
+    pub only: Vec<AppRef>,
+}
+
+impl AppScope {
+    /// The list the current choice goes by (empty for `All`).
+    pub fn active(&self) -> &[AppRef] {
+        match self.policy {
+            AppsPolicy::All => &[],
+            AppsPolicy::Except => &self.except,
+            AppsPolicy::Only => &self.only,
+        }
+    }
+
+    /// Bring lists that came from outside (the webview, an edited file) to
+    /// shape: no empty or oversized entries, no control characters, no
+    /// entry twice, a hand-typed word only among the exceptions.
+    pub fn normalize(&mut self) {
+        fn clean(list: &mut Vec<AppRef>, loose_allowed: bool) {
+            let mut seen = std::collections::BTreeSet::new();
+            let mut out = Vec::new();
+            for mut app in std::mem::take(list) {
+                app.id = plain_line(&app.id, 1024);
+                app.name = plain_line(&app.name, 120);
+                if app.id.is_empty() || (app.loose && !loose_allowed) {
+                    continue;
+                }
+                if app.name.is_empty() {
+                    app.name = app.id.clone();
+                }
+                if seen.insert((app.id.to_lowercase(), app.loose)) && out.len() < MAX_APPS {
+                    out.push(app);
+                }
+            }
+            *list = out;
+        }
+        clean(&mut self.except, true);
+        clean(&mut self.only, false);
+    }
+}
+
+/// One line of plain text: no control characters, trimmed, cut to `max`
+/// characters.
+fn plain_line(text: &str, max: usize) -> String {
+    text.chars().filter(|c| !c.is_control()).collect::<String>().trim().chars().take(max).collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ComputerSettings {
     pub enabled: bool,
@@ -220,10 +316,16 @@ pub struct ComputerSettings {
     /// gate.
     #[serde(default = "default_away_idle")]
     pub away_idle_minutes: u64,
-    /// Apps the synth may not drive, as far as a call's arguments name
-    /// them (bundle id or app name).
-    #[serde(default)]
+    /// The setting this app had before `apps`: words the owner typed, each
+    /// refusing a call that NAMED such an app. Read from an old settings
+    /// file and moved into `apps.except` (`Settings::migrate`); never
+    /// written again.
+    #[serde(default, skip_serializing)]
     pub app_blocklist: Vec<String>,
+    /// Which apps the synth may use. Absent in a settings file written
+    /// before it existed: every app.
+    #[serde(default)]
+    pub apps: AppScope,
     /// Cua tools the synth may not call at all.
     #[serde(default)]
     pub tool_denylist: Vec<String>,
@@ -363,6 +465,7 @@ impl Default for Settings {
                 foreground: Foreground::Never,
                 away_idle_minutes: 5,
                 app_blocklist: Vec::new(),
+                apps: AppScope::default(),
                 tool_denylist: Vec::new(),
                 look: LookSettings::default(),
             },
@@ -378,6 +481,42 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Bring a settings file of an older version of the app to this one.
+    /// Idempotent. True when something was moved.
+    ///
+    /// The old "blocked apps" (`computer.app_blocklist`, words typed by
+    /// hand) become "every app except these", each word kept as the owner
+    /// wrote it. Nothing the owner chose is dropped: where the old setting
+    /// only refused a call that named such an app, the new one also
+    /// refuses a call that reaches it by its window or process.
+    pub fn migrate(&mut self) -> bool {
+        let old = std::mem::take(&mut self.computer.app_blocklist);
+        if old.is_empty() {
+            return false;
+        }
+        let scope = &mut self.computer.apps;
+        for word in old {
+            let word = plain_line(&word, 120);
+            if word.is_empty() {
+                continue;
+            }
+            let known = scope
+                .except
+                .iter()
+                .any(|a| a.id.eq_ignore_ascii_case(&word) || a.name.eq_ignore_ascii_case(&word));
+            if !known {
+                scope.except.push(AppRef { id: word.clone(), name: word, loose: true });
+            }
+        }
+        // The old list was in force whatever else was set. Keep it so,
+        // unless the owner has already chosen "only these" (stricter).
+        if scope.policy == AppsPolicy::All && !scope.except.is_empty() {
+            scope.policy = AppsPolicy::Except;
+        }
+        scope.normalize();
+        true
+    }
+
     /// Settings a preset applies. Roots are NOT touched: the owner picks
     /// folders separately (onboarding offers Desktop and Downloads).
     #[allow(clippy::field_reassign_with_default)]
@@ -405,6 +544,7 @@ impl Settings {
                     foreground: Foreground::Never,
                     away_idle_minutes: 5,
                     app_blocklist: Vec::new(),
+                    apps: AppScope::default(),
                     tool_denylist: Vec::new(),
                     look: LookSettings::default(),
                 };
@@ -432,6 +572,7 @@ impl Settings {
                     foreground: Foreground::Idle,
                     away_idle_minutes: 5,
                     app_blocklist: Vec::new(),
+                    apps: AppScope::default(),
                     tool_denylist: Vec::new(),
                     look: LookSettings::default(),
                 };
@@ -459,6 +600,7 @@ impl Settings {
                     foreground: Foreground::Always,
                     away_idle_minutes: 5,
                     app_blocklist: Vec::new(),
+                    apps: AppScope::default(),
                     tool_denylist: Vec::new(),
                     look: LookSettings::default(),
                 };
@@ -564,7 +706,13 @@ impl Persisted {
 pub fn load(path: &Path, new_device_id: impl FnOnce() -> String) -> io::Result<Persisted> {
     match std::fs::read(path) {
         Ok(bytes) => {
-            serde_json::from_slice(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            let mut p: Persisted = serde_json::from_slice(&bytes)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            // A file of an older version: move what changed its place. Not
+            // a change the owner made, so the rev stays; the next save
+            // writes the new shape.
+            p.settings.migrate();
+            Ok(p)
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Persisted::fresh(new_device_id())),
         Err(e) => Err(e),
@@ -768,6 +916,106 @@ mod tests {
         kept.normalize();
         assert_eq!(kept.idle_hide_seconds, 0);
         assert_eq!(kept.screenshot_max, 2048);
+    }
+
+    #[test]
+    fn every_preset_lets_the_synth_use_every_app() {
+        for p in [Preset::Careful, Preset::Balanced, Preset::Full, Preset::Custom] {
+            let s = Settings::from_preset(p, vec![]);
+            assert_eq!(s.computer.apps, AppScope::default());
+            assert_eq!(s.computer.apps.policy, AppsPolicy::All);
+            assert!(s.computer.apps.active().is_empty());
+        }
+    }
+
+    #[test]
+    fn the_old_blocked_apps_become_every_app_except_these() {
+        // settings.json of app 0.1.5: "app_blocklist" under "computer",
+        // no "apps" there.
+        let mut old = serde_json::to_value(Settings::from_preset(Preset::Balanced, vec![])).unwrap();
+        let computer = old["computer"].as_object_mut().unwrap();
+        computer.remove("apps");
+        computer.insert("app_blocklist".into(), serde_json::json!(["Mail", "com.agilebits.onepassword7", "  ", "mail"]));
+        let mut s: Settings = serde_json::from_value(old).unwrap();
+        assert_eq!(s.computer.apps, AppScope::default(), "nothing is chosen until the migration ran");
+        assert!(s.migrate());
+        let scope = &s.computer.apps;
+        assert_eq!(scope.policy, AppsPolicy::Except);
+        assert_eq!(
+            scope.except,
+            vec![
+                AppRef { id: "Mail".into(), name: "Mail".into(), loose: true },
+                AppRef { id: "com.agilebits.onepassword7".into(), name: "com.agilebits.onepassword7".into(), loose: true },
+            ]
+        );
+        assert!(scope.only.is_empty());
+        assert!(s.computer.app_blocklist.is_empty());
+        // Once is enough, and the old key is never written again.
+        assert!(!s.migrate());
+        let written = serde_json::to_value(&s).unwrap();
+        assert!(written["computer"].get("app_blocklist").is_none());
+        assert_eq!(written["computer"]["apps"]["policy"], "except");
+        assert_eq!(written["computer"]["apps"]["except"][0], serde_json::json!({"id": "Mail", "name": "Mail", "loose": true}));
+        let back: Settings = serde_json::from_value(written).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn the_migration_runs_when_the_file_is_loaded() {
+        let dir = std::env::temp_dir().join(format!("connect-settings-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let mut p = serde_json::to_value(Persisted::fresh("dev-old".into())).unwrap();
+        p["rev"] = serde_json::json!(4);
+        let computer = p["settings"]["computer"].as_object_mut().unwrap();
+        computer.remove("apps");
+        computer.insert("app_blocklist".into(), serde_json::json!(["Keychain Access"]));
+        std::fs::write(&path, serde_json::to_vec(&p).unwrap()).unwrap();
+        let back = load(&path, || "no".into()).unwrap();
+        assert_eq!(back.rev, 4, "a migration is not a change the owner made");
+        assert_eq!(back.settings.computer.apps.policy, AppsPolicy::Except);
+        assert_eq!(back.settings.computer.apps.except[0].id, "Keychain Access");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_owner_who_already_chose_only_these_keeps_that_choice() {
+        let mut s = Settings::from_preset(Preset::Full, vec![]);
+        s.computer.apps.policy = AppsPolicy::Only;
+        s.computer.apps.only = vec![AppRef { id: "com.apple.Safari".into(), name: "Safari".into(), loose: false }];
+        s.computer.app_blocklist = vec!["Mail".into()];
+        assert!(s.migrate());
+        assert_eq!(s.computer.apps.policy, AppsPolicy::Only);
+        assert_eq!(s.computer.apps.except.len(), 1, "the words are kept for when the owner switches");
+    }
+
+    #[test]
+    fn app_lists_from_outside_are_brought_to_shape() {
+        let app = |id: &str, name: &str, loose: bool| AppRef { id: id.into(), name: name.into(), loose };
+        let mut scope = AppScope {
+            policy: AppsPolicy::Only,
+            except: vec![app("mail", "", true), app("com.apple.mail", "Mail", false), app("COM.APPLE.MAIL", "Mail again", false), app("", "nameless", false)],
+            only: vec![app("com.apple.Safari", "Safa\nri\u{7}", false), app("typed", "typed", true), app(" com.apple.Notes ", "", false)],
+        };
+        scope.normalize();
+        assert_eq!(scope.except, vec![app("mail", "mail", true), app("com.apple.mail", "Mail", false)]);
+        // A hand-typed word cannot be on the "only these" list: the driver
+        // needs the app's exact identity there.
+        assert_eq!(scope.only, vec![app("com.apple.Safari", "Safari", false), app("com.apple.Notes", "com.apple.Notes", false)]);
+        assert_eq!(scope.active().len(), 2);
+        let mut many = AppScope { policy: AppsPolicy::Except, except: (0..500).map(|i| app(&format!("app{i}"), "x", false)).collect(), only: vec![] };
+        many.normalize();
+        assert_eq!(many.except.len(), MAX_APPS);
+    }
+
+    #[test]
+    fn a_settings_file_written_before_the_app_choice_still_loads() {
+        let mut old = serde_json::to_value(Settings::from_preset(Preset::Balanced, vec![])).unwrap();
+        old["computer"].as_object_mut().unwrap().remove("apps");
+        let mut s: Settings = serde_json::from_value(old).unwrap();
+        assert!(!s.migrate());
+        assert_eq!(s.computer.apps, AppScope::default());
     }
 
     #[test]
