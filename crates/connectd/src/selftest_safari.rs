@@ -30,7 +30,10 @@
 //! group's folder at the end (refused for the app's own group).
 //! `--remove-container <id>`: delete the sandbox container macOS made for
 //! the test host (`~/Library/Containers/<id>`; only an id of the probe).
-//! `--only-remove`: do the removals and nothing else.
+//! `--only-remove`: do the removals and nothing else. `--app-first`: bind
+//! the endpoint once before any relay runs, so the app is the one that
+//! makes the group's folder (the order on a computer where the app was
+//! opened before Safari ever started the extension).
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -245,6 +248,7 @@ pub async fn safari(args: &[String]) -> Result<(), String> {
     let mut remove_group = false;
     let mut remove_container: Option<String> = None;
     let mut only_remove = false;
+    let mut app_first = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -262,6 +266,7 @@ pub async fn safari(args: &[String]) -> Result<(), String> {
                 i += 1;
             }
             "--only-remove" => only_remove = true,
+            "--app-first" => app_first = true,
             other => return Err(format!("unknown option {other}")),
         }
         i += 1;
@@ -309,6 +314,13 @@ pub async fn safari(args: &[String]) -> Result<(), String> {
         }
     };
     println!("endpoint: {endpoint}");
+    if app_first {
+        step("the app is there first: it makes the folder, then goes away again");
+        let folder = Path::new(endpoint.as_str()).parent().map(Path::to_path_buf).unwrap_or_default();
+        let existed = folder.parent().is_some_and(Path::exists);
+        drop(Listener::bind(&endpoint).map_err(|e| format!("bind {endpoint}: {e}"))?);
+        println!("the folder {} before this run", if existed { "existed" } else { "did not exist" });
+    }
     let result = run(&relay, &endpoint, &target).await;
     let _ = std::fs::remove_dir_all(&root);
     removals(group.as_ref().and_then(|_| Path::new(endpoint.as_str()).parent()).and_then(Path::parent));

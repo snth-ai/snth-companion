@@ -139,7 +139,10 @@ note "handler side: Developer ID, hardened runtime, group $GROUP, SANDBOXED, no 
 note "no provisioning profile on either"
 
 step "Run the Safari door between them, in the group's folder"
-"$WORK/connectd" selftest safari --relay "$WORK/relay" --group "$GROUP" --remove-group-folder \
+# --app-first: the app side makes the group's folder before the sandboxed
+# side ever runs, as on a computer where the app was opened before Safari
+# started the extension.
+"$WORK/connectd" selftest safari --relay "$WORK/relay" --group "$GROUP" --app-first --remove-group-folder \
     --remove-container "$RELAY_ID"
 
 step "Result"
