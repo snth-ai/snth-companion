@@ -35,6 +35,7 @@ pub mod cookies;
 pub mod core;
 pub mod cua;
 pub mod cua_install;
+pub mod cua_look;
 pub mod files;
 pub mod grant;
 pub mod journal;
@@ -54,7 +55,7 @@ pub mod wire;
 pub mod ws_io;
 
 pub use crate::core::{
-    Core, CoreConfig, CoreEvent, CuaAttach, LinkBrief, LinkState, Shared, Snapshot,
+    Core, CoreConfig, CoreEvent, CuaAttach, CuaSession, LinkBrief, LinkState, Shared, Snapshot,
 };
 pub use cua_install::{FailCode, InstallState};
 pub use cookies::{CookieError, CookieRead, CookieSource, KeySource, MultiReader, WireCookie};
@@ -63,4 +64,4 @@ pub use journal::{Entry, Journal};
 pub use pairing::{ClaimError, ClaimResult, HubClient, Pending, UreqHubClient};
 pub use proto::Refusal;
 pub use secret::{FileSecretStore, KeyringSecretStore, MemSecretStore, SecretStore};
-pub use settings::{Preset, Root, Settings};
+pub use settings::{LookSettings, Preset, Root, Settings};

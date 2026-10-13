@@ -93,6 +93,124 @@ pub struct CookiesSettings {
     pub mode: CookiesMode,
 }
 
+/// The colour of the synth's cursor. The driver has no colour setting:
+/// its own cursor (`Auto`) is coloured by the driver, one colour per task,
+/// and every fixed colour is a cursor theme the app ships and installs
+/// into its own driver home (see `cua_look.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CursorColor {
+    /// The driver's own cursor: it picks a colour for each task.
+    #[default]
+    Auto,
+    Sky,
+    Violet,
+    Rose,
+    Green,
+    Amber,
+    Red,
+    Graphite,
+}
+
+/// How fast the synth's cursor moves. The synth's action waits for the
+/// cursor to arrive, so this is also a little of how fast it works.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CursorSpeed {
+    /// Every move takes a quarter of a second.
+    Fast,
+    /// The driver's own timing: the further, the longer.
+    #[default]
+    Normal,
+    /// Every move takes a second and a half, with a pause after a click.
+    Relaxed,
+}
+
+/// Whether the cursor's own animation plays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReducedMotion {
+    /// Follow this computer's "reduce motion" setting. The app reads it:
+    /// the driver's own `auto` does not look at the system.
+    #[default]
+    System,
+    /// Still pictures only.
+    Always,
+    /// Always animated.
+    Never,
+}
+
+/// The choices the owner has for "hide the cursor when idle", in seconds.
+/// 0 = never. The driver takes at most 60 s.
+pub const IDLE_HIDE_CHOICES: [u32; 4] = [5, 15, 60, 0];
+
+/// The choices for the largest screenshot the synth gets (long edge, in
+/// pixels). 0 = no rule of the owner's: the driver and the synth decide,
+/// as they did before this setting existed.
+pub const SCREENSHOT_CHOICES: [u32; 4] = [0, 1024, 1568, 2048];
+
+/// How computer control looks on the owner's screen. The app's own: no
+/// part of it is told to the synth, and the synth cannot change it (the
+/// mcp pipe refuses its attempts, see `cua_look::gate`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LookSettings {
+    /// Show the synth's cursor at all.
+    #[serde(default = "yes")]
+    pub cursor: bool,
+    #[serde(default)]
+    pub color: CursorColor,
+    #[serde(default)]
+    pub speed: CursorSpeed,
+    /// Seconds without activity before the cursor hides; 0 = never.
+    #[serde(default = "default_idle_hide")]
+    pub idle_hide_seconds: u32,
+    #[serde(default)]
+    pub reduced_motion: ReducedMotion,
+    /// The largest screenshot the synth gets, long edge in pixels; 0 = no
+    /// rule (see `SCREENSHOT_CHOICES`).
+    #[serde(default)]
+    pub screenshot_max: u32,
+    /// The driver's experimental preview window (macOS only).
+    #[serde(default)]
+    pub preview_window: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn default_idle_hide() -> u32 {
+    15
+}
+
+impl Default for LookSettings {
+    /// The driver's own behaviour, unchanged.
+    fn default() -> Self {
+        LookSettings {
+            cursor: true,
+            color: CursorColor::Auto,
+            speed: CursorSpeed::Normal,
+            idle_hide_seconds: default_idle_hide(),
+            reduced_motion: ReducedMotion::System,
+            screenshot_max: 0,
+            preview_window: false,
+        }
+    }
+}
+
+impl LookSettings {
+    /// Bring values that came from outside (the webview, an edited file)
+    /// to ones the app offers.
+    pub fn normalize(&mut self) {
+        if !IDLE_HIDE_CHOICES.contains(&self.idle_hide_seconds) {
+            self.idle_hide_seconds = default_idle_hide();
+        }
+        if !SCREENSHOT_CHOICES.contains(&self.screenshot_max) {
+            self.screenshot_max = 0;
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ComputerSettings {
     pub enabled: bool,
@@ -109,6 +227,10 @@ pub struct ComputerSettings {
     /// Cua tools the synth may not call at all.
     #[serde(default)]
     pub tool_denylist: Vec<String>,
+    /// How it looks on the screen: the cursor, its speed, screenshots.
+    /// Absent in a settings file written before it existed: the defaults.
+    #[serde(default)]
+    pub look: LookSettings,
 }
 
 fn default_away_idle() -> u64 {
@@ -242,6 +364,7 @@ impl Default for Settings {
                 away_idle_minutes: 5,
                 app_blocklist: Vec::new(),
                 tool_denylist: Vec::new(),
+                look: LookSettings::default(),
             },
             files: FilesSettings {
                 enabled: false,
@@ -283,6 +406,7 @@ impl Settings {
                     away_idle_minutes: 5,
                     app_blocklist: Vec::new(),
                     tool_denylist: Vec::new(),
+                    look: LookSettings::default(),
                 };
                 s.files.enabled = true;
                 s.files.ask_on_write = true;
@@ -309,6 +433,7 @@ impl Settings {
                     away_idle_minutes: 5,
                     app_blocklist: Vec::new(),
                     tool_denylist: Vec::new(),
+                    look: LookSettings::default(),
                 };
                 s.files.enabled = true;
                 s.files.ask_on_write = false;
@@ -335,6 +460,7 @@ impl Settings {
                     away_idle_minutes: 5,
                     app_blocklist: Vec::new(),
                     tool_denylist: Vec::new(),
+                    look: LookSettings::default(),
                 };
                 s.files.enabled = true;
                 s.files.ask_on_write = false;
@@ -581,6 +707,67 @@ mod tests {
         assert!(p.identity.is_none());
         assert!(p.grants.is_empty());
         assert_eq!(p.egress_bytes, 0);
+    }
+
+    #[test]
+    fn every_preset_has_the_same_look_and_it_is_the_drivers_own() {
+        let look = LookSettings::default();
+        assert!(look.cursor);
+        assert_eq!(look.color, CursorColor::Auto);
+        assert_eq!(look.speed, CursorSpeed::Normal);
+        assert_eq!(look.idle_hide_seconds, 15);
+        assert_eq!(look.reduced_motion, ReducedMotion::System);
+        assert_eq!(look.screenshot_max, 0);
+        assert!(!look.preview_window);
+        for p in [Preset::Careful, Preset::Balanced, Preset::Full, Preset::Custom] {
+            assert_eq!(Settings::from_preset(p, vec![]).computer.look, look);
+        }
+    }
+
+    #[test]
+    fn a_settings_file_written_before_the_look_still_loads() {
+        // settings.json of app 0.1.4 has no "look" under "computer".
+        let mut old = serde_json::to_value(Settings::from_preset(Preset::Balanced, vec![])).unwrap();
+        old["computer"].as_object_mut().unwrap().remove("look");
+        let s: Settings = serde_json::from_value(old).unwrap();
+        assert_eq!(s.computer.look, LookSettings::default());
+        assert_eq!(s.computer.mode, ComputerMode::Auto);
+        // A look with one key only: the rest are the defaults.
+        let partial: LookSettings = serde_json::from_str(r#"{"color":"rose"}"#).unwrap();
+        assert_eq!(partial.color, CursorColor::Rose);
+        assert!(partial.cursor);
+        assert_eq!(partial.idle_hide_seconds, 15);
+    }
+
+    #[test]
+    fn the_look_is_stored_in_plain_words() {
+        let look = LookSettings {
+            cursor: false,
+            color: CursorColor::Graphite,
+            speed: CursorSpeed::Relaxed,
+            idle_hide_seconds: 0,
+            reduced_motion: ReducedMotion::Always,
+            screenshot_max: 1024,
+            preview_window: true,
+        };
+        let v = serde_json::to_value(&look).unwrap();
+        assert_eq!(v["color"], "graphite");
+        assert_eq!(v["speed"], "relaxed");
+        assert_eq!(v["reduced_motion"], "always");
+        let back: LookSettings = serde_json::from_value(v).unwrap();
+        assert_eq!(back, look);
+    }
+
+    #[test]
+    fn a_look_from_outside_is_brought_to_the_offered_values() {
+        let mut look = LookSettings { idle_hide_seconds: 7, screenshot_max: 99_999, ..LookSettings::default() };
+        look.normalize();
+        assert_eq!(look.idle_hide_seconds, 15);
+        assert_eq!(look.screenshot_max, 0);
+        let mut kept = LookSettings { idle_hide_seconds: 0, screenshot_max: 2048, ..LookSettings::default() };
+        kept.normalize();
+        assert_eq!(kept.idle_hide_seconds, 0);
+        assert_eq!(kept.screenshot_max, 2048);
     }
 
     #[test]

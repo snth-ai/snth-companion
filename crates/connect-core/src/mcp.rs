@@ -14,7 +14,13 @@
 //!    `auto` passes);
 //!  - per `tools/call`: a catalog stream refuses every call; the tool
 //!    denylist and app blocklist refuse; a foreground-delivery call
-//!    follows `computer.foreground` (never / idle / ask / always).
+//!    follows `computer.foreground` (never / idle / ask / always); the
+//!    owner's look stays the owner's (`cua_look::gate`: the synth's calls
+//!    that change the cursor or the helper's settings are refused, and a
+//!    screenshot is asked for within the owner's limit).
+//!
+//! A stream holds our daemon for as long as it lives (`CuaSession`), so a
+//! new look, which needs a new daemon, never cuts a session short.
 
 use std::process::Stdio;
 use std::sync::Arc;
@@ -77,7 +83,8 @@ pub async fn handle(mut s: MuxStream, hdr: StreamHeader, shared: &Arc<Shared>) {
         }
     }
 
-    let (socket, embedded) = match shared.cua_socket().await {
+    // Held until this function returns, however it ends.
+    let session = match shared.cua_session().await {
         Ok(v) => v,
         Err(why) => {
             shared
@@ -89,7 +96,7 @@ pub async fn handle(mut s: MuxStream, hdr: StreamHeader, shared: &Arc<Shared>) {
         }
     };
 
-    let mut child = match spawn_proxy(shared, &socket, embedded) {
+    let mut child = match spawn_proxy(shared, &session.socket, session.embedded) {
         Ok(c) => c,
         Err(e) => {
             let why = Refusal::Failed(format!("unavailable: spawn cua-driver mcp: {e}"));
@@ -134,7 +141,7 @@ pub async fn handle(mut s: MuxStream, hdr: StreamHeader, shared: &Arc<Shared>) {
                     break;
                 }
             };
-            match gate_line(&shared_for_gate, is_catalog, &line).await {
+            match filter_line(&shared_for_gate, is_catalog, &line).await {
                 Gate::Forward(bytes) => {
                     forwarded += 1;
                     if child_in.write_all(&bytes).await.is_err()
@@ -234,9 +241,13 @@ async fn open_gate(shared: &Arc<Shared>, hdr: &StreamHeader) -> Result<(), Refus
     }
 }
 
-enum Gate {
+/// What the pipe does with one line from the synth.
+pub enum Gate {
+    /// Hand these bytes (one JSON-RPC message, no newline) to the driver.
     Forward(Vec<u8>),
+    /// Do not hand it over; answer the synth with this JSON-RPC error.
     Refuse(Value),
+    /// Not a message at all: say nothing.
     Drop(&'static str),
 }
 
@@ -247,20 +258,24 @@ fn jsonrpc_error(id: Value, message: String) -> Value {
 /// Decide one line from the synth. Only `tools/call` is gated; everything
 /// else (initialize, tools/list, ...) is forwarded, re-serialized so the
 /// driver reads exactly what was checked.
-async fn gate_line(shared: &Arc<Shared>, is_catalog: bool, line: &[u8]) -> Gate {
-    let Ok(msg) = serde_json::from_slice::<Value>(line) else {
+///
+/// Public for the self-test, which sends a synth's lines through the very
+/// filter the app uses and hands the driver only what comes out.
+pub async fn filter_line(shared: &Arc<Shared>, is_catalog: bool, line: &[u8]) -> Gate {
+    let Ok(mut msg) = serde_json::from_slice::<Value>(line) else {
         return Gate::Drop("not valid JSON");
     };
     if !msg.is_object() {
         return Gate::Drop("not a JSON object");
     }
-    let Some(tool) = cua::tool_name(&msg) else {
+    let Some(tool) = cua::tool_name(&msg).map(str::to_string) else {
         // Not a tools/call: forward the canonical re-serialization.
         return match serde_json::to_vec(&msg) {
             Ok(b) => Gate::Forward(b),
             Err(_) => Gate::Drop("cannot re-serialize"),
         };
     };
+    let tool = tool.as_str();
     let id = msg.get("id").cloned().unwrap_or(Value::Null);
 
     if is_catalog {
@@ -344,6 +359,23 @@ async fn gate_line(shared: &Arc<Shared>, is_catalog: bool, line: &[u8]) -> Gate 
             ));
             return Gate::Refuse(jsonrpc_error(id, format!("denied: {reason}")));
         }
+    }
+
+    // The owner's look: the synth does not change the cursor or the
+    // helper's settings, and gets a screenshot within the owner's limit.
+    match crate::cua_look::gate(tool, &mut msg, &s.computer.look) {
+        crate::cua_look::Gate::Refuse(why) => {
+            shared.journal().record(Entry::new(
+                "computer",
+                "tools/call",
+                tool,
+                "denied: the look is the owner's to set",
+            ));
+            return Gate::Refuse(jsonrpc_error(id, format!("denied: {why}")));
+        }
+        // Forwarded with its arguments changed (a screenshot within the
+        // owner's limit, a session without the synth's cursor theme).
+        crate::cua_look::Gate::Changed(_) | crate::cua_look::Gate::Pass => {}
     }
 
     shared

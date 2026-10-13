@@ -72,6 +72,18 @@ impl DriverEnv {
         if let Some(home) = &self.home {
             cmd.env("CUA_DRIVER_RS_HOME", home);
         }
+        if let Some(themes) = self.theme_dir() {
+            cmd.env("CUA_DRIVER_CURSOR_THEME_DIR", themes);
+        }
+    }
+
+    /// Where our driver looks for cursor themes. `CUA_DRIVER_RS_HOME` does
+    /// not move the driver's theme folder: without this variable it is a
+    /// folder in the user's home, shared with a driver the owner may have
+    /// installed for themselves. None without a private home: then the app
+    /// has no theme folder of its own and installs no theme.
+    pub fn theme_dir(&self) -> Option<PathBuf> {
+        self.home.as_ref().map(|home| home.join("cursor-themes"))
     }
 }
 
@@ -201,6 +213,9 @@ pub struct PrivateDaemon {
     pub pid_file: PathBuf,
     pub pid: Option<u32>,
     dir: PathBuf,
+    /// The look flags it was started with (`cua_look::resolve`). They hold
+    /// for its whole life: a different look needs a new daemon.
+    pub look: Vec<String>,
     /// Windows: the daemon's stdin, held open for as long as the app wants
     /// the daemon. The daemon was started with `--parent-liveness-stdio`,
     /// so the day this end closes (we stop it, or the app dies in any way)
@@ -272,11 +287,16 @@ impl PrivateDaemon {
     /// SAFETY NOTE: embedded mode never prompts and never relaunches the
     /// standalone app; it stays in this process's TCC chain. It does not
     /// touch the user's own daemon (a different socket or pipe).
+    ///
+    /// The owner's look (cursor on or off, its colour, speed, idle hide,
+    /// reduced motion, the preview window) goes in as start flags: they are
+    /// the driver's template for the cursor of every session.
     pub async fn start(
         bin: &str,
-        _settings: &Settings,
+        settings: &Settings,
         env: &DriverEnv,
     ) -> std::io::Result<PrivateDaemon> {
+        let look = crate::cua_look::resolve(&settings.computer.look, env);
         let dir = std::env::temp_dir().join(format!(
             "connect-cua-{}-{}",
             std::process::id(),
@@ -305,6 +325,7 @@ impl PrivateDaemon {
             "--pid-file",
             &pid_file.to_string_lossy(),
         ]);
+        cmd.args(&look);
         env.apply(&mut cmd);
         cmd.env("CUA_DRIVER_EMBEDDED", "1")
             .env("CUA_DRIVER_HOST_BUNDLE_ID", HOST_BUNDLE_ID)
@@ -368,6 +389,7 @@ impl PrivateDaemon {
             pid_file,
             pid,
             dir,
+            look,
             liveness,
         })
     }

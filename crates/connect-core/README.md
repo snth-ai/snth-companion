@@ -67,8 +67,8 @@ Everything on `Core` is `Send + Sync`; clone the handle freely (it is an
 | `pair_cancel()` | drop the pending pairing |
 | `pending() -> Option<Pending>` | the claimed-not-confirmed pairing (synth_id, synth_url) |
 | `unpair().await` | send `unpair`, await the ack (bounded), then wipe token + grants + state |
-| `apply_preset(Preset) -> rev` | careful / balanced / full |
-| `mutate_settings(FnMut) -> rev` | arbitrary edit; bumps `settings_rev`, persists, pushes a `settings` message |
+| `apply_preset(Preset) -> rev` | careful / balanced / full. Shared folders and the look are kept |
+| `mutate_settings(FnMut) -> rev` | arbitrary edit; bumps `settings_rev`, persists, pushes a `settings` message. An edit of nothing but `computer.look` is saved without moving the rev and without a message |
 | `settings() -> Settings` | current settings |
 | `add_root(path, write) -> rev` / `remove_root(path) -> rev` | shared folders |
 | `Core::default_roots() -> Vec<Root>` | Desktop + Downloads, for onboarding |
@@ -81,6 +81,8 @@ Everything on `Core` is `Send + Sync`; clone the handle freely (it is an
 | `cua_ensure().await -> InstallState` | make sure the app's pinned driver copy is installed: check it, download + verify + unpack + switch when missing or of another version. Idempotent, one run at a time, safe to retry |
 | `cua_helper_state()` / `subscribe_cua_helper()` | where the install stands (`idle, checking, downloading{received,total}, installing, verifying, ready{version}, failed{code,detail}`), and a `watch` of it |
 | `cua_stop_install()` | the app is quitting: stop a running install |
+| `look_support()` | which "how it looks" settings this computer's driver follows (`cua_look::Support`: the cursor switch, a fixed colour, the motion settings, the preview window), so a host hides the rest |
+| `cua_driver_command()` / `cua_theme_dir()` | a command of our driver with the environment every driver process of ours gets, and the folder our driver reads cursor themes from |
 | `computer_permissions()` / `request_computer_permissions()` | macOS Accessibility + Screen Recording of the HOST app (what the embedded driver works under): read-only status, and the system prompts |
 | `cua_install_argv()` / `cua_permissions_grant_argv()` / `cua_permissions_status()` | for a host that attaches to the user's own driver (`CuaAttach::User`): argv the host runs, and the read-only CLI status |
 | `apps_views()` | the apps this computer offers (no Mac app on Windows), each with the owner's switch and its actions |
@@ -164,7 +166,8 @@ before apps existed loads with apps off.
 `Settings` covers net (enabled, mode all/ask/list, domains, local-network
 toggle, monthly cap, skip-on-metered), cookies (enabled, mode), computer
 (enabled, mode ask/auto/away, foreground never/idle/ask/always, away-idle
-minutes, app blocklist, tool denylist), files (enabled, roots with a write
+minutes, app blocklist, tool denylist, and `look`: how it looks on the
+screen, see "How it looks"), files (enabled, roots with a write
 flag, ask-on-write), apps (enabled, mode ask/ask_new/auto, per-app switches
 that differ from the default). `settings_rev` grows by one on every change;
 writes are atomic.
@@ -183,7 +186,8 @@ writes are atomic.
   logged or journaled.
 - **computer**: open gate (catalog free, `ask` needs a grant, `away` needs
   idle), and a per-`tools/call` gate in the mcp pipe (tool denylist, app
-  blocklist, foreground delivery per `never/idle/ask/always`). Our own
+  blocklist, foreground delivery per `never/idle/ask/always`, and the
+  owner's look: see "How it looks"). Our own
   private Cua daemon on a private socket; the user's daemon is never touched.
   With `cua_private_root` the driver itself is the app's own copy too
   (`cua_install.rs`: pinned version, SHA-256 pinned in the source, private
@@ -195,6 +199,89 @@ writes are atomic.
   apps".
 
 The synth has no message that changes settings or grants.
+
+## How it looks (`cua_look.rs`)
+
+`settings.computer.look` (`LookSettings`): show the synth's cursor, its
+colour, its speed, when it hides, whether it is animated, the largest
+screenshot the synth gets, the driver's experimental preview window. Every
+preset has the same look, the driver's own. It is the app's own business:
+no part of it is in `capabilities`, a change of it does not move
+`settings_rev`, and the synth cannot change it.
+
+What Cua Driver 0.33.1 can do was read in its source at the pinned tag and
+checked against the real binary (`connectd selftest cua`):
+
+| The owner's choice | How the driver takes it |
+|---|---|
+| cursor on / off | `--no-overlay` on our daemon |
+| colour | `--cursor-theme <id>`. The driver has NO colour setting: its built-in theme is recoloured by the driver, one of nine colours per session, picked from the session's name, and an installed theme keeps the colours it was made with. So each fixed colour is a theme (`ai.snth.connect.sky`, `.violet`, `.rose`, `.green`, `.amber`, `.red`, `.graphite`), and `auto` is the built-in one |
+| speed | `--glide-ms` and `--dwell-ms`: fast 250 / 40, normal the driver's own (speed-based, 80), relaxed 1500 / 400. The synth's action waits for the cursor, so this is also how fast it works |
+| hide when idle | `--idle-hide-ms` (5 s, 15 s = the driver's default, 60 s = its maximum, 0 = never) |
+| animation | `--cursor-reduced-motion on|off`. The driver's `auto` does not look at the system (only `on` changes anything), so "follow the system" is resolved by the app when the daemon starts (`presence::reduced_motion`) |
+| largest screenshot | not a daemon setting we may use (below): `max_image_dimension` is put on each `get_window_state` / `get_desktop_state` call by the pipe, or brought down to the limit. 0 = no rule, the calls pass untouched |
+| preview window | `--experimental-pip` (macOS only) |
+
+The daemon's start flags are the driver's template for the cursor of EVERY
+session, named or not, so the look holds without the synth doing or knowing
+anything. They cannot be changed in a running daemon: a new look needs a new
+one. `Shared::cua_session` (what an mcp stream takes, a `CuaSession`) starts
+a new daemon when the look differs from the one the running daemon was
+started with, but only while no other session holds it. A session that is
+open keeps its daemon and its look; the change starts with the next task.
+
+The synth and the look (`cua_look::gate`, called by `mcp::filter_line`):
+`set_agent_cursor_enabled`, `set_agent_cursor_motion`,
+`set_agent_cursor_theme` and `set_config` are refused with a sentence the
+synth can read (`denied: the cursor's look on this computer is its owner's
+choice ...`), and a `cursor_theme` is taken out of `start_session`. While
+the owner has the cursor switched off, `move_cursor` (which moves nothing
+else) is answered by the app too, because the driver's own answer then
+reads like a fault. Refused
+and not rewritten into a no-op: an answer "done" for something that was not
+done would be a lie the synth builds on.
+
+Two folders of the driver are NOT moved by `CUA_DRIVER_RS_HOME`, and a driver
+the owner installed for themselves uses them too:
+
+- cursor themes (`~/Library/Application Support/Cua Driver/cursor-themes`,
+  `%LOCALAPPDATA%\Cua Driver\cursor-themes`, `~/.local/share/cua-driver/...`).
+  `DriverEnv` sets `CUA_DRIVER_CURSOR_THEME_DIR` to `<our driver home>/cursor-themes`
+  for every driver process we start, and `install_themes` writes the seven
+  files there (the same file under the same name that `cua-driver
+  cursor-theme install` writes), again at every daemon start.
+- the driver's settings file, `~/.cua-driver/config.json`
+  (`max_image_dimension`, `experimental_pip`). Nothing redirects it. The app
+  never writes it, which is why the screenshot limit rides on each call and
+  the preview window is a start flag, and why the synth's `set_config` is
+  refused: its `experimental_pip` keys are written to that shared file from
+  any session. One consequence stays: if the owner switched the preview
+  window on for their own driver in that file, our daemon shows it too.
+
+The name under the cursor is not a setting. The driver draws the `session`
+label the synth passes on its calls (28 characters at most, for a few
+seconds and when the real pointer is over the cursor), in a pill tinted with
+the session's colour. Neither the text nor the tint can be set, by a flag, a
+tool or a theme, so the app offers neither.
+
+The themes are compiled into the core (`assets/cursor-themes/*.cua-theme`,
+14 KB each). `scripts/build-cursor-themes.py` builds them: it takes the
+driver's own theme source (`assets/cursor-themes/cua.default.lottie`, MIT,
+see `NOTICE.md` next to it), swaps its one palette colour, and compiles it
+with the driver's own compiler (`cua-cursor-theme`, which our installer
+keeps next to the driver). Shipped ready-made and not compiled on the
+owner's computer: the result is the same on every system (the artifact has
+no platform in it), a compile there could only fail, and the artifact
+format belongs to the driver version, which the app pins anyway. When the
+pin is raised, run the script again; the self-test fails if the new driver
+does not accept the files. Only the built-in theme has the driver's gentle
+"floating" movement; a fixed colour stands still between actions.
+
+Per system: macOS, Windows and Linux X11 draw the cursor with the driver's
+shared renderer and follow all of it. On a Wayland session the driver may
+hand the cursor to a helper inside the desktop shell that takes only a
+position and the session's colour, so there `Support` offers only the
+on/off switch. The preview window exists on macOS only.
 
 ## Logins: requests to the synth and the browser link
 

@@ -173,6 +173,9 @@ pub struct Shared {
     pub(crate) stopping: AtomicBool, // unpair asked the link loop to stop reconnecting
     /// Streams the synth has open right now (see `Core::active_streams`).
     pub(crate) streams_open: AtomicUsize,
+    /// Computer-control sessions that hold our daemon right now (see
+    /// `CuaSession`). The daemon is replaced only while this is zero.
+    cua_sessions: AtomicUsize,
     counters: Mutex<Counters>,
 
     identity: RwLock<Option<Pending>>, // confirmed pairing (url, id, token-in-secret)
@@ -435,10 +438,34 @@ impl Shared {
 
     // --- cua ---
 
-    /// The socket + embedded flag the mcp pipe should use, starting our
+    /// The socket + embedded flag of the daemon to talk to, starting our
     /// private daemon on demand. A labeled refusal when computer use is
-    /// off/paused or the daemon cannot be reached.
+    /// off/paused or the daemon cannot be reached. For a caller that only
+    /// asks (the self-test); a session takes `cua_session`.
     pub async fn cua_socket(self: &Arc<Self>) -> Result<(String, bool), Refusal> {
+        self.cua_endpoint(false).await
+    }
+
+    /// The same for one computer-control session (one mcp stream): the
+    /// answer holds our daemon until it is dropped, so the daemon is not
+    /// replaced under a session that is running.
+    pub async fn cua_session(self: &Arc<Self>) -> Result<CuaSession, Refusal> {
+        let (socket, embedded) = self.cua_endpoint(true).await?;
+        Ok(CuaSession {
+            socket,
+            embedded,
+            shared: self.clone(),
+        })
+    }
+
+    /// How many computer-control sessions hold our daemon right now.
+    pub fn cua_sessions_open(&self) -> usize {
+        self.cua_sessions.load(Ordering::Acquire)
+    }
+
+    /// `session`: count the caller as a session. Counted while the daemon
+    /// lock is held, so no other caller can replace the daemon in between.
+    async fn cua_endpoint(self: &Arc<Self>, session: bool) -> Result<(String, bool), Refusal> {
         if self.paused() {
             return Err(Refusal::Denied("computer use is paused by the owner".into()));
         }
@@ -448,6 +475,9 @@ impl Shared {
         match self.cua_attach {
             CuaAttach::User => {
                 let socket = user_daemon_socket(&self.cua_bin).await?;
+                if session {
+                    self.cua_sessions.fetch_add(1, Ordering::AcqRel);
+                }
                 Ok((socket, false))
             }
             CuaAttach::Private => {
@@ -456,6 +486,22 @@ impl Shared {
                 if guard.as_mut().is_some_and(|d| !d.is_alive()) {
                     if let Some(dead) = guard.take() {
                         dead.discard().await;
+                    }
+                }
+                let s = self.settings();
+                // The look is the daemon's start flags, so a new look needs
+                // a new daemon. It is replaced here, where a session is
+                // about to start, and only when no other session holds it:
+                // work in progress keeps the look it began with.
+                if self.cua_sessions.load(Ordering::Acquire) == 0 {
+                    let stale = guard.as_ref().is_some_and(|d| {
+                        d.look != crate::cua_look::resolve(&s.computer.look, &self.cua_env)
+                    });
+                    if stale {
+                        crate::logln!("cua daemon: the look changed, starting a new one");
+                        if let Some(old) = guard.take() {
+                            old.stop(&self.cua_bin, &self.cua_env).await;
+                        }
                     }
                 }
                 if guard.is_none() {
@@ -475,7 +521,6 @@ impl Shared {
                             )));
                         }
                     }
-                    let s = self.settings();
                     match PrivateDaemon::start(&self.cua_bin, &s, &self.cua_env).await {
                         Ok(d) => {
                             *self.cua_start_backoff.lock().unwrap() = StartBackoff::default();
@@ -491,9 +536,18 @@ impl Shared {
                         }
                     }
                 }
+                if session {
+                    self.cua_sessions.fetch_add(1, Ordering::AcqRel);
+                }
                 Ok((guard.as_ref().unwrap().socket.clone(), true))
             }
         }
+    }
+
+    /// The look flags our running daemon was started with; None when no
+    /// daemon of ours runs.
+    pub async fn cua_daemon_look(&self) -> Option<Vec<String>> {
+        self.cua_daemon.lock().await.as_ref().map(|d| d.look.clone())
     }
 
     /// Is the driver installed, and which version? Cached for
@@ -561,6 +615,23 @@ impl Shared {
         if let Some(d) = d {
             d.stop(&self.cua_bin, &self.cua_env).await;
         }
+    }
+}
+
+/// One computer-control session's hold on the daemon it talks to. While
+/// one exists our daemon is not replaced (a new look waits for the last
+/// one to end). Dropping it, however the session ends, lets go.
+pub struct CuaSession {
+    /// The daemon's socket (Unix) or named pipe (Windows).
+    pub socket: String,
+    /// Our own embedded daemon (true) or the user's (false).
+    pub embedded: bool,
+    shared: Arc<Shared>,
+}
+
+impl Drop for CuaSession {
+    fn drop(&mut self) {
+        self.shared.cua_sessions.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -676,6 +747,7 @@ impl Core {
             metered: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
             streams_open: AtomicUsize::new(0),
+            cua_sessions: AtomicUsize::new(0),
             counters: Mutex::new(Counters {
                 month,
                 bytes: egress_bytes,
@@ -725,26 +797,51 @@ impl Core {
 
     /// Apply a change under a closure, bump the rev, persist atomically,
     /// and signal the link to push a settings message.
+    ///
+    /// A change of nothing but the look (the cursor, its speed, the
+    /// screenshot limit) is the app's own business: it is saved, but the
+    /// rev does not move and the synth is sent nothing.
     pub fn mutate_settings(&self, f: impl FnOnce(&mut Settings)) -> u64 {
-        let rev = {
+        let (rev, told) = {
             let mut p = self.shared.persisted.write().unwrap();
+            let before = p.settings.clone();
             f(&mut p.settings);
-            p.rev += 1;
+            let look_only = p.settings != before && {
+                let mut same_look = p.settings.clone();
+                same_look.computer.look = before.computer.look.clone();
+                same_look == before
+            };
+            if !look_only {
+                p.rev += 1;
+            }
             if let Some(path) = &self.shared.settings_path {
                 let _ = settings::save(path, &p);
             }
-            p.rev
+            (p.rev, !look_only)
         };
-        let _ = self.shared.settings_tx.send(rev);
+        if told {
+            let _ = self.shared.settings_tx.send(rev);
+        }
         let _ = self.shared.events.send(CoreEvent::Settings { rev });
         rev
     }
 
+    /// A preset is a policy. How computer control looks is not part of
+    /// one (every preset has the same, default look), so the look the
+    /// owner chose stays, like the shared folders.
     pub fn apply_preset(&self, preset: Preset) -> u64 {
         self.mutate_settings(|s| {
             let roots = s.files.roots.clone();
+            let look = s.computer.look.clone();
             *s = Settings::from_preset(preset, roots);
+            s.computer.look = look;
         })
+    }
+
+    /// What this computer's driver can show of the look settings, so the
+    /// host hides a control that would do nothing here.
+    pub fn look_support(&self) -> crate::cua_look::Support {
+        crate::cua_look::support()
     }
 
     pub fn settings(&self) -> Settings {
@@ -993,6 +1090,22 @@ impl Core {
     /// The binary this core runs for computer control.
     pub fn cua_bin(&self) -> String {
         self.shared.cua_bin.clone()
+    }
+
+    /// A command of the driver this core runs, with the environment every
+    /// driver process of ours gets (private home, private theme folder,
+    /// telemetry off). For the driver's own read-only subcommands, such as
+    /// `cursor-theme list`.
+    pub fn cua_driver_command(&self) -> tokio::process::Command {
+        let mut cmd = crate::proc::command(&self.shared.cua_bin);
+        self.shared.cua_env.apply(&mut cmd);
+        cmd
+    }
+
+    /// Where our driver looks for cursor themes (inside the app's own
+    /// driver home). None when this core has no private driver home.
+    pub fn cua_theme_dir(&self) -> Option<PathBuf> {
+        self.shared.cua_env.theme_dir()
     }
 
     /// Where the helper stands (checking, downloading, ready, failed...).
@@ -1340,6 +1453,71 @@ mod tests {
         assert!(core.settings().net.enabled);
         let rev2 = core.add_root(PathBuf::from("/tmp"), true);
         assert_eq!(rev2, 2);
+    }
+
+    #[tokio::test]
+    async fn the_look_is_the_apps_own_business() {
+        use crate::settings::{CursorColor, CursorSpeed};
+        let (core, _) = test_core();
+        let rev = core.apply_preset(Preset::Balanced);
+        let mut told = core.shared().settings_tx.subscribe();
+        told.borrow_and_update();
+
+        // A change of the look is kept, and the synth hears nothing.
+        let same = core.mutate_settings(|s| {
+            s.computer.look.color = CursorColor::Rose;
+            s.computer.look.speed = CursorSpeed::Fast;
+            s.computer.look.screenshot_max = 1024;
+        });
+        assert_eq!(same, rev, "the rev must not move for a look change");
+        assert!(!told.has_changed().unwrap(), "no settings message for a look change");
+        assert_eq!(core.settings().computer.look.color, CursorColor::Rose);
+        // Nothing of it is in what the synth is told.
+        let caps = wire::capabilities_value(
+            &core.settings(),
+            "0.33.1",
+            "ok",
+            core.shared().apps.backend().as_ref(),
+        )
+        .to_string();
+        for word in ["look", "rose", "cursor", "screenshot", "1024"] {
+            assert!(!caps.contains(word), "the capabilities mention {word}: {caps}");
+        }
+
+        // A look change together with a policy change is a settings change.
+        let next = core.mutate_settings(|s| {
+            s.computer.look.color = CursorColor::Green;
+            s.computer.foreground = crate::settings::Foreground::Never;
+        });
+        assert_eq!(next, rev + 1);
+        assert!(told.has_changed().unwrap());
+
+        // A preset is a policy: the owner's look stays.
+        core.apply_preset(Preset::Careful);
+        assert_eq!(core.settings().computer.look.color, CursorColor::Green);
+        assert_eq!(core.settings().computer.look.screenshot_max, 1024);
+    }
+
+    #[tokio::test]
+    async fn a_session_holds_the_daemon_until_it_ends() {
+        let (core, _) = test_core();
+        let sh = core.shared();
+        assert_eq!(sh.cua_sessions_open(), 0);
+        let a = CuaSession { socket: "a".into(), embedded: true, shared: sh.clone() };
+        sh.cua_sessions.fetch_add(1, Ordering::AcqRel);
+        let b = CuaSession { socket: "b".into(), embedded: true, shared: sh.clone() };
+        sh.cua_sessions.fetch_add(1, Ordering::AcqRel);
+        assert_eq!(sh.cua_sessions_open(), 2);
+        drop(a);
+        // A session that is aborted (pause, a dropped link) lets go too.
+        let task = tokio::spawn(async move {
+            let _held = b;
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        task.abort();
+        let _ = task.await;
+        assert_eq!(sh.cua_sessions_open(), 0);
     }
 
     #[tokio::test]

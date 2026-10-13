@@ -5,6 +5,9 @@
 //! (GetLastInputInfo) but not yet the lock state. Linux is a stub that
 //! reports "active, unlocked" (the conservative answer: the synth treats
 //! the owner as present) with a TODO.
+//!
+//! Also here: whether the owner asked this computer to reduce motion
+//! (`reduced_motion`), which the synth's cursor follows.
 
 /// Seconds since the last keyboard or pointer input, and whether the
 /// screen is locked.
@@ -42,6 +45,42 @@ mod imp {
         fn CFGetTypeID(cf: *const c_void) -> usize;
         fn CFBooleanGetTypeID() -> usize;
         fn CFRelease(cf: *const c_void);
+        fn CFPreferencesGetAppBooleanValue(
+            key: *const c_void,
+            app: *const c_void,
+            key_exists_and_is_valid: *mut u8,
+        ) -> u8;
+    }
+
+    /// System Settings > Accessibility > Display > Reduce motion: the
+    /// `reduceMotion` key of `com.apple.universalaccess`. A read of a
+    /// preference; nothing is shown and no permission is involved.
+    pub fn reduced_motion() -> bool {
+        unsafe {
+            let key = CFStringCreateWithCString(
+                std::ptr::null(),
+                c"reduceMotion".as_ptr(),
+                UTF8,
+            );
+            let app = CFStringCreateWithCString(
+                std::ptr::null(),
+                c"com.apple.universalaccess".as_ptr(),
+                UTF8,
+            );
+            let mut valid: u8 = 0;
+            let on = if key.is_null() || app.is_null() {
+                false
+            } else {
+                CFPreferencesGetAppBooleanValue(key, app, &mut valid) != 0 && valid != 0
+            };
+            if !key.is_null() {
+                CFRelease(key);
+            }
+            if !app.is_null() {
+                CFRelease(app);
+            }
+            on
+        }
     }
 
     pub fn idle_seconds() -> u64 {
@@ -94,6 +133,23 @@ mod imp {
     #[link(name = "user32")]
     extern "system" {
         fn GetLastInputInfo(info: *mut LastInputInfo) -> i32;
+        fn SystemParametersInfoW(action: u32, param: u32, value: *mut std::ffi::c_void, flags: u32) -> i32;
+    }
+
+    /// Settings > Accessibility > Visual effects > Animation effects, off:
+    /// `SPI_GETCLIENTAREAANIMATION` answers false.
+    pub fn reduced_motion() -> bool {
+        const SPI_GETCLIENTAREAANIMATION: u32 = 0x1042;
+        let mut animations: i32 = 1;
+        let ok = unsafe {
+            SystemParametersInfoW(
+                SPI_GETCLIENTAREAANIMATION,
+                0,
+                &mut animations as *mut i32 as *mut std::ffi::c_void,
+                0,
+            )
+        };
+        ok != 0 && animations == 0
     }
 
     #[link(name = "kernel32")]
@@ -134,6 +190,19 @@ mod imp {
     pub fn screen_locked() -> bool {
         false
     }
+
+    /// GNOME and the desktops that follow its setting: "animations" off.
+    /// Where `gsettings` is missing or says nothing, motion is not reduced.
+    pub fn reduced_motion() -> bool {
+        crate::proc::std_command("gsettings")
+            .args(["get", "org.gnome.desktop.interface", "enable-animations"])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "false")
+    }
 }
 
 /// Read the current presence.
@@ -142,6 +211,13 @@ pub fn read() -> Presence {
         idle_seconds: imp::idle_seconds(),
         screen_locked: imp::screen_locked(),
     }
+}
+
+/// Did the owner ask this computer to reduce motion? Read when our driver
+/// daemon starts, for the "follow the system" choice of the cursor's
+/// animation: the driver's own `auto` does not look at the system.
+pub fn reduced_motion() -> bool {
+    imp::reduced_motion()
 }
 
 #[cfg(test)]
@@ -155,5 +231,6 @@ mod tests {
         let p = read();
         let _ = p.idle_seconds;
         let _ = p.screen_locked;
+        let _ = reduced_motion();
     }
 }
