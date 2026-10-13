@@ -1,7 +1,7 @@
 # Check for SNTH Connect (app/) on every push to a connect/* branch: core
-# tests, two self-tests on a real Windows machine (the computer-control
-# path, and the owner's apps: toast, clipboard, open), then a Windows
-# installer as a workflow artifact. No release, no signing.
+# tests, self-tests on a real Windows machine (the computer-control path,
+# the owner's apps: toast, clipboard, open, and the browser link: helper,
+# named pipe, registry), then a Windows installer as a workflow artifact. No release, no signing.
 # The release pipeline lives in connect-release.yml.
 
 name: connect-build
@@ -68,9 +68,34 @@ jobs:
         timeout-minutes: 10
         run: cargo run -p connectd -- selftest apps --touch
 
+      # The browser link (the SNTH Vault extension): the helper a browser
+      # starts, as a real process against a real named pipe, and the host
+      # manifests with real per-user registry keys (under a host name of
+      # the test's own, removed at the end). No browser is involved.
+      - name: Browser link tests
+        run: cargo test -p connect-host
+
+      - name: Browser link self-test
+        timeout-minutes: 10
+        run: |
+          cargo build -p connect-host
+          cargo run -p connectd -- selftest host
+
       - name: Build the installer
         working-directory: app
         run: npm run tauri build -- --bundles nsis
+
+      # The same self-test with the helper the installer ships (a release
+      # build, which connects to the user's real endpoint and nothing else).
+      - name: Browser link self-test, the shipped helper
+        timeout-minutes: 10
+        run: cargo run -p connectd -- selftest host --helper target/release/snth-connect-host.exe --system
+
+      - name: The installer carries the helper
+        shell: bash
+        run: |
+          7z l target/release/bundle/nsis/*.exe > installer-files.txt
+          grep -i "snth-connect-host.exe" installer-files.txt
 
       - uses: actions/upload-artifact@v4
         with:

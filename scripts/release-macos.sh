@@ -177,6 +177,12 @@ BUILT_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' 
 
 step "Check the signature"
 codesign --verify --deep --strict --verbose=2 "$APP" || die "codesign --verify failed for the built app"
+# The helper the browsers start for the SNTH Vault extension ships inside
+# the app and must carry the same signature, or macOS refuses to run it.
+HOST_HELPER="$APP/Contents/MacOS/snth-connect-host"
+[ -x "$HOST_HELPER" ] || die "the browser helper is missing from the app (expected $HOST_HELPER)"
+codesign --verify --strict "$HOST_HELPER" || die "the browser helper inside the app is not signed"
+note "the browser helper is in the app and signed"
 SIGN_INFO="$(codesign -dvv "$APP" 2>&1)"
 printf '%s\n' "$SIGN_INFO" | grep -F "Authority=$IDENTITY" >/dev/null ||
     die "the app is not signed by: $IDENTITY"
