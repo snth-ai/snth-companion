@@ -49,7 +49,7 @@ fn step(text: &str) {
 }
 
 /// Refuses, and counts how often it was asked.
-struct CountingDeny(Arc<AtomicUsize>);
+pub(crate) struct CountingDeny(pub(crate) Arc<AtomicUsize>);
 
 impl Approver for CountingDeny {
     fn ask(&self, req: ApprovalRequest) -> ApprovalFuture {
@@ -322,7 +322,7 @@ async fn run(helper: &Path, root: &Path, system: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn new_core(asked: Arc<AtomicUsize>) -> Core {
+pub(crate) fn new_core(asked: Arc<AtomicUsize>) -> Core {
     Core::new(CoreConfig {
         settings_path: None,
         journal_path: None,

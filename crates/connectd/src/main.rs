@@ -15,6 +15,7 @@
 //!   connectd selftest cua [--root <dir>] [--keep]   (see selftest.rs)
 //!   connectd selftest apps [--touch]                (see selftest.rs)
 //!   connectd selftest host [--helper <p>] [--system] (see selftest_host.rs)
+//!   connectd selftest safari --relay <p> [--group <id>] (macOS; see selftest_safari.rs)
 //!   connectd browser-manifest --dir <NativeMessagingHosts dir> --helper <p>
 //!
 //! `run` reads command lines from stdin (pause / resume / unpair /
@@ -37,6 +38,8 @@ use tokio::sync::watch;
 
 mod selftest;
 mod selftest_host;
+#[cfg(target_os = "macos")]
+mod selftest_safari;
 
 const TOKEN_KEY: &str = "pairing_token";
 
@@ -85,6 +88,7 @@ fn print_usage() {
          \u{20}  connectd selftest cua [--root <dir>] [--keep]\n\
          \u{20}  connectd selftest apps [--touch]\n\
          \u{20}  connectd selftest host [--helper <path>] [--system]\n\
+         \u{20}  connectd selftest safari --relay <path> [--group <id>]   (macOS)\n\
          \u{20}  connectd browser-manifest --dir <NativeMessagingHosts dir> --helper <path>\n\
          \n\
          run options:\n\
@@ -104,6 +108,8 @@ fn print_usage() {
          \u{20}  --cookie-key <pw>              Safe Storage password for the fixtures\n\
          \u{20}  --browser-endpoint <path>      serve the SNTH Vault extension's helper on this\n\
          \u{20}                        endpoint (a socket path; a pipe name on Windows)\n\
+         \u{20}  --safari-endpoint <path>       serve the Safari extension's handler on this socket\n\
+         \u{20}                        (the app's second door; a caller there is Safari)\n\
          \u{20}  --cookies-extension-first      ask a linked browser before reading browser files\n"
     );
 }
@@ -315,7 +321,7 @@ async fn cmd_run(args: &[String]) -> i32 {
         &[
             "--url", "--token", "--settings", "--secret-file", "--journal", "--preset",
             "--root", "--cua-attach", "--cua-bin", "--approve", "--cookie-chromium",
-            "--cookie-firefox", "--cookie-key", "--apps", "--browser-endpoint",
+            "--cookie-firefox", "--cookie-key", "--apps", "--browser-endpoint", "--safari-endpoint",
         ],
         &["--deny-all", "--allow-local", "--cookies-extension-first"],
     );
@@ -352,6 +358,18 @@ async fn cmd_run(args: &[String]) -> i32 {
         tokio::spawn(async move {
             if let Err(e) = browser_core.run_browser_link(&endpoint, browser_stop).await {
                 eprintln!("connectd: browser link on {endpoint}: {e}");
+            }
+        });
+    }
+
+    // The Safari door: the handler of the Safari extension (or the test
+    // host that runs the same relay) connects here.
+    if let Some(path) = a.get("--safari-endpoint") {
+        let endpoint = connect_host::endpoint::Endpoint::at(path);
+        let (browser_core, browser_stop) = (core.clone(), stop_rx.clone());
+        tokio::spawn(async move {
+            if let Err(e) = browser_core.run_browser_door(&endpoint, connect_host::Door::Safari, browser_stop).await {
+                eprintln!("connectd: Safari door on {endpoint}: {e}");
             }
         });
     }

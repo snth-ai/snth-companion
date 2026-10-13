@@ -18,3 +18,7 @@ connect-host = { path = "../connect-host" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# getuid(2): the Safari self-test tells each side to expect another user.
+libc = "0.2"
