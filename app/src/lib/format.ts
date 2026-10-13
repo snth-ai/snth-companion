@@ -26,6 +26,13 @@ export function formatUntil(unixSeconds: number, lang: Lang): string {
   return new Intl.DateTimeFormat(locale(lang), { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }).format(date);
 }
 
+/** A day, without the time: "3 Oct", and the year when it is not this one. */
+export function formatDay(unixSeconds: number, lang: Lang): string {
+  const date = new Date(unixSeconds * 1000);
+  const sameYear = date.getFullYear() === new Date().getFullYear();
+  return new Intl.DateTimeFormat(locale(lang), sameYear ? { day: "numeric", month: "short" } : { day: "numeric", month: "short", year: "numeric" }).format(date);
+}
+
 export function formatAgo(unixSeconds: number, lang: Lang): string {
   const diff = Math.max(0, Math.floor(Date.now() / 1000) - unixSeconds);
   const rtf = new Intl.RelativeTimeFormat(locale(lang), { numeric: "auto" });
@@ -201,6 +208,15 @@ export function grantTime(grant: Grant, s: Strings, lang: Lang): string {
 
 export type LineKind = "net" | "cookies" | "computer" | "files" | "apps" | "link" | "app";
 
+/** The browser a sign-in came from, as the core names it: a browser's
+ * own name ("Chrome"), or "chrome-extension" when it came through the
+ * SNTH Vault extension of a linked browser. */
+function sourceLabel(source: string, s: Strings): string {
+  const m = /^([a-z]+)-extension$/.exec(source);
+  if (!m) return source;
+  return s.logins.viaExtension(s.logins.browserName[m[1]!] ?? s.logins.browserName.browser!);
+}
+
 export interface Line {
   key: string;
   time: number;
@@ -264,8 +280,19 @@ export function describeEntry(entry: Entry, s: Strings, lang: Lang): Omit<Line, 
       // The core writes "youtube.com (14 from Chrome)" on success.
       const m = /^(\S+) \((\d+) from (.+)\)$/.exec(entry.target);
       const site = m ? m[1]! : entry.target;
-      if (ok) return { ...base, kind: "cookies", text: j.cookiesOk(site), note: m ? j.cookiesCount(Number(m[2]), m[3]!) : "" };
+      if (ok) return { ...base, kind: "cookies", text: j.cookiesOk(site), note: m ? j.cookiesCount(Number(m[2]), sourceLabel(m[3]!, s)) : "" };
       return { ...base, kind: "cookies", text: j.cookiesRefused(site), note: why, refused: true };
+    }
+    // The vault and the browsers: linking a browser, removing a password.
+    // Shown with the sign-ins (the Logins filter).
+    case "vault": {
+      const failed = !ok && !refused;
+      if (entry.action === "vault.forget") {
+        return { ...base, kind: "cookies", text: ok ? j.vaultForgot(entry.target) : j.vaultForgetFailed(entry.target), note: "" };
+      }
+      if (entry.action === "vault.unpair") return { ...base, kind: "cookies", text: j.browserUnlinked(entry.target), note: "" };
+      if (ok) return { ...base, kind: "cookies", text: j.browserLinked(entry.target), note: "" };
+      return { ...base, kind: "cookies", text: failed ? j.browserLinkFailed(entry.target) : j.browserLinkRefused(entry.target), note: why };
     }
     case "files": {
       const name = shortPath(entry.target);

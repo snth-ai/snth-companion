@@ -1,0 +1,303 @@
+// Logins: everything the synth holds or may use to be signed in as the
+// owner, site by site, and the browsers that can hand it over.
+//
+// Two kinds of login that never mix (the rule the page states at the top):
+//   a password   shared into the synth's vault (the SNTH Vault extension,
+//                the web form), used only in the synth's cloud browser;
+//   a sign-in    a site the owner allowed here; its cookies are used only
+//                for requests sent from this computer.
+//
+// The page never holds either: the vault list is site names and dates
+// (asked of the synth when the page opens), a sign-in is a remembered
+// permission for a site.
+
+import { useCallback, useEffect, useState } from "react";
+import { backend } from "../backend";
+import type { BrowserRow, CookiesMode, Grant, VaultSite } from "../backend/types";
+import { formatDay, grantTime } from "../lib/format";
+import { useStore } from "../lib/store";
+import { ChoiceList, More, Notice, Section, Sheet, SwitchRow } from "../ui/controls";
+import { IconCheck } from "../ui/icons";
+
+interface SiteRow {
+  site: string;
+  password: VaultSite | null;
+  session: Grant | null;
+}
+
+/** One row per site, from both sides. */
+function bySite(passwords: VaultSite[], sessions: Grant[]): SiteRow[] {
+  const rows = new Map<string, SiteRow>();
+  for (const p of passwords) rows.set(p.site, { site: p.site, password: p, session: null });
+  for (const g of sessions) {
+    const row = rows.get(g.scope);
+    if (row) row.session = g;
+    else rows.set(g.scope, { site: g.scope, password: null, session: g });
+  }
+  return [...rows.values()].sort((a, b) => a.site.localeCompare(b.site));
+}
+
+export function Logins() {
+  const { state, s, lang, name, edit, act, set } = useStore();
+  const c = state.core.settings.cookies;
+  const t = s.logins;
+  const { vault, browsers, link_ready } = state.logins;
+  const [asking, setAsking] = useState(false);
+  const [removing, setRemoving] = useState<string | null>(null);
+  const [unlinking, setUnlinking] = useState<BrowserRow | null>(null);
+  const [linking, setLinking] = useState<string | null>(null);
+  const [linkError, setLinkError] = useState<{ install: string; code: string } | null>(null);
+  const linked = state.core.link_state === "linked";
+
+  // What the vault holds is asked of the synth when the page opens, and
+  // again when the link comes back.
+  const refresh = useCallback(async () => {
+    setAsking(true);
+    try {
+      set(await backend.loginsRefresh());
+    } catch {
+      /* the last answer stays */
+    } finally {
+      setAsking(false);
+    }
+  }, [set]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh, linked]);
+
+  const sessions = state.grants.filter((g) => g.capability === "cookies");
+  const rows = bySite(vault.state === "ready" ? vault.sites : [], sessions);
+
+  const vaultNote =
+    vault.state === "ready"
+      ? null
+      : vault.state === "unknown"
+        ? { text: t.vaultAsking(name), retry: false }
+        : vault.state === "offline"
+          ? { text: t.vaultOffline(name), retry: true }
+          : vault.state === "outdated"
+            ? { text: t.vaultOutdated(name), retry: false }
+            : vault.state === "unavailable"
+              ? { text: t.vaultUnavailable(name), retry: false }
+              : { text: t.vaultFailed, retry: true };
+
+  const link = async (install: string) => {
+    setLinking(install);
+    setLinkError(null);
+    try {
+      set(await backend.browserLink(install));
+      void refresh();
+    } catch (e) {
+      setLinkError({ install, code: String(e) });
+    } finally {
+      setLinking(null);
+    }
+  };
+
+  return (
+    <>
+      <h1 className="page-title">{s.nav.cookies}</h1>
+      <p className="page-lead">{t.lead(name)}</p>
+
+      <Section>
+        <Notice>{t.rule(name)}</Notice>
+      </Section>
+
+      <Section title={t.sitesTitle} note={rows.length > 0 ? t.sitesNote(name) : undefined}>
+        <div className="group">
+          {rows.length === 0 ? (
+            <div className="empty">{t.sitesEmpty(name)}</div>
+          ) : (
+            rows.map((row) => (
+              <div className="login-site" key={row.site}>
+                <div className="login-name selectable">{row.site}</div>
+                {row.password ? (
+                  <div className="login-line">
+                    <span className="login-what">{t.password(name)}</span>
+                    <span className="login-meta">{passwordFacts(row.password, t, lang)}</span>
+                    <button type="button" className="btn small" onClick={() => setRemoving(row.site)}>
+                      {t.remove}
+                    </button>
+                  </div>
+                ) : null}
+                {row.session ? (
+                  <div className="login-line">
+                    <span className="login-what">{t.session}</span>
+                    <span className="login-meta">{grantTime(row.session, s, lang)}</span>
+                    <button type="button" className="btn small" onClick={() => void act(() => backend.revokeGrant("cookies", row.site))}>
+                      {t.revoke}
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ))
+          )}
+        </div>
+        {vaultNote ? (
+          <div className="login-vault-note" role="status">
+            <span>{vaultNote.text}</span>
+            {vaultNote.retry ? (
+              <button type="button" className="btn small" disabled={asking} onClick={() => void refresh()}>
+                {t.retry}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+        {c.mode === "ask" && sessions.length > 0 ? <p className="section-note">{s.cookies.listUnused}</p> : null}
+      </Section>
+
+      <Section title={t.browsersTitle} note={t.howToShare}>
+        <p className="section-lead">{t.browsersLead(name)}</p>
+        {!link_ready ? (
+          <div style={{ marginBottom: 8 }}>
+            <Notice kind="warn">{t.linkBusy}</Notice>
+          </div>
+        ) : null}
+        <div className="group">
+          {browsers.length === 0 ? (
+            <div className="empty">{t.noBrowsers}</div>
+          ) : (
+            browsers.map((b) => (
+              <div className="row app-row" key={b.install ?? b.browser}>
+                <div className="row-text">
+                  <div className="row-title">{b.name}</div>
+                  <div className="row-desc">{browserLine(b, t, name)}</div>
+                  {b.state === "missing" ? <div className="row-desc">{t.missingHint}</div> : null}
+                  {b.state === "linked" ? (
+                    <div className="app-perm yes">
+                      <IconCheck />
+                      <span>{b.sites.length > 0 ? t.linkedSites(b.sites.join(", ")) : t.linkedNoSites}</span>
+                    </div>
+                  ) : null}
+                  {linkError && linkError.install === b.install ? (
+                    <p className="error-text" role="alert">
+                      {t.linkError(linkError.code, name)}
+                    </p>
+                  ) : null}
+                </div>
+                {b.state === "missing" ? (
+                  <button type="button" className="btn small" onClick={() => void backend.openExternal("vault_extension")}>
+                    {t.getExtension}
+                  </button>
+                ) : b.state === "linked" ? (
+                  <button type="button" className="btn small" onClick={() => setUnlinking(b)}>
+                    {t.unlink}
+                  </button>
+                ) : b.connected ? (
+                  <button type="button" className="btn small strong" disabled={linking !== null} onClick={() => void link(b.install!)}>
+                    {linking === b.install ? t.linking : t.linkBrowser}
+                  </button>
+                ) : (
+                  <button type="button" className="btn small" onClick={() => void act(() => backend.browserForget(b.install!))}>
+                    {t.forget}
+                  </button>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      </Section>
+
+      <Section title={t.signinsTitle}>
+        <div className="group">
+          <SwitchRow strong title={s.cookies.enable(name)} checked={c.enabled} onChange={(v) => edit((d) => void (d.cookies.enabled = v))} />
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <Notice kind={c.enabled ? "warn" : "info"}>{s.cookies.warning(name)}</Notice>
+        </div>
+      </Section>
+
+      <fieldset disabled={!c.enabled}>
+        <Section title={s.cookies.modeTitle(name)}>
+          <ChoiceList<CookiesMode>
+            label={s.cookies.modeTitle(name)}
+            value={c.mode}
+            onChange={(v) => edit((d) => void (d.cookies.mode = v))}
+            options={[
+              { value: "ask", title: s.cookies.ask, desc: s.cookies.askDesc },
+              { value: "ask_new", title: s.cookies.askNew, desc: s.cookies.askNewDesc(name) },
+              { value: "auto", title: s.cookies.auto, desc: s.cookies.autoDesc(name) },
+            ]}
+          />
+        </Section>
+      </fieldset>
+
+      <More label={s.common.details}>
+        <div>{state.app.os === "windows" ? s.cookies.browsersWindows : s.cookies.browsers}</div>
+        <div style={{ marginTop: 4 }}>{t.browserAsks}</div>
+        {state.app.os === "macos" ? <div style={{ marginTop: 4 }}>{s.cookies.keychainNote}</div> : null}
+      </More>
+
+      {removing ? (
+        <Sheet
+          title={t.removeTitle(removing)}
+          onCancel={() => setRemoving(null)}
+          actions={
+            <>
+              <button type="button" className="btn" data-autofocus onClick={() => setRemoving(null)}>
+                {s.common.cancel}
+              </button>
+              <button
+                type="button"
+                className="btn danger solid"
+                onClick={() => {
+                  const site = removing;
+                  setRemoving(null);
+                  void act(() => backend.vaultForget(site));
+                }}
+              >
+                {t.removeConfirm}
+              </button>
+            </>
+          }
+        >
+          <p style={{ marginTop: 10, lineHeight: 1.45 }}>{t.removeBody(name, removing)}</p>
+        </Sheet>
+      ) : null}
+
+      {unlinking ? (
+        <Sheet
+          title={t.unlinkTitle(unlinking.name)}
+          onCancel={() => setUnlinking(null)}
+          actions={
+            <>
+              <button type="button" className="btn" data-autofocus onClick={() => setUnlinking(null)}>
+                {s.common.cancel}
+              </button>
+              <button
+                type="button"
+                className="btn danger solid"
+                onClick={() => {
+                  const install = unlinking.install!;
+                  setUnlinking(null);
+                  void act(() => backend.browserUnlink(install));
+                }}
+              >
+                {t.unlink}
+              </button>
+            </>
+          }
+        >
+          <p style={{ marginTop: 10, lineHeight: 1.45 }}>{t.unlinkBody(name)}</p>
+        </Sheet>
+      ) : null}
+    </>
+  );
+}
+
+type T = ReturnType<typeof useStore>["s"]["logins"];
+
+function passwordFacts(p: VaultSite, t: T, lang: ReturnType<typeof useStore>["lang"]): string {
+  const facts: string[] = [];
+  if (p.updated > 0) facts.push(t.passwordSaved(formatDay(p.updated, lang)));
+  facts.push(p.use_count > 0 && p.last_used > 0 ? t.passwordUsed(p.use_count, formatDay(p.last_used, lang)) : t.passwordUnused);
+  if (p.has_totp) facts.push(t.passwordTotp);
+  return facts.join(" · ");
+}
+
+function browserLine(b: BrowserRow, t: T, name: string): string {
+  if (b.state === "missing") return t.missing;
+  if (b.state === "linked") return b.connected ? t.linked(name) : t.linkedAway(name);
+  return b.connected ? t.installed(b.ext_version || "?") : t.installedAway;
+}

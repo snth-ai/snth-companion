@@ -33,7 +33,7 @@ export const en = {
     computer: "Computer control",
     files: "Files",
     apps: "Apps",
-    cookies: "Sites and cookies",
+    cookies: "Logins",
     activity: "Activity",
     general: "General",
   },
@@ -314,8 +314,91 @@ export const en = {
       `Revoking stops new handovers. A sign-in ${n} already received stays with it until that sign-in expires.`,
     keychainNote:
       "The first time, macOS asks for your password so SNTH Connect can read the sign-ins your browser saved. That is expected.",
-    browsers: "Reads Chrome, Arc, Brave, Edge, Vivaldi and Firefox on this computer. Safari is not supported.",
-    browsersWindows: "On Windows only Firefox can be read for now.",
+    browsers:
+      "Sign-ins are read from Chrome, Arc, Brave, Edge, Vivaldi and Firefox on this computer. A linked browser is asked through its extension when that gives nothing. Safari is not supported.",
+    browsersWindows:
+      "On Windows, Chrome and Edge keep sign-ins locked to the browser itself, so they are read through the SNTH Vault extension of a linked browser. Firefox is read directly.",
+  },
+
+  // The Logins page: the synth's vault, the sign-ins from this computer,
+  // and the browsers with the SNTH Vault extension.
+  logins: {
+    lead: (n: string) => `What ${n} holds or may use to be signed in as you, site by site.`,
+    rule: (n: string) =>
+      `A password you share works only in ${n}'s cloud browser, and a sign-in from your browser works only for requests sent from this computer: neither is ever used the other way round.`,
+    sitesTitle: "By site",
+    sitesEmpty: (n: string) => `Nothing yet. A password appears here when you share one with ${n}, a sign-in when you allow a site.`,
+    password: (n: string) => `Password in ${n}'s vault`,
+    passwordSaved: (date: string) => `saved ${date}`,
+    passwordUsed: (count: number, date: string) => `used ${plural(count, "time", "times")}, last ${date}`,
+    passwordUnused: "not used yet",
+    passwordTotp: "with two-factor codes",
+    remove: "Remove",
+    session: "Sign-in from this computer",
+    revoke: "Revoke",
+    removeTitle: (site: string) => `Remove the password for ${site}?`,
+    removeBody: (n: string, site: string) =>
+      `It is deleted from ${n}'s vault. ${n} can no longer sign in to ${site} in its cloud browser until you share the password again.`,
+    removeConfirm: "Remove password",
+    vaultAsking: (n: string) => `Asking ${n} which passwords it holds...`,
+    vaultOffline: (n: string) => `${n} cannot be reached right now, so the passwords you shared are not listed. Sign-ins from this computer are.`,
+    vaultOutdated: (n: string) => `${n} needs an update before it can list the passwords you shared.`,
+    vaultUnavailable: (n: string) => `${n} has no password vault.`,
+    vaultFailed: "The list of shared passwords could not be loaded.",
+    retry: "Try again",
+    sitesNote: (n: string) =>
+      `Removing a password deletes it from the vault. Revoking a sign-in stops new handovers; one ${n} already received stays with it until it expires.`,
+    howToShare: "To share a password, open the site's sign-in page in a linked browser and click the SNTH Vault extension.",
+    browsersTitle: "Browsers",
+    browsersLead: (n: string) =>
+      `The SNTH Vault extension shares a site's password with ${n} in one click, and hands over a sign-in where the browser keeps it locked.`,
+    noBrowsers: "No supported browser found on this computer (Chrome, Edge, Brave, Chromium).",
+    missing: "No SNTH Vault extension has connected from this browser.",
+    missingHint: 'Install it, open it and choose "I use the SNTH Connect app".',
+    getExtension: "Get the extension",
+    installed: (version: string) => `Extension ${version} is connected. Not linked yet.`,
+    installedAway: "The extension connected earlier. Open the browser to link it.",
+    linkBrowser: "Link this browser",
+    linking: "Linking...",
+    linked: (n: string) => `Linked to ${n}.`,
+    linkedAway: (n: string) => `Linked to ${n}. The browser is closed.`,
+    linkedNoSites: "Shares passwords. No sign-in confirmed in it yet.",
+    linkedSites: (sites: string) => `Shares passwords. May hand over your sign-in for: ${sites}.`,
+    unlink: "Unlink",
+    forget: "Forget",
+    unlinkTitle: (browser: string) => `Unlink ${browser}?`,
+    unlinkBody: (n: string) =>
+      `Its extension forgets the link to ${n} and every site you confirmed in it. Passwords it shared earlier stay in the vault.`,
+    linkBusy: "Another copy of SNTH Connect is running, so browsers cannot reach this one. Quit the other copy.",
+    linkError: (code: string, n: string) => {
+      switch (code) {
+        case "not_linked":
+          return "This computer is not linked to a synth.";
+        case "paused":
+          return "SNTH Connect is paused. Resume it and try again.";
+        case "busy":
+          return "The previous request is still open. Try again in a moment.";
+        case "synth_offline":
+          return `${n} cannot be reached right now. Try again in a moment.`;
+        case "synth_outdated":
+          return `${n} needs an update before a browser can be linked this way. Use a code from ${n} in the extension for now.`;
+        case "other_synth":
+          return "This browser is paired with another synth. Unpair it in the extension first.";
+        default:
+          return "Linking did not work. Try again.";
+      }
+    },
+    signinsTitle: "Sign-ins from this computer",
+    browserAsks:
+      "A browser asks you once per site, in its own window, after you allowed the site here. That window says \"read and change your data\": it is how browsers name access to a site.",
+    viaExtension: (browser: string) => `${browser} (extension)`,
+    browserName: {
+      chrome: "Chrome",
+      edge: "Microsoft Edge",
+      brave: "Brave",
+      chromium: "Chromium",
+      browser: "the browser",
+    } as Record<string, string>,
   },
 
   remembered: {
@@ -329,7 +412,7 @@ export const en = {
       `What ${n} did on this computer, newest first. The contents of pages, files, messages and notes are never recorded.`,
     all: "All",
     net: "Internet",
-    cookies: "Sites",
+    cookies: "Logins",
     computer: "Computer",
     files: "Files",
     apps: "Apps",
@@ -349,6 +432,12 @@ export const en = {
     cookiesOk: (t: string) => `Handed over your sign-in for ${t}`,
     cookiesCount: (count: number, browser: string) => `${plural(count, "cookie", "cookies")} from ${browser}`,
     cookiesRefused: (t: string) => `Did not hand over your sign-in for ${t}`,
+    browserLinked: (browser: string) => `Linked ${browser} to the password vault`,
+    browserLinkRefused: (browser: string) => `Did not link ${browser}`,
+    browserLinkFailed: (browser: string) => `Could not link ${browser}`,
+    browserUnlinked: (browser: string) => `Unlinked ${browser}`,
+    vaultForgot: (site: string) => `Removed the password for ${site} from the vault`,
+    vaultForgetFailed: (site: string) => `Could not remove the password for ${site}`,
     fileRead: (t: string) => `Read ${t}`,
     fileWrite: (t: string) => `Saved ${t}`,
     fileList: (t: string) => `Looked into ${t}`,
@@ -593,6 +682,13 @@ export const en = {
     netBody: "The site will see your home connection.",
     cookiesTitle: (site: string) => `Use your sign-in on ${site}?`,
     cookiesBody: (n: string) => `${n} will be signed in there as you and can do what you can do on that site.`,
+    cookiesStep: (browser: string) => `Step 1 of 2. After you allow, ${browser} asks you once to confirm this site in its own window.`,
+    // Not the synth asking: the owner's own browser (its extension).
+    browserAsks: (browser: string) => `${browser} asks`,
+    vaultTitle: (browser: string, n: string) => `Link ${browser} to ${n}?`,
+    vaultBody: (n: string) =>
+      `You asked for this in the SNTH Vault extension of that browser. From it you will be able to share site passwords with ${n}. The browser can add passwords, it can never read them back.`,
+    vaultNotYou: "If you did not just click \"Link this browser\" in the extension, do not allow it.",
     taskTitle: "Control this computer for a task?",
     taskBody: (n: string) => `${n} will see the screen and use the mouse and keyboard until the task ends.`,
     fgTitle: "Take over the screen for a moment?",
@@ -671,6 +767,7 @@ export const en = {
     stopWork: "Stop working",
     link: "Deep link",
     update: "New version appears",
+    browserLink: "Browser asks to be linked",
     helperInstall: "Run helper install",
     helperFail: "Fail helper install",
     drop: "Drop link",

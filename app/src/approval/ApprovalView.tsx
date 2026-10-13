@@ -39,6 +39,17 @@ interface Wording {
   /** A request this version does not understand: Allow is not offered
    * as the obvious button. */
   unknown?: boolean;
+  /** Who asks, when it is not the synth (the owner's own browser). The
+   * synth's "says" block is not shown then: the synth said nothing. */
+  from?: string;
+  /** One more plain line under the body (what happens next). */
+  next?: string;
+}
+
+/** The browser a request names: from the app's own list, never free text. */
+function browserLabel(id: string, s: Strings): string {
+  const known = Object.values(s.logins.browserName);
+  return known.includes(id) ? id : (s.logins.browserName.browser ?? id);
 }
 
 function wording(req: ApprovalRequest, s: Strings, name: string, cookiesAskEveryTime: boolean): Wording {
@@ -48,10 +59,21 @@ function wording(req: ApprovalRequest, s: Strings, name: string, cookiesAskEvery
       // One page is many connections, so "this time only" would ask again
       // at once; the shortest useful answer is an hour.
       return { title: t.netTitle(req.scope), body: t.netBody, spans: ["hour", "hours8", "session", "always"] };
-    case "cookies":
+    case "cookies": {
+      // When a linked browser will ask too, this window says so first:
+      // the two questions read as one.
+      const browser = req.details.find((d) => d.key === "browser_step")?.value;
+      const next = browser ? t.cookiesStep(browserLabel(browser, s)) : undefined;
       return cookiesAskEveryTime
-        ? { title: t.cookiesTitle(req.scope), body: t.cookiesBody(name), spans: ["once"], hint: t.onceOnly }
-        : { title: t.cookiesTitle(req.scope), body: t.cookiesBody(name), spans: ["once", "session", "always"] };
+        ? { title: t.cookiesTitle(req.scope), body: t.cookiesBody(name), spans: ["once"], hint: t.onceOnly, next }
+        : { title: t.cookiesTitle(req.scope), body: t.cookiesBody(name), spans: ["once", "session", "always"], next };
+    }
+    // The owner's own browser (its SNTH Vault extension) asks to be
+    // linked. The scope is the browser's name from the app's own list.
+    case "vault": {
+      const browser = browserLabel(req.scope, s);
+      return { title: t.vaultTitle(browser, name), body: t.vaultBody(name), spans: ["once"], from: t.browserAsks(browser), next: t.vaultNotYou };
+    }
     case "computer":
       if (req.scope.startsWith("foreground:")) {
         return { title: t.fgTitle, body: t.fgBody, spans: ["once", "hour", "session", "always"] };
@@ -230,22 +252,25 @@ export function ApprovalView() {
     >
       <div className="approval-head">
         <span className="avatar" aria-hidden="true">
-          {name.charAt(0).toUpperCase()}
+          {(words.from ?? name).charAt(0).toUpperCase()}
         </span>
-        <span className="approval-who">{t.asks(name)}</span>
+        <span className="approval-who">{words.from ?? t.asks(name)}</span>
         {live.length > 1 ? <span className="approval-queue">{t.queue(1, live.length)}</span> : null}
       </div>
 
       <div className="approval-body">
         <h1>{words.title}</h1>
         {words.body ? <p className="approval-what">{words.body}</p> : null}
+        {words.next ? <p className="approval-next">{words.next}</p> : null}
         {words.details ? <Details items={words.details} s={s} /> : null}
 
-        <div className="says">
-          <div className="says-label">{t.says(name)}</div>
-          <div className="says-text selectable">{current.reason ? `"${current.reason}"` : t.noReason}</div>
-          {current.reason ? <div className="says-note">{t.unverified}</div> : null}
-        </div>
+        {words.from ? null : (
+          <div className="says">
+            <div className="says-label">{t.says(name)}</div>
+            <div className="says-text selectable">{current.reason ? `"${current.reason}"` : t.noReason}</div>
+            {current.reason ? <div className="says-note">{t.unverified}</div> : null}
+          </div>
+        )}
 
         {words.spans.length > 1 ? (
           <div className="howlong">

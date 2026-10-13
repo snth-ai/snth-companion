@@ -40,6 +40,8 @@ export function MockStage(props: { approvalOnly?: boolean }) {
   const requests: [string, string][] = [
     ["net", "site"],
     ["cookies", "sign-in"],
+    ["cookiesext", "sign-in, 2 steps"],
+    ["vault", "browser link"],
     ["computer", "task"],
     ["foreground", "screen"],
     ["files", "file"],

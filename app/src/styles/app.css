@@ -1632,6 +1632,72 @@ details.more .more-body {
   margin-top: 2px;
 }
 
+/* ---------- logins ---------- */
+
+.section-lead {
+  margin: 0 2px 8px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-2);
+}
+
+.login-site {
+  padding: 9px 8px 8px 14px;
+}
+
+.login-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* One thing the synth holds or may use for the site, and how to take it back. */
+.login-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 30px;
+  margin-top: 3px;
+}
+
+.login-what {
+  flex: none;
+  font-size: 12.5px;
+}
+
+.login-meta {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.login-vault-note {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 2px 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-2);
+}
+
+.login-vault-note > span {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The request window: what happens after the answer (a second step). */
+.approval-next {
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-2);
+}
+
 /* The request window: the thing itself (a message, an event), in full. */
 
 .exact {

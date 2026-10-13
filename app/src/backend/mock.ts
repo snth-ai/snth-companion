@@ -3,9 +3,16 @@
 // answers every command, and can stage any screen from URL parameters:
 //
 //   ?screen=onboarding&step=1..7     ?screen=status&state=paused
-//   ?screen=internet|computer|files|cookies|activity|general
+//   ?screen=internet|computer|files|logins|activity|general
+//   &logins=ready|empty|asking|offline|outdated|novault|failed
+//        (what the synth's vault answers on the Logins page)
+//   &ext=mixed|none|installed|linked|closed|nobrowser|busy
+//        (the SNTH Vault extension in the browsers: mixed = one linked,
+//         one connected but not linked, one never heard from)
+//   &link=ok|synth_offline|synth_outdated|other_synth|busy|failed
+//        (what "Link this browser" does)
 //   &state=linked|paused|connecting|offline|repair|working|empty
-//   &approval=net|cookies|computer|foreground|files|other|queue|
+//   &approval=net|cookies|cookiesext|vault|computer|foreground|files|other|queue|
 //             message|messageask|event|reminder|note|shortcut|shortcutinput|
 //             clipboard|openurl|openfile|openapp
 //   &apps=granted|noperm|denied|nodisk   (macOS permissions of the apps;
@@ -27,6 +34,9 @@
 import type {
   AnswerDuration,
   AppId,
+  BrowserRow,
+  LoginsState,
+  VaultView,
   AppPermission,
   AppsStatus,
   AppView,
@@ -130,6 +140,8 @@ function seedJournal(): Entry[] {
   return [
     e(86400 + 7100, "net", "dial", "www.youtube.com:443", "ok", 18_400_000),
     e(86400 + 7000, "cookies", "cookies.get", "youtube.com (14 from Chrome)", "ok"),
+    e(86400 + 6000, "vault", "vault.pair", "Chrome", "ok"),
+    e(86400 + 5000, "vault", "vault.forget", "old-shop.example", "ok"),
     e(86400 + 3000, "files", "files.read", `${HOME}/Downloads/invoice-october.pdf`, "ok"),
     e(86400 + 2900, "net", "dial", "192.168.1.1:80", "denied: 192.168.1.1 is a private address (192.168.1.1); local network access is off"),
     e(9200, "computer", "mcp.open", "desktop", "ok"),
@@ -143,6 +155,8 @@ function seedJournal(): Entry[] {
     e(5400, "files", "files.write", `${HOME}/Desktop/trip-plan.md`, "ok", 4_300),
     e(5300, "files", "files.write", `${HOME}/Desktop/budget.xlsx`, "denied: owner"),
     e(3600, "cookies", "cookies.get", "booking.com", "denied: owner"),
+    e(3300, "cookies", "cookies.get", "github.com (9 from chrome-extension)", "ok"),
+    e(3200, "vault", "vault.pair", "Microsoft Edge", "denied: owner"),
     e(1900, "net", "dial", "www.booking.com:443", "ok", 2_900_000),
     e(1850, "net", "dial", "cf.bstatic.com:443", "ok", 6_100_000),
     e(1200, "net", "dial", "tracker.example.net:443", "denied: the owner did not allow traffic to example.net"),
@@ -292,6 +306,22 @@ const APPROVAL_KINDS: Record<string, ApprovalKind> = {
     summary: "hand the synth your browser cookies for youtube.com",
     reason: "The video you sent is age-restricted. With your sign-in I can open it and tell you what is inside.",
   },
+  // The same when a linked browser has to ask too: step 1 of 2.
+  cookiesext: {
+    capability: "cookies",
+    scope: "notion.so",
+    summary: "hand the synth your browser cookies for notion.so",
+    reason: "You asked me to tidy up your reading list. I need to be signed in as you to see it.",
+    details: [{ key: "browser_step", value: "Chrome" }],
+  },
+  // Not the synth: the owner's own browser asks to be linked.
+  vault: {
+    capability: "vault",
+    scope: "Microsoft Edge",
+    summary: "link Microsoft Edge to the synth's login vault",
+    reason: "",
+    remember: "never",
+  },
   computer: {
     capability: "computer",
     scope: "task",
@@ -319,6 +349,76 @@ const APPROVAL_KINDS: Record<string, ApprovalKind> = {
 };
 
 type Listener = (event: UiEvent) => void;
+
+const HOUR = 3600;
+const DAY = 86400;
+
+/** `logins=`: what the synth's vault answers. */
+function stagedVault(): VaultView {
+  switch (params.get("logins")) {
+    case "empty":
+      return { state: "ready", sites: [], devices: 0, fetched_at: now() };
+    case "asking":
+      return { state: "unknown" };
+    case "offline":
+      return { state: "offline" };
+    case "outdated":
+      return { state: "outdated" };
+    case "novault":
+      return { state: "unavailable" };
+    case "failed":
+      return { state: "failed" };
+    default:
+      return {
+        state: "ready",
+        devices: 2,
+        fetched_at: now(),
+        sites: [
+          { site: "github.com", has_totp: true, updated: now() - 12 * DAY, last_used: now() - 3 * HOUR, use_count: 9 },
+          { site: "booking.com", has_totp: false, updated: now() - 40 * DAY, last_used: now() - 6 * DAY, use_count: 2 },
+          { site: "mail.example.org", has_totp: false, updated: now() - 2 * DAY, last_used: 0, use_count: 0 },
+        ],
+      };
+  }
+}
+
+/** `ext=`: the SNTH Vault extension in the browsers of this computer. */
+function stagedBrowsers(os: string): Pick<LoginsState, "browsers" | "link_ready"> {
+  const row = (browser: BrowserRow["browser"], name: string, state: BrowserRow["state"], connected: boolean, sites: string[] = []): BrowserRow => ({
+    browser,
+    name,
+    install: state === "missing" ? null : `${browser}00000000000000000000000000`.slice(0, 32),
+    state,
+    connected,
+    ext_version: state === "missing" ? "" : "0.2.0",
+    sites,
+    last_seen: state === "missing" ? 0 : now() - 120,
+  });
+  const edge = os === "linux" ? [] : ["edge"];
+  switch (params.get("ext")) {
+    case "none":
+      return { link_ready: true, browsers: [row("chrome", "Chrome", "missing", false), ...edge.map(() => row("edge", "Microsoft Edge", "missing", false))] };
+    case "installed":
+      return { link_ready: true, browsers: [row("chrome", "Chrome", "installed", true)] };
+    case "linked":
+      return { link_ready: true, browsers: [row("chrome", "Chrome", "linked", true, ["github.com", "youtube.com"])] };
+    case "closed":
+      return { link_ready: true, browsers: [row("chrome", "Chrome", "linked", false), row("brave", "Brave", "installed", false)] };
+    case "nobrowser":
+      return { link_ready: true, browsers: [] };
+    case "busy":
+      return { link_ready: false, browsers: [row("chrome", "Chrome", "missing", false)] };
+    default:
+      return {
+        link_ready: true,
+        browsers: [
+          row("chrome", "Chrome", "linked", true, ["youtube.com"]),
+          ...edge.map(() => row("edge", "Microsoft Edge", "installed", true)),
+          row("brave", "Brave", "missing", false),
+        ],
+      };
+  }
+}
 
 class MockBackend implements Backend {
   readonly mock = true;
@@ -386,6 +486,8 @@ class MockBackend implements Backend {
         ...(os === "macos" ? [{ capability: "apps", scope: "messages.send:+79165550101", until: 0 }] : []),
       ],
       apps: offeredApps(os, settings),
+      // The vault is asked when the Logins page opens (`loginsRefresh`).
+      logins: { ...stagedBrowsers(os), vault: { state: "unknown" } },
       prefs: {
         onboarded: true,
         language: params.get("lang"),
@@ -886,7 +988,64 @@ class MockBackend implements Backend {
 
   revokeGrant(capability: string, scope: string) {
     this.state.grants = this.state.grants.filter((g) => !(g.capability === capability && g.scope === scope));
+    // A site taken back here is taken back in the browsers too.
+    if (capability === "cookies") {
+      for (const b of this.state.logins.browsers) b.sites = b.sites.filter((s) => s !== scope);
+    }
     return this.changed();
+  }
+
+  // --- logins: the synth's vault and the browsers ---
+
+  /** The synth answers after a moment (or not at all, with `logins=asking`). */
+  async loginsRefresh() {
+    if (params.get("logins") === "asking") return new Promise<UiState>(() => undefined);
+    const offline = this.state.core.link_state !== "linked" && this.state.core.link_state !== "paused";
+    const staged = stagedVault();
+    // What was removed in this session stays removed.
+    const previous = this.state.logins.vault;
+    this.state.logins.vault = offline ? { state: "offline" } : previous.state === "ready" && staged.state === "ready" ? previous : staged;
+    return this.reply(this.snapshot(), 450);
+  }
+
+  vaultForget(site: string) {
+    const vault = this.state.logins.vault;
+    if (vault.state === "ready") vault.sites = vault.sites.filter((s) => s.site !== site);
+    this.record("vault", "vault.forget", site, "ok");
+    this.emit({ type: "state" });
+    return this.reply(this.snapshot(), 300);
+  }
+
+  async browserLink(install: string) {
+    const outcome = params.get("link") ?? "ok";
+    await new Promise((r) => window.setTimeout(r, 700));
+    const row = this.state.logins.browsers.find((b) => b.install === install);
+    if (!row) throw "failed";
+    if (outcome !== "ok") {
+      this.record("vault", "vault.pair", row.name, `failed: ${outcome}`);
+      throw outcome;
+    }
+    row.state = "linked";
+    this.record("vault", "vault.pair", row.name, "ok");
+    this.emit({ type: "state" });
+    return this.snapshot();
+  }
+
+  browserUnlink(install: string) {
+    const row = this.state.logins.browsers.find((b) => b.install === install);
+    if (row) {
+      row.state = "installed";
+      row.sites = [];
+      this.record("vault", "vault.unpair", row.name, "ok");
+    }
+    this.emit({ type: "state" });
+    return this.reply(this.snapshot(), 200);
+  }
+
+  browserForget(install: string) {
+    this.state.logins.browsers = this.state.logins.browsers.filter((b) => b.install !== install);
+    this.emit({ type: "state" });
+    return this.reply(this.snapshot());
   }
 
   pause() {
@@ -929,8 +1088,14 @@ class MockBackend implements Backend {
 
   /** The journal line the core writes once a request is decided. */
   private recordAnswer(req: ApprovalRequest, allow: boolean) {
-    if (req.capability === "cookies") {
-      this.record("cookies", "cookies.get", allow ? `${req.scope} (14 from Chrome)` : req.scope, allow ? "ok" : "denied: owner");
+    if (req.capability === "vault") {
+      // The browser that asked is linked once the owner says yes.
+      const row = this.state.logins.browsers.find((b) => b.name === req.scope && b.state === "installed");
+      if (allow && row) row.state = "linked";
+      this.record("vault", "vault.pair", req.scope, allow ? "ok" : "denied: owner");
+    } else if (req.capability === "cookies") {
+      const viaBrowser = req.details.some((d) => d.key === "browser_step");
+      this.record("cookies", "cookies.get", allow ? `${req.scope} (${viaBrowser ? "9 from chrome-extension" : "14 from Chrome"})` : req.scope, allow ? "ok" : "denied: owner");
     } else if (req.capability === "net") {
       this.record("net", "dial", `${req.scope}:443`, allow ? "ok" : `denied: the owner did not allow traffic to ${req.scope}`, allow ? 900_000 : undefined);
     } else if (req.capability === "files") {

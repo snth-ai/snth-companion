@@ -23,7 +23,7 @@ app/
     lib/        store.tsx (state), format.ts (journal lines, sizes, shortcuts)
     ui/         controls.tsx, icons.tsx
     screens/    Onboarding, Status, Internet, Computer, Files, Apps,
-                Cookies, Activity, General, HelperStatus
+                Logins, Activity, General, HelperStatus
     approval/   ApprovalView.tsx (the request window)
     MockStage.tsx   browser-only frame + review controls
     styles/app.css
@@ -37,6 +37,11 @@ app/
     src/updates.rs     automatic updates of the app itself
     src/menu.rs        macOS application menu (clean Cmd+Q, Edit menu)
     src/browsers.rs    where browsers keep cookies; the Chromium key source
+    src/logins.rs      the Logins page: host manifests for the SNTH Vault
+                       extension, the browser link, the vault list
+    src/bin/snth-connect-host.rs   the helper the browsers start (see
+                       "The SNTH Vault extension")
+    windows/hooks.nsh  uninstall: remove the helper's registry keys
     src/state.rs       shared context and the UiState the UI renders
     src/prefs.rs       shell.json (onboarding, language, autostart, shortcut)
     build.rs           the command list (turns on per-command permissions)
@@ -62,10 +67,13 @@ URL parameters stage a screen or a state directly:
 
 | Parameter | Values |
 |---|---|
-| `screen` | `onboarding`, `status`, `internet`, `cookies`, `computer`, `files`, `apps`, `activity`, `general` |
+| `screen` | `onboarding`, `status`, `internet`, `logins` (`cookies` still works), `computer`, `files`, `apps`, `activity`, `general` |
+| `logins` | what the synth's vault answers on the Logins page: `ready` (default: three passwords), `empty`, `asking` (never answers), `offline`, `outdated` (the synth is older than the feature), `novault`, `failed` |
+| `ext` | the SNTH Vault extension in the browsers: `mixed` (default: Chrome linked with one site, Edge connected but not linked, Brave never heard from), `none`, `installed`, `linked`, `closed` (linked but the browser is closed, and one seen earlier), `nobrowser`, `busy` (another copy of the app holds the browser link) |
+| `link` | what "Link this browser" does: `ok` (default), `synth_offline`, `synth_outdated`, `other_synth`, `busy`, `failed` |
 | `step` (with `screen=onboarding`) | `1` welcome, `2` code, `3` confirmation, `4` preset, `5` folders, `6` computer control, `7` done |
 | `state` | `paused`, `working`, `connecting`, `offline`, `repair`, `empty`, `off`, `appsoff` (only Apps off), `metered` |
-| `approval` | `net`, `cookies`, `computer`, `foreground`, `files`, `other`, `queue` (shows the approval window alone); for the owner's apps: `message` (a message as the owner, with "always for this person"), `messageask` (the same when nothing may be remembered, with a hostile reason), `event`, `reminder`, `note`, `shortcut`, `shortcutinput`, `clipboard`, `openurl`, `openfile`, `openapp` |
+| `approval` | `net`, `cookies`, `cookiesext` (a sign-in a linked browser will ask about too: "Step 1 of 2"), `vault` (a browser asks to be linked: not the synth asking), `computer`, `foreground`, `files`, `other`, `queue` (shows the approval window alone); for the owner's apps: `message` (a message as the owner, with "always for this person"), `messageask` (the same when nothing may be remembered, with a hostile reason), `event`, `reminder`, `note`, `shortcut`, `shortcutinput`, `clipboard`, `openurl`, `openfile`, `openapp` |
 | `apps` | the macOS permissions of the apps: `granted` (default), `noperm` (macOS has not asked yet), `denied`, `nodisk` (Messages may be controlled, its history cannot be read) |
 | `messages` | `on`: the Messages switch, which is off by default |
 | `preset` | `careful` (default), `balanced`, `full` |
@@ -76,7 +84,9 @@ URL parameters stage a screen or a state directly:
 | `theme` | `light`, `dark` |
 | `os` | `macos` (default), `windows`, `linux`. Apps follows it: the Mac apps are listed only with `macos` |
 
-Examples: `?screen=onboarding&step=3`, `?screen=status&state=paused`,
+Examples: `?screen=logins`, `?screen=logins&logins=offline&ext=closed&os=windows`,
+`?screen=logins&logins=empty&state=empty&ext=none&lang=ru`, `?approval=vault`,
+`?screen=onboarding&step=3`, `?screen=status&state=paused`,
 `?approval=cookies`, `?screen=computer&cua=noperm&lang=ru&theme=dark`,
 `?screen=apps&apps=noperm&messages=on`, `?screen=apps&os=windows`,
 `?approval=message&lang=ru`.
@@ -307,6 +317,75 @@ hidden "Advanced" override that accepts only `https://` addresses.
 - Files on disk: `settings.json`, `shell.json` (and `secrets.json` in a debug
   build) in the app config dir; `journal.jsonl` in the app data dir.
 
+## The SNTH Vault extension
+
+One app, one pairing, one page. The browser extension that shares site
+passwords with the synth (repo `snth-vault-extension`) talks to this app
+when the app is installed, and works on its own when it is not.
+
+THE RULE the Logins page states: a password the owner shares is used only
+in the synth's cloud browser (it goes from the browser straight to the hub's
+vault; this app never holds one). A sign-in session (cookies) is used only
+for requests sent from this computer. Neither is ever used the other way
+round.
+
+- **The channel.** Native messaging. The browser starts
+  `snth-connect-host`, a second small program in the app bundle (next to the
+  app's own program: `Contents/MacOS/` on macOS, the install folder on
+  Windows, `/usr/bin` in the Linux packages). It is a relay: it passes the
+  extension's messages to the RUNNING app over a per-user endpoint (a Unix
+  socket in a 0700 folder under the app's data folder; on Windows a named
+  pipe only the same user can open) and tells the extension when the app is
+  not running. It never starts the app. All of it is `crates/connect-host`
+  (its README has the details and who can reach what).
+- **Registering it.** `logins::sync` writes the host manifests for the
+  installed browsers (Chrome, Edge, Brave, Chromium): per-user files on
+  macOS and Linux, per-user registry keys on Windows. No administrator
+  rights. It runs at every start (so the manifests follow an updated or
+  moved app), when the computer is linked, and it removes them when the
+  computer is unlinked. An app that runs from a temporary place (an
+  AppImage, or a copy macOS made because the app was opened outside
+  Applications) registers a copy of the helper kept in its data folder. The
+  Windows uninstaller removes the registry keys (`windows/hooks.nsh`); on
+  macOS and Linux a removed app leaves a manifest that points at nothing,
+  which a browser treats as "no such app".
+- **One pairing.** In the extension's popup the owner clicks "Link this
+  browser"; the app shows its request window ("Chrome asks", naming the
+  browser and the synth); on yes the core asks the synth for a pairing code
+  over the existing link and hands it to the extension, which redeems it at
+  the hub like a typed code. "Link this browser" on the Logins page does the
+  same without the window: the click is the confirmation.
+- **Sign-ins through the extension.** When the synth asks for a site's
+  cookies and the owner allowed the site, the core may ask a linked browser
+  (first on Windows, where Chrome and Edge keep cookies locked to the
+  browser; as a fallback elsewhere). The browser shows the extension's
+  "Step 2 of 2" window and then its own prompt for that one site. Cookies
+  travel extension, helper, app, synth, and are written nowhere on the way.
+- **The Logins page** (`screens/Logins.tsx`, `logins.rs`): by site, the
+  password in the synth's vault (when it was saved and last used; "Remove"
+  deletes it from the vault through the synth) and the sign-in allowed from
+  this computer ("Revoke", which also takes the site back in the browsers);
+  the browsers with the state of the extension in each (never heard from,
+  connected but not linked, linked) and "Get the extension", "Link this
+  browser", "Unlink"; then the existing switches for sign-ins.
+- The vault list is asked of the synth when the page opens
+  (`logins_refresh`) and kept in memory only. A synth older than the feature
+  is shown as "needs an update", an unreachable one as "cannot be reached
+  right now"; sign-ins from this computer are listed either way.
+
+### Firefox
+
+Not done. The extension's code would run there (it already uses `browser.*`
+where it exists), but it needs three things this work did not include: a
+`browser_specific_settings.gecko.id` and a background script next to the
+service worker in the manifest; a host manifest of Firefox's own kind
+(`allowed_extensions` instead of `allowed_origins`, in Mozilla's folders or
+registry key; the helper is then started with the manifest path and the
+extension id instead of an origin); and a signature from addons.mozilla.org,
+without which Firefox loads an extension only until it restarts. Firefox
+cookies are read from its files on every system already, so the gain would
+be pairing without a code. Safari stays on the code as well.
+
 ## Windows: what else could be driven, and why it is not built
 
 Built on Windows: notifications, the clipboard, and open (a link, a
@@ -334,6 +413,20 @@ PowerShell child through COM, classify sending mail like sending a message
 with classic Outlook to verify on; the CI machines have none.
 
 ## Not verified
+
+- The SNTH Vault extension with the INSTALLED app, on any system. What was
+  run: the core and the helper as real processes (`connectd selftest host`,
+  also on Windows CI with the shipped helper and real per-user registry
+  keys), and the whole chain in Chrome for Testing with a throwaway profile
+  (`e2e/run.js` in the extension repo). Never run: the app writing manifests
+  into the real folders of Chrome, Edge, Brave or Chromium; a real browser
+  finding the helper inside the installed app; the helper inside a signed
+  and notarized macOS bundle; the request window for a browser link; the
+  Logins page against a real synth and a real vault; the browsers' own two
+  prompts being accepted by a person (no script can click them).
+- Chrome and Edge on Windows through the extension: built for exactly that,
+  proven only as far as the Windows self-test goes (the helper, the pipe,
+  the registry). No browser was driven on Windows.
 
 - The owner's apps on a real Mac. Every script compiles against the real
   apps' dictionaries (`scripts/check-applescripts.sh`) and everything

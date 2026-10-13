@@ -5,10 +5,10 @@ import { useActiveEntry, useStore } from "./lib/store";
 import { Activity } from "./screens/Activity";
 import { Apps } from "./screens/Apps";
 import { Computer } from "./screens/Computer";
-import { Cookies } from "./screens/Cookies";
 import { Files } from "./screens/Files";
 import { General } from "./screens/General";
 import { Internet } from "./screens/Internet";
+import { Logins } from "./screens/Logins";
 import { Onboarding, type Step } from "./screens/Onboarding";
 import { Status } from "./screens/Status";
 import { Sheet } from "./ui/controls";
@@ -96,9 +96,12 @@ function Sidebar(props: { screen: Screen; go: (screen: Screen) => void }) {
 
 export function App(props: { initialScreen?: string | null; initialStep?: Step }) {
   const { state, s, name, failed, linkCode, takeLinkCode } = useStore();
-  const [screen, setScreen] = useState<Screen>(() =>
-    SCREENS.includes(props.initialScreen as Screen) ? (props.initialScreen as Screen) : "status",
-  );
+  const [screen, setScreen] = useState<Screen>(() => {
+    // "logins" is the page's name; "cookies" is what it was called before
+    // and what the code still calls the capability.
+    const asked = props.initialScreen === "logins" ? "cookies" : props.initialScreen;
+    return SCREENS.includes(asked as Screen) ? (asked as Screen) : "status";
+  });
   const mainRef = useRef<HTMLElement>(null);
   const linked = state.core.paired;
   const ready = linked && state.prefs.onboarded;
@@ -137,7 +140,7 @@ export function App(props: { initialScreen?: string | null; initialStep?: Step }
         ) : null}
         {screen === "status" ? <Status go={go} /> : null}
         {screen === "internet" ? <Internet /> : null}
-        {screen === "cookies" ? <Cookies /> : null}
+        {screen === "cookies" ? <Logins /> : null}
         {screen === "computer" ? <Computer /> : null}
         {screen === "files" ? <Files /> : null}
         {screen === "apps" ? <Apps /> : null}
