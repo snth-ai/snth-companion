@@ -214,9 +214,13 @@ fn journal_text(core: &Core) -> String {
 
 #[test]
 fn what_an_extension_names_is_cut_to_shape() {
-    assert_eq!(clean_browser("Chrome"), "chrome");
-    assert_eq!(clean_browser("edge"), "edge");
-    assert_eq!(clean_browser("<script>"), "browser");
+    assert_eq!(clean_browser("Chrome", Door::Chromium), "chrome");
+    assert_eq!(clean_browser("edge", Door::Chromium), "edge");
+    assert_eq!(clean_browser("<script>", Door::Chromium), "browser");
+    // Safari is who comes in on the Safari door, and nobody else.
+    assert_eq!(clean_browser("safari", Door::Chromium), "browser");
+    assert_eq!(clean_browser("chrome", Door::Safari), "safari");
+    assert_eq!(clean_browser("", Door::Safari), "safari");
     assert!(clean_install(INSTALL).is_some());
     assert!(clean_install("short").is_none());
     assert!(clean_install(&"g".repeat(32)).is_none());
@@ -851,4 +855,240 @@ async fn a_public_suffix_is_not_a_site() {
     }
     assert!(owner.asked().is_empty());
     assert!(crate::core::is_one_site("example.com") && crate::core::is_one_site("192.168.1.1"));
+}
+
+// --- the Safari door ---
+
+const SAFARI_ORIGIN: &str = "safari-web-extension://ai.snth.connect.safari/";
+const SAFARI_INSTALL: &str = "fedcba9876543210fedcba9876543210";
+
+/// Connect as the Safari extension's handler would: on the Safari door.
+async fn open_on(core: &Core, door: Door, origin: &str) -> Ext {
+    let (app_r, ext_w) = duplex(4 * 1024 * 1024);
+    let (ext_r, app_w) = duplex(4 * 1024 * 1024);
+    let core = core.clone();
+    tokio::spawn(async move {
+        core.serve_browser_on(Conn { reader: Box::new(app_r), writer: Box::new(app_w) }, door).await;
+    });
+    let mut ext = Ext { w: ext_w, lines: BufReader::new(ext_r).lines() };
+    ext.send(json!({"type": "host.open", "v": 1, "origin": origin})).await;
+    ext
+}
+
+async fn greet_safari(core: &Core, install: &str) -> (Ext, Value) {
+    let mut ext = open_on(core, Door::Safari, SAFARI_ORIGIN).await;
+    let mut hi = hello(install);
+    hi["browser"] = json!("safari");
+    ext.send(hi).await;
+    let ack = ext.recv_type("hello_ack").await;
+    (ext, ack)
+}
+
+async fn link_safari(core: &Core, owner: &Owner, install: &str) -> Ext {
+    owner.says(Approval::once());
+    let (mut ext, _) = greet_safari(core, install).await;
+    ext.send(json!({"type": "pair.request", "id": 1})).await;
+    let code = ext.recv_type("pair.code").await;
+    ext.send(json!({"type": "pair.done", "id": code["id"], "ok": true, "device_id": "dev_5afa"})).await;
+    wait_for(|| core.browsers().iter().any(|b| b.install == install && b.linked)).await;
+    ext
+}
+
+#[tokio::test]
+async fn each_door_takes_its_own_callers_and_no_others() {
+    let (core, owner) = linked_core().await;
+    // The Chromium extension's origin on the Safari door, Safari's on the
+    // Chromium door, and strangers on the Safari door: closed unheard.
+    for (door, origin) in [
+        (Door::Safari, ORIGIN),
+        (Door::Chromium, SAFARI_ORIGIN),
+        (Door::Safari, "safari-web-extension://ai.snth.vault.Extension/"),
+        (Door::Safari, "safari-web-extension://ai.snth.connect.safari"),
+        (Door::Safari, "https://evil.example/"),
+        (Door::Safari, ""),
+    ] {
+        let mut ext = open_on(&core, door, origin).await;
+        assert!(ext.closed().await, "{door:?} {origin}");
+    }
+    assert!(core.browsers().is_empty());
+    assert!(owner.asked().is_empty());
+}
+
+#[tokio::test]
+async fn which_browser_it_is_follows_from_the_door_not_from_what_it_says() {
+    let (core, _owner) = linked_core().await;
+    // On the Safari door a caller is Safari even when it says Chrome.
+    let mut ext = open_on(&core, Door::Safari, SAFARI_ORIGIN).await;
+    ext.send(hello(SAFARI_INSTALL)).await;
+    ext.recv_type("hello_ack").await;
+    // On the Chromium door nobody is Safari.
+    let mut other = open(&core, ORIGIN).await;
+    let mut hi = hello(INSTALL);
+    hi["browser"] = json!("safari");
+    other.send(hi).await;
+    other.recv_type("hello_ack").await;
+
+    let got: Vec<(String, String)> = core.browsers().into_iter().map(|b| (b.install, b.browser)).collect();
+    assert_eq!(got, [(INSTALL.to_string(), "browser".to_string()), (SAFARI_INSTALL.to_string(), "safari".to_string())]);
+    assert_eq!(browser_name("safari"), "Safari");
+}
+
+#[tokio::test]
+async fn safari_pairs_through_the_app_like_any_browser() {
+    let (core, owner) = linked_core().await;
+    let seen = usual_synth(&core);
+    owner.says(Approval::once());
+    let (mut ext, ack) = greet_safari(&core, SAFARI_INSTALL).await;
+    assert_eq!((ack["linked"].as_bool(), ack["known"].as_bool()), (Some(true), Some(false)));
+
+    ext.send(json!({"type": "pair.request", "id": 4})).await;
+    let code = ext.recv_type("pair.code").await;
+    assert_eq!((code["id"].as_u64(), code["code"].as_str()), (Some(4), Some("K7QW3MHX")));
+    // The owner was asked in the app, by the browser's name.
+    let asked = owner.asked();
+    assert_eq!((asked[0].capability.as_str(), asked[0].scope.as_str()), ("vault", "Safari"));
+    assert!(seen.lock().unwrap().iter().any(|(m, p)| m == "vault.pair_code" && p["browser"] == "safari"));
+
+    ext.send(json!({"type": "pair.done", "id": 4, "ok": true, "device_id": "dev_5afa"})).await;
+    wait_for(|| core.browsers().iter().any(|b| b.browser == "safari" && b.linked)).await;
+    assert!(journal_text(&core).contains("Safari"));
+
+    // And the owner's click in the app links it without a question.
+    let (core, owner) = linked_core().await;
+    usual_synth(&core);
+    let (mut ext, _) = greet_safari(&core, SAFARI_INSTALL).await;
+    let linking = tokio::spawn({
+        let core = core.clone();
+        async move { core.browser_link(SAFARI_INSTALL).await }
+    });
+    let code = ext.recv_type("pair.code").await;
+    assert_eq!(code["id"], 0);
+    assert_eq!(linking.await.unwrap(), Ok(()));
+    assert!(owner.asked().is_empty());
+}
+
+#[tokio::test]
+async fn safari_hands_over_one_sites_cookies_under_its_own_label() {
+    let (core, owner) = linked_core().await;
+    usual_synth(&core);
+    core.mutate_settings(|s| {
+        s.cookies.enabled = true;
+        s.cookies.mode = CookiesMode::Ask;
+    });
+    // Safari's files are never read, so the extension is the only source:
+    // it is asked whichever goes first.
+    core.set_cookies_extension_first(false);
+    let mut ext = link_safari(&core, &owner, SAFARI_INSTALL).await;
+
+    owner.says(Approval::once());
+    let call = tokio::spawn({
+        let core = core.clone();
+        async move { cookies_get(&core, "shop.example.com").await }
+    });
+    let ask = ext.recv_type("cookies.get").await;
+    assert_eq!(ask["site"], "example.com");
+    ext.send(cookie_reply(&ask["id"])).await;
+    let got = call.await.unwrap().unwrap();
+    assert_eq!(got["source"], "safari-extension");
+    assert_eq!(got["cookies"].as_array().unwrap().len(), 1, "the cookie of another site was dropped");
+    assert_eq!(ext.recv_type("site.revoke").await["site"], "example.com");
+
+    let journal = journal_text(&core);
+    assert!(journal.contains("example.com (1 from safari-extension)"), "{journal}");
+    assert!(!journal.contains(SECRET));
+}
+
+#[tokio::test]
+async fn a_browser_with_no_cookie_of_the_site_is_not_the_end_when_another_is_linked() {
+    let (core, owner) = linked_core().await;
+    usual_synth(&core);
+    let mut chrome = link(&core, &owner, INSTALL).await;
+    let mut safari = link_safari(&core, &owner, SAFARI_INSTALL).await;
+
+    let reading = tokio::spawn({
+        let shared = core.shared();
+        async move { shared.cookies_via_extension("example.com", Duration::from_secs(5), true).await }
+    });
+    // Safari connected last, so it is asked first. The owner is not
+    // signed in there: an empty answer.
+    let ask = safari.recv_type("cookies.get").await;
+    safari.send(json!({"type": "cookies.result", "id": ask["id"], "ok": true, "cookies": []})).await;
+    // Chrome is asked next, and it has the sign-in.
+    let ask = chrome.recv_type("cookies.get").await;
+    chrome.send(cookie_reply(&ask["id"])).await;
+    let ExtensionRead::Cookies(read) = reading.await.unwrap() else {
+        panic!("expected cookies");
+    };
+    assert_eq!((read.source.as_str(), read.cookies.len()), ("chrome-extension", 1));
+
+    // A "no" in the first browser is the owner's answer: nobody else is asked.
+    let reading = tokio::spawn({
+        let shared = core.shared();
+        async move { shared.cookies_via_extension("example.com", Duration::from_secs(5), true).await }
+    });
+    let ask = safari.recv_type("cookies.get").await;
+    safari.send(json!({"type": "cookies.result", "id": ask["id"], "ok": false, "error": "denied"})).await;
+    assert!(matches!(reading.await.unwrap(), ExtensionRead::Denied(_)));
+    assert!(chrome.recv_type("site.revoke").await["site"] == "example.com");
+    assert!(chrome.silent().await, "the second browser was not asked after a refusal");
+
+    // Nobody signed in anywhere: an empty read, from the first one asked.
+    let reading = tokio::spawn({
+        let shared = core.shared();
+        async move { shared.cookies_via_extension("example.com", Duration::from_secs(5), true).await }
+    });
+    let ask = safari.recv_type("cookies.get").await;
+    safari.send(json!({"type": "cookies.result", "id": ask["id"], "ok": true, "cookies": []})).await;
+    let ask = chrome.recv_type("cookies.get").await;
+    chrome.send(json!({"type": "cookies.result", "id": ask["id"], "ok": true, "cookies": []})).await;
+    let ExtensionRead::Cookies(read) = reading.await.unwrap() else {
+        panic!("expected an empty read");
+    };
+    assert!(read.cookies.is_empty());
+    assert_eq!(read.source, "safari-extension");
+}
+
+#[tokio::test]
+async fn a_browser_that_may_read_the_site_already_is_asked_first() {
+    let (core, owner) = linked_core().await;
+    usual_synth(&core);
+    core.mutate_settings(|s| {
+        s.cookies.enabled = true;
+        s.cookies.mode = CookiesMode::Auto;
+    });
+    let mut chrome = link(&core, &owner, INSTALL).await;
+    let mut safari = link_safari(&core, &owner, SAFARI_INSTALL).await;
+    // Chrome says it may read the site; Safari (connected last) may not.
+    chrome.send(json!({"type": "state", "paired": true, "sites": ["example.com"]})).await;
+    wait_for(|| core.browsers().iter().any(|b| b.browser == "chrome" && b.sites == ["example.com"])).await;
+    assert_eq!(core.shared().extension_for("example.com"), Some(("chrome".into(), true)));
+    assert_eq!(core.shared().extension_for("other.org"), Some(("safari".into(), false)));
+
+    let reading = tokio::spawn({
+        let shared = core.shared();
+        async move { shared.cookies_via_extension("example.com", Duration::from_secs(5), false).await }
+    });
+    let ask = chrome.recv_type("cookies.get").await;
+    chrome.send(cookie_reply(&ask["id"])).await;
+    assert!(matches!(reading.await.unwrap(), ExtensionRead::Cookies(r) if r.source == "chrome-extension"));
+    assert!(safari.silent().await);
+}
+
+#[tokio::test]
+async fn a_browser_set_to_every_site_is_shown_as_such() {
+    let (core, owner) = linked_core().await;
+    usual_synth(&core);
+    let mut ext = link_safari(&core, &owner, SAFARI_INSTALL).await;
+    assert!(!core.browsers()[0].all_sites);
+    // The owner chose "Always Allow on Every Website" in Safari.
+    ext.send(json!({"type": "state", "paired": true, "sites": [], "all_sites": true})).await;
+    wait_for(|| core.browsers()[0].all_sites).await;
+    // Then the browser asks nothing for a site: the app says so up front.
+    assert_eq!(core.shared().extension_for("example.com"), Some(("safari".into(), true)));
+    ext.send(json!({"type": "state", "all_sites": false})).await;
+    wait_for(|| !core.browsers()[0].all_sites).await;
+    // Anything but a plain yes is a no.
+    ext.send(json!({"type": "state", "all_sites": "yes"})).await;
+    assert!(ext.silent().await);
+    assert!(!core.browsers()[0].all_sites);
 }

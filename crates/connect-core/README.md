@@ -87,6 +87,7 @@ Everything on `Core` is `Send + Sync`; clone the handle freely (it is an
 | `apps_permissions(app)` / `apps_request_permission(app, kind)` | macOS: where an app's Automation / Full Disk Access permission stands (read-only, never prompts), and the call that makes macOS ask. Empty elsewhere |
 | `run_link(ws_url, shutdown).await` | the reconnect loop; spawn it. `ws_url` None = the paired synth url |
 | `run_browser_link(endpoint, shutdown).await` | serve the SNTH Vault extension's helper on a per-user endpoint (see "The browser link"); returns an error at once when the endpoint cannot be bound |
+| `run_browser_door(endpoint, door, shutdown).await` | the same for one door: `Door::Chromium` is what `run_browser_link` serves; `Door::Safari` is the endpoint in the app group folder, for the handler of the Safari extension that ships inside the app |
 | `browsers()` | the browsers whose extension has talked to the app: connected or not, linked or not, which sites each may hand a sign-in for |
 | `browser_link(install).await` / `browser_unlink(install).await` / `browser_forget(install)` | link a connected browser to the synth's vault (the owner's click in the host is the confirmation), unlink one (its extension forgets the pairing and its sites, the synth removes the pairing at the vault), drop one that is gone |
 | `vault_list().await` / `vault_forget(site).await` | which sites the synth's vault holds a login for (names and dates only), and deleting one |
@@ -221,6 +222,15 @@ the helper of `connect-host`; each browser profile is one `Session`.
   extension origins, and nothing is heard from it before a well-formed
   `hello` (browser, extension version, a random profile id, whether it holds
   a vault pairing, which sites it may read).
+- Two doors (`connect_host::Door`), one room. The Chromium helper connects
+  to the app's own endpoint and names a `chrome-extension://` origin; the
+  native handler of the Safari extension that ships inside the app connects
+  to a second endpoint, in the folder of the app group the two share, and
+  names `safari-web-extension://ai.snth.connect.safari/`. Each door takes
+  its own callers only (the right origin on the wrong door is closed
+  unheard), and which browser a session is follows from the door: what came
+  in on the Safari door is `safari` whatever its hello says, and nothing on
+  the other door is. Everything after that is the same code.
 - Pairing: `pair.request` from the extension makes the core ask the owner
   (`Approver`, capability `vault`, scope = the browser's name, never
   remembered). On yes it asks the synth for a code and sends
@@ -232,7 +242,11 @@ the helper of `connect-host`; each browser profile is one `Session`.
   a `pair.done` nobody asked for links nothing.
 - Cookies: `cookies.get{site, synth, asked}` goes only to a connected,
   LINKED browser, only for a registrable domain, and the answer is taken
-  only from the session that was asked. `clean_cookies` drops every cookie
+  only from the session that was asked. With more than one linked browser,
+  one that may read the site already is asked first, then the one that
+  connected last; a browser that holds no cookie of the site is not the end
+  (the next one is asked, inside the same time limit), a refusal or a
+  silence is. `clean_cookies` drops every cookie
   that is not of that site, is malformed or is past 400. Unless the owner's
   answer for the site is a standing one (`ask_new` with a grant, or `auto`),
   the core tells the browser to give the site back right after the read
@@ -249,9 +263,9 @@ nothing but its own `host` / `host.open`):
 
 | Direction | Message | Meaning |
 |---|---|---|
-| helper -> app | `{"type":"host.open","v":1,"origin":"chrome-extension://<id>/"}` | first line of a connection: who the browser started the helper for |
+| helper -> app | `{"type":"host.open","v":1,"origin":"chrome-extension://<id>/"}` | first line of a connection: who the browser started the helper for. On the Safari door the extension's handler writes it, with `"origin":"safari-web-extension://ai.snth.connect.safari/"` |
 | helper -> ext | `{"type":"host","app":"not_running"\|"connected"}`, `{"type":"host","error":"malformed"\|"origin_not_allowed"}` | the helper's own words |
-| ext -> app | `hello{v:1, browser, ext_version, install, paired, device_id?, sites[]}` | who this browser is; never a token |
+| ext -> app | `hello{v:1, browser, ext_version, install, paired, device_id?, sites[], all_sites?}` | who this browser is; never a token. `all_sites`: the owner let the extension read every site in the browser's own settings |
 | app -> ext | `hello_ack{v:1, app_version, linked, synth, known}` | whether the app has a synth, its name, whether this browser is linked here |
 | app -> ext | `status{linked, synth, known}` | the same, when it changes |
 | ext -> app | `pair.request{id}` | "link this browser" was clicked in the popup |
@@ -259,7 +273,7 @@ nothing but its own `host` / `host.open`):
 | app -> ext | `pair.linked{id, synth}` | the browser's existing pairing is with this synth: linked, no new code |
 | app -> ext | `pair.refused{id, error}` | `not_linked`, `paused`, `denied`, `busy`, `synth_offline`, `synth_outdated`, `other_synth`, `failed` |
 | ext -> app | `pair.done{id, ok, device_id?, error?}` | the hub took the code (or did not) |
-| ext -> app | `state{paired?, sites?}` | the pairing or the readable sites changed |
+| ext -> app | `state{paired?, sites?, all_sites?}` | the pairing or the readable sites changed |
 | app -> ext | `cookies.get{id, site, synth, asked}` | hand over the cookies of this one site (`asked`: the owner just answered in the app) |
 | ext -> app | `cookies.result{id, ok, cookies[]?, error?}` | cookie = `{name, value, domain, path, expires, secure, http_only, same_site}`; `error`: `denied`, `bad_site`, `failed` |
 | app -> ext | `site.revoke{site}`, `sites.clear` | give back one site, or all of them |
@@ -277,7 +291,10 @@ the host's window can say "step 1 of 2". The whole call stays inside 55 s:
 a browser that is still waiting for the owner is answered with
 `denied: no answer from the user (...)`, and the confirmation given later
 serves the next attempt. `source` is the browser's name for a file read and
-`<browser id>-extension` for a read through the extension.
+`<browser id>-extension` for a read through the extension. Safari's files
+are never read (the cookie readers know Chromium and Firefox), so for a
+sign-in that lives in Safari the linked Safari extension is the only source,
+whichever goes first (`source` is then `safari-extension`).
 
 ## The owner's apps (`src/apps/`)
 

@@ -5,6 +5,13 @@
 //! (native messaging, then a per-user local endpoint). Each browser
 //! profile that runs the extension is one connection, a `Session` here.
 //!
+//! Safari has no helper: its extension ships inside the app and its own
+//! native handler connects to a second endpoint, in the folder of the app
+//! group the two share. That is a second DOOR (`connect_host::Door`) to
+//! the same room: the same messages, the same checks, and each door takes
+//! only its own callers. Which browser a session is follows from the door
+//! it came in on, never from what it says.
+//!
 //! Three things travel on it:
 //!
 //!  1. PAIRING. The extension asks to be linked to the synth's login
@@ -41,6 +48,7 @@ use std::time::{Duration, Instant};
 
 use connect_host::frame::{self, FrameError, MAX_FROM_BROWSER, MAX_TO_BROWSER};
 use connect_host::transport::{Conn, Listener};
+use connect_host::{safari, Door};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::io::BufReader;
@@ -90,8 +98,13 @@ fn now_unix() -> i64 {
 
 // --- cleaning what an extension says ---
 
-/// The browser's short id, when it is one we know.
-fn clean_browser(raw: &str) -> String {
+/// The browser's short id, when it is one we know. What came in on the
+/// Safari door is Safari whatever it calls itself, and nothing on the
+/// other door is.
+fn clean_browser(raw: &str, door: Door) -> String {
+    if door == Door::Safari {
+        return safari::BROWSER_ID.to_string();
+    }
     let id = raw.trim().to_ascii_lowercase();
     if connect_host::install::browser(&id).is_some() {
         id
@@ -102,6 +115,9 @@ fn clean_browser(raw: &str) -> String {
 
 /// The name people know a browser by.
 pub fn browser_name(id: &str) -> &'static str {
+    if id == safari::BROWSER_ID {
+        return safari::BROWSER_NAME;
+    }
     connect_host::install::browser(id).map(|b| b.name).unwrap_or("Browser")
 }
 
@@ -225,6 +241,9 @@ struct SessionState {
     device_id: String,
     /// The sites it may read cookies of.
     sites: Vec<String>,
+    /// The owner let the extension read EVERY site in the browser's own
+    /// settings. The browser then asks nothing per site.
+    all_sites: bool,
     /// A pairing question from it is being handled.
     pairing: bool,
     /// When a code went out to it.
@@ -234,6 +253,8 @@ struct SessionState {
 
 pub(crate) struct Session {
     id: u64,
+    /// The endpoint it connected to.
+    door: Door,
     tx: mpsc::Sender<Value>,
     state: Mutex<SessionState>,
 }
@@ -323,7 +344,7 @@ impl Hub {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct BrowserView {
     pub install: String,
-    /// "chrome", "edge", "brave", "chromium" or "browser".
+    /// "chrome", "edge", "brave", "chromium", "safari" or "browser".
     pub browser: String,
     /// Its extension is talking to the app right now.
     pub connected: bool,
@@ -333,6 +354,10 @@ pub struct BrowserView {
     pub ext_version: String,
     /// The sites it may hand cookies of (known while connected).
     pub sites: Vec<String>,
+    /// The owner allowed the extension on every site in the browser's own
+    /// settings (known while connected): that browser no longer asks per
+    /// site, and the answers given in this app are the only gate.
+    pub all_sites: bool,
     /// Unix seconds of its last hello.
     pub last_seen: i64,
 }
@@ -583,9 +608,21 @@ impl Shared {
     /// The linked browser a cookie read would go to right now, and
     /// whether it may read `site` already.
     pub(crate) fn extension_for(&self, site: &str) -> Option<(String, bool)> {
-        let s = self.linked_sessions().into_iter().next()?;
+        let s = self.sessions_for(site).into_iter().next()?;
         let st = s.snapshot();
-        Some((st.browser, st.sites.iter().any(|x| x == site)))
+        Some((st.browser, st.all_sites || st.sites.iter().any(|x| x == site)))
+    }
+
+    /// The linked browsers in the order a read of `site` tries them: one
+    /// that may read the site already first (it answers without asking
+    /// the owner anything), then the one that connected last.
+    fn sessions_for(&self, site: &str) -> Vec<Arc<Session>> {
+        let mut sessions = self.linked_sessions();
+        sessions.sort_by_key(|s| {
+            let st = s.state.lock().unwrap();
+            !(st.all_sites || st.sites.iter().any(|x| x == site))
+        });
+        sessions
     }
 
     /// Connected extensions of browsers the owner linked, the one that
@@ -615,17 +652,45 @@ impl Shared {
     /// the browser; `asked` says the owner answered a question about this
     /// site in the app a moment ago (the browser's window then reads as
     /// the second step of the same question).
+    ///
+    /// With more than one linked browser (say Chrome and Safari), a
+    /// browser that holds no cookie of the site is not the end: the next
+    /// one is asked, inside the same time limit. A refusal or a silence
+    /// is the owner's answer and ends it.
     pub(crate) async fn cookies_via_extension(self: &Arc<Self>, site: &str, wait: Duration, asked: bool) -> ExtensionRead {
         if clean_site(site).as_deref() != Some(site) {
             return ExtensionRead::NoBrowser;
         }
-        let Some(session) = self.linked_sessions().into_iter().next() else {
+        let sessions = self.sessions_for(site);
+        if sessions.is_empty() {
             return ExtensionRead::NoBrowser;
-        };
+        }
+        let started = Instant::now();
+        let mut nothing: Option<CookieRead> = None;
+        for session in sessions {
+            let left = wait.saturating_sub(started.elapsed());
+            if nothing.is_some() && left < Duration::from_secs(2) {
+                break;
+            }
+            match self.cookies_from(&session, site, left, asked).await {
+                ExtensionRead::Cookies(read) if read.cookies.is_empty() => {
+                    nothing.get_or_insert(read);
+                }
+                other => return other,
+            }
+        }
+        match nothing {
+            Some(read) => ExtensionRead::Cookies(read),
+            None => ExtensionRead::NoBrowser,
+        }
+    }
+
+    /// One read through one linked browser.
+    async fn cookies_from(self: &Arc<Self>, session: &Arc<Session>, site: &str, wait: Duration, asked: bool) -> ExtensionRead {
         let st = session.snapshot();
         let name = browser_name(&st.browser);
         let ask = json!({"type": "cookies.get", "site": site, "synth": self.synth_label(), "asked": asked});
-        let Some(reply) = self.browsers.ask(&session, ask, wait).await else {
+        let Some(reply) = self.browsers.ask(session, ask, wait).await else {
             return ExtensionRead::NoAnswer(format!(
                 "no answer from the user ({name} is waiting for the owner to confirm {site}; try again once they did)"
             ));
@@ -788,14 +853,16 @@ impl Shared {
             session.send(json!({"type": "error", "error": "unsupported_version", "v": VERSION}));
             return;
         }
-        let browser = clean_browser(msg.get("browser").and_then(Value::as_str).unwrap_or(""));
+        let browser = clean_browser(msg.get("browser").and_then(Value::as_str).unwrap_or(""), session.door);
         let ext_version = clean_version(msg.get("ext_version").and_then(Value::as_str).unwrap_or(""));
         let paired = msg.get("paired").and_then(Value::as_bool).unwrap_or(false);
         let device_id = clean_device_id(msg.get("device_id").and_then(Value::as_str).unwrap_or(""));
         let sites = clean_sites(msg.get("sites"));
+        let all_sites = msg.get("all_sites").and_then(Value::as_bool).unwrap_or(false);
         {
             let mut st = session.state.lock().unwrap();
             st.greeted = true;
+            st.all_sites = all_sites;
             st.browser = browser.clone();
             st.install = install.clone();
             st.ext_version = ext_version.clone();
@@ -845,6 +912,9 @@ impl Shared {
             if msg.get("sites").is_some() {
                 st.sites = clean_sites(msg.get("sites"));
             }
+            if let Some(all) = msg.get("all_sites").and_then(Value::as_bool) {
+                st.all_sites = all;
+            }
             st.install.clone()
         };
         if msg.get("paired").and_then(Value::as_bool) == Some(false) {
@@ -875,11 +945,14 @@ impl Shared {
         }
     }
 
-    /// Serve one helper connection until it closes.
-    pub(crate) async fn serve_browser(self: Arc<Self>, conn: Conn) {
+    /// Serve one connection of a helper (or of the Safari extension's
+    /// handler) until it closes. `door` is the endpoint it came in on.
+    pub(crate) async fn serve_browser(self: Arc<Self>, conn: Conn, door: Door) {
         let mut reader = BufReader::new(conn.reader);
-        // The helper's first line names the extension the browser
-        // started it for. Checked by the browser, by the helper, and here.
+        // The first line names the extension the connection is for.
+        // Chromium: checked by the browser, by the helper, and here.
+        // Safari: its handler runs for one extension only and says so.
+        // Each door takes its own callers and no others.
         let open = tokio::time::timeout(OPEN_TIMEOUT, frame::read_line(&mut reader, 4096)).await;
         let origin = match open {
             Ok(Ok(v)) if v["type"] == "host.open" && v["v"] == json!(connect_host::host::VERSION) => {
@@ -887,7 +960,7 @@ impl Shared {
             }
             _ => return,
         };
-        if !connect_host::origin_allowed(&origin) {
+        if !door.admits(&origin) {
             logln!("browser link: a connection for an unknown extension was closed");
             return;
         }
@@ -898,6 +971,7 @@ impl Shared {
         let (tx, mut rx) = mpsc::channel::<Value>(OUT_QUEUE);
         let session = Arc::new(Session {
             id: self.browsers.next_session.fetch_add(1, Ordering::Relaxed) + 1,
+            door,
             tx,
             state: Mutex::new(SessionState::default()),
         });
@@ -952,6 +1026,20 @@ impl Core {
     pub async fn run_browser_link(
         &self,
         endpoint: &connect_host::endpoint::Endpoint,
+        shutdown: watch::Receiver<bool>,
+    ) -> std::io::Result<()> {
+        self.run_browser_door(endpoint, Door::Chromium, shutdown).await
+    }
+
+    /// The same for one door: `Door::Chromium` on the app's own endpoint
+    /// (the helper the Chromium browsers start), `Door::Safari` on the
+    /// endpoint in the app group folder (the handler of the Safari
+    /// extension that ships inside the app). A connection that names the
+    /// other door's caller is closed unheard.
+    pub async fn run_browser_door(
+        &self,
+        endpoint: &connect_host::endpoint::Endpoint,
+        door: Door,
         mut shutdown: watch::Receiver<bool>,
     ) -> std::io::Result<()> {
         // An app that restarts (an update) can come up a moment before
@@ -978,7 +1066,7 @@ impl Core {
             tokio::select! {
                 conn = listener.accept() => match conn {
                     Ok(conn) => {
-                        serving.spawn(self.shared().serve_browser(conn));
+                        serving.spawn(self.shared().serve_browser(conn, door));
                     }
                     Err(e) => {
                         logln!("browser link: accept: {e}");
@@ -994,7 +1082,12 @@ impl Core {
     /// Serve one connection directly (tests, and hosts with their own
     /// listener).
     pub async fn serve_browser(&self, conn: Conn) {
-        self.shared().serve_browser(conn).await
+        self.shared().serve_browser(conn, Door::Chromium).await
+    }
+
+    /// The same for a connection that came in on `door`.
+    pub async fn serve_browser_on(&self, conn: Conn, door: Door) {
+        self.shared().serve_browser(conn, door).await
     }
 
     /// The browsers whose extension has talked to this app, connected or
@@ -1007,7 +1100,9 @@ impl Core {
             .into_iter()
             .map(|b| {
                 let session = live.iter().rev().find(|s| s.state.lock().unwrap().install == b.install);
-                let sites = session.map(|s| s.snapshot().sites).unwrap_or_default();
+                let live = session.map(|s| s.snapshot());
+                let all_sites = live.as_ref().is_some_and(|s| s.all_sites);
+                let sites = live.map(|s| s.sites).unwrap_or_default();
                 BrowserView {
                     install: b.install,
                     browser: b.browser,
@@ -1015,6 +1110,7 @@ impl Core {
                     linked: b.linked,
                     ext_version: b.ext_version,
                     sites,
+                    all_sites,
                     last_seen: b.last_seen,
                 }
             })
