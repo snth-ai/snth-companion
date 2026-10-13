@@ -319,7 +319,17 @@ hidden "Advanced" override that accepts only `https://` addresses.
   equals the value compiled into `connect-core/src/cua_install.rs`. The
   official installer is not used: it cannot install privately (see the top of
   that file). A driver the owner installed themselves is never used, changed
-  or stopped. Raising the pin = change `cua::PINNED_VERSION` and the hash
+  or stopped. When an app update brings a new pin, the copy of the version
+  before keeps working until the new one is downloaded and verified (also
+  when the download fails), a task that is running finishes on the old copy,
+  the next one starts on the new copy, and the old copy is then removed. The
+  pin is 0.34.1 (0.33.1 before). What 0.34 changed for the owner: the
+  pointer's default movement is one arc with a soft glow instead of the old
+  glide, so "Normal" speed is now a move of a fifth of a second to a second
+  and a half; "Fast" and "Relaxed" are fixed lengths as before. Its six
+  motion styles are not offered: the helper can only save a default for them
+  in a settings file it shares with a driver the owner may have installed
+  themselves, which this app never writes. Raising the pin = change `cua::PINNED_VERSION` and the hash
   table in `cua_install.rs` together.
 - macOS permissions for computer control are this app's own (the helper runs
   embedded, as the app's child): the app checks and requests Accessibility and

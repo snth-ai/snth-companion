@@ -78,7 +78,7 @@ Everything on `Core` is `Send + Sync`; clone the handle freely (it is an
 | `set_metered(bool)` | the host reports a metered connection (the core cannot detect it) |
 | `flush()` | write batched state (egress counters) before exit |
 | `pause().await` / `resume()` | pause closes streams, refuses new ones, stops our Cua daemon, reports `paused:true`; resume is explicit |
-| `cua_ensure().await -> InstallState` | make sure the app's pinned driver copy is installed: check it, download + verify + unpack + switch when missing or of another version. Idempotent, one run at a time, safe to retry |
+| `cua_ensure().await -> InstallState` | make sure the app's pinned driver copy is installed: check it, download + verify + unpack + switch when missing or of another version. Idempotent, one run at a time, safe to retry. After an update of the app with a new pin, the copy of the version before keeps running until the new one is in place (see "A new driver version") |
 | `cua_helper_state()` / `subscribe_cua_helper()` | where the install stands (`idle, checking, downloading{received,total}, installing, verifying, ready{version}, failed{code,detail}`), and a `watch` of it |
 | `cua_stop_install()` | the app is quitting: stop a running install |
 | `look_support()` | which "how it looks" settings this computer's driver follows (`cua_look::Support`: the cursor switch, a fixed colour, the motion settings, the preview window), so a host hides the rest |
@@ -223,7 +223,7 @@ and sets the policy to `except`: a loose entry stands for every app whose
 name, bundle id or path contains the word, and now also holds when the call
 reaches the app by its window or process.
 
-What Cua Driver 0.33.1 can do was read in its source at the pinned tag
+What Cua Driver 0.34.1 can do was read in its source at the pinned tag
 (`session_manifest.rs`, `authorization.rs`, `tool.rs`) and checked on our
 daemon (`connectd selftest cua`):
 
@@ -318,6 +318,30 @@ owner may have installed for themselves; `diagnose` asks the daemon on the
 default socket, which is never ours, and reads the system's permission
 database.
 
+## A new driver version (`cua_install.rs`)
+
+The pin is `cua::PINNED_VERSION` (0.34.1) with the SHA-256 of the five
+release archives in `cua_install.rs`. An app version with a new pin finds
+`releases/<new>` missing and installs it next to the copy the version before
+left:
+
+- Until the new copy is in place, `Shared::cua_bin_now` is the old copy
+  (`CuaInstaller::usable_bin`), so computer control keeps working on the
+  driver the owner already had, also when the download fails (the supervisor
+  in the shell tries again later). `cua_detect` reports the old version
+  meanwhile, and "Check the helper" shows it as not the tested one.
+- When the new copy is verified it is moved into place. A daemon that runs
+  from the old copy is stopped at once only when no session holds it;
+  otherwise the session goes on (`CuaSession::outdated` turns true, so the
+  pipe ends the stream between tasks) and the next session starts a daemon
+  from the new copy.
+- The old release dir is removed when nothing runs from it any more
+  (`hold` / `release_old`; on Windows a program that runs cannot be deleted
+  anyway). The proxy of a session (`cua-driver mcp`) is always started from
+  the binary its daemon runs.
+
+`connectd selftest cua` plays this with the real driver.
+
 ## How it looks (`cua_look.rs`)
 
 `settings.computer.look` (`LookSettings`): show the synth's cursor, its
@@ -327,14 +351,15 @@ preset has the same look, the driver's own. It is the app's own business:
 no part of it is in `capabilities`, a change of it does not move
 `settings_rev`, and the synth cannot change it.
 
-What Cua Driver 0.33.1 can do was read in its source at the pinned tag and
+What Cua Driver 0.34.1 can do was read in its source at the pinned tag and
 checked against the real binary (`connectd selftest cua`):
 
 | The owner's choice | How the driver takes it |
 |---|---|
 | cursor on / off | `--no-overlay` on our daemon |
 | colour | `--cursor-theme <id>`. The driver has NO colour setting: its built-in theme is recoloured by the driver, one of nine colours per session, picked from the session's name, and an installed theme keeps the colours it was made with. So each fixed colour is a theme (`ai.snth.connect.sky`, `.violet`, `.rose`, `.green`, `.amber`, `.red`, `.graphite`), and `auto` is the built-in one |
-| speed | `--glide-ms` and `--dwell-ms`: fast 250 / 40, normal the driver's own (speed-based, 80), relaxed 1500 / 400. The synth's action waits for the cursor, so this is also how fast it works |
+| speed | `--glide-ms` and `--dwell-ms`: fast 250 / 40, normal the driver's own (since 0.34 the timing of its default motion style, 0.2 to 1.4 s by distance; dwell 80), relaxed 1500 / 400. The synth's action waits for the cursor, so this is also how fast it works |
+| motion style | not offered. 0.34 has six (`signature_arc`, the new default, `spring_settle`, `magnetic`, `comet_swoop`, `adaptive`, `classic`), three timings and five effects, chosen per session (`set_agent_cursor_motion`, `start_session.cursor_motion`) or by a saved default `cursor.motion.*`. There is no start flag, and the saved default is a key of the shared `~/.cua-driver/config.json`, which the app never writes. The synth may not choose either: `set_agent_cursor_motion` is refused and a `cursor_motion` is taken out of `start_session` |
 | hide when idle | `--idle-hide-ms` (5 s, 15 s = the driver's default, 60 s = its maximum, 0 = never) |
 | animation | `--cursor-reduced-motion on|off`. The driver's `auto` does not look at the system (only `on` changes anything), so "follow the system" is resolved by the app when the daemon starts (`presence::reduced_motion`) |
 | largest screenshot | not a daemon setting we may use (below): `max_image_dimension` is put on each `get_window_state` / `get_desktop_state` call by the pipe, or brought down to the limit. 0 = no rule, the calls pass untouched |
@@ -352,7 +377,8 @@ The synth and the look (`cua_look::gate`, called by `mcp::filter_line`):
 `set_agent_cursor_enabled`, `set_agent_cursor_motion`,
 `set_agent_cursor_theme` are refused with a sentence the
 synth can read (`denied: the cursor's look on this computer is its owner's
-choice ...`), and a `cursor_theme` is taken out of `start_session`. While
+choice ...`), and a `cursor_theme` and a `cursor_motion` are taken out of
+`start_session`. While
 the owner has the cursor switched off, `move_cursor` (which moves nothing
 else) is answered by the app too, because the driver's own answer then
 reads like a fault. Refused
@@ -374,7 +400,10 @@ the owner installed for themselves uses them too:
   the preview window is a start flag, and why the synth's `set_config` is
   never allowed (next section): its `experimental_pip` keys are written to
   that shared file from any session. One consequence stays: if the owner switched the preview
-  window on for their own driver in that file, our daemon shows it too.
+  window on for their own driver in that file, our daemon shows it too. The
+  same holds for a cursor motion default (`cursor.motion.*`, since 0.34)
+  the owner saved for their own driver: our daemon moves the cursor that
+  way too.
 
 The name under the cursor is not a setting. The driver draws the `session`
 label the synth passes on its calls (for a few seconds and when the real
