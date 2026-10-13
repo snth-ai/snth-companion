@@ -90,6 +90,10 @@ URL parameters stage a screen or a state directly:
 | `motion` | the pointer's animation: `system` (default), `always` (always still), `never` (always animated) |
 | `shot` | under Advanced, the largest screenshot the synth gets: `0` (default: the helper decides), `1024`, `1568`, `2048`. Any other value than `0` opens Advanced |
 | `pip` | under Advanced, the experimental preview window: `on`, `off` (default). Exists with `os=macos` only; `on` opens Advanced |
+| `which` | Computer control, "Which apps": `all`, `except` (default here: two picked apps and one word typed by hand in an older version), `only` |
+| `picker` | what "Add apps..." finds: `ok` (default: the apps of the staged system, after a second and a half), `slow` (still reading), `failed`, `missing` (no helper yet), `bare` (no password manager on this computer, so a new list of exceptions starts empty) |
+| `task` | with `state=working`: the name the synth gave its computer task, shown on Status under "Right now" (default `Mia: flights`) |
+| `health` | General, Diagnostics, "Check the helper": `ok` (default), `noperm`, `half` (macOS permissions), `nopointer`, `off`, `paused`, `missing` (no helper), `nodaemon`, `bounded`, `notbounded`, `slow` (never answers), `unknown` (a check this app has no words for) |
 | `wayland` | `1` with `os=linux`: a desktop that draws the pointer itself, where only the on/off switch is offered |
 | `cua` | the helper: `ready` (default), `checking`, `downloading` (frozen at 42%), `installing` (plays the whole automatic install, about 7 s), `verifying`, `failed` (with `why=offline`, `download`, `checksum`, `disk`, `verify`, `unsupported`, `timeout`); the macOS permissions: `noperm`, `half` |
 | `update` | the app's own updates: `checking`, `downloading` (frozen at 40%), `ready` (downloaded, waiting for a quiet moment), `available` (the setting is off), `applying`, `applied` (first run after an update), `failed` (with `step=check`, `download`, `install`), `blocked` (with `block=translocated`, `read_only`, `package`), `flow` (plays check, download, ready), `off`, `unconfigured` |
@@ -107,6 +111,10 @@ Examples: `?screen=logins`, `?screen=logins&logins=offline&ext=closed&os=windows
 `?screen=computer&preset=balanced&color=rose&speed=relaxed&idlehide=0&motion=always`,
 `?screen=computer&cursor=off&lang=ru`, `?screen=computer&shot=1024&pip=on`,
 `?screen=computer&os=windows&shot=2048`, `?screen=computer&os=linux&wayland=1`,
+`?screen=computer&which=only`, `?screen=computer&which=except&picker=failed&lang=ru`,
+`?screen=computer&which=all&os=windows`, `?screen=status&state=working&task=Mia:%20flights`,
+`?screen=general&health=noperm`, `?screen=general&health=bounded&which=only&lang=ru`,
+`?screen=general&health=nodaemon&os=windows`,
 `?screen=apps&apps=noperm&messages=on`, `?screen=apps&os=windows`,
 `?approval=message&lang=ru`.
 `/approval.html` is the approval window's own page.
@@ -342,6 +350,34 @@ hidden "Advanced" override that accepts only `https://` addresses.
   synth's next task: a session that is open keeps the helper it started with.
   The name under the pointer is the helper's, not a setting: it is the label
   the synth gives its task.
+- "Which apps" on the Computer control page (`settings.computer.apps`,
+  `connect-core/src/cua_apps.rs`): every app, every app except these, only
+  these. The core README has the whole account ("Which apps"): "only these"
+  is the helper's own bounded mode, "every app except these" is held by the
+  app's pipe, and both lists are kept. What the shell adds: `computer_apps`
+  reads the picker's list from the helper (a few seconds; the sheet says so)
+  and what a new list of exceptions starts with (the password managers and
+  security settings this computer has; the owner removes what they want),
+  `update_settings` brings the lists to shape (`AppScope::normalize`), the
+  choice does not make a preset "custom" and a preset keeps it. The page
+  says what a limit costs: no picture of the whole screen, no click by
+  screen position, and for "only these" no clipboard and none of the
+  helper's page tools. A change starts with the synth's next task. The old
+  "Blocked apps" list is carried over as exceptions, each word tagged "typed
+  by hand".
+- The task's name. The synth names its computer task (`Mia: flights`), the
+  helper shows that under the synth's pointer, and Status shows it under
+  "Right now" while a computer action is the latest thing (`core.computer_task`,
+  cut by the core exactly as the helper cuts it; React renders it as text).
+  Activity does not show it and the journal does not hold it.
+- "Check the helper" under General, Diagnostics (`cua_health_check`,
+  `connect-core/src/cua_health.rs`): the helper's own health report from the
+  app's own daemon, one line per item in the owner's words (`general.health`
+  in both languages: installed and the tested version, running, the two
+  macOS permissions, reading windows and sending input, taking pictures, the
+  synth's pointer, which apps), and "Copy details" with the helper's English
+  after the core took out every path outside the app's own folder. It asks
+  nothing of a driver the owner runs themselves and raises no system prompt.
 - Pairing links: `snth://pair?code=XXXXXX` only brings the window up and hands
   the code to the UI, which asks the hub who the code belongs to and shows the
   confirmation screen. The token is stored and the link opened only on the
@@ -532,6 +568,30 @@ PowerShell child through COM, classify sending mail like sending a message
 with classic Outlook to verify on; the CI machines have none.
 
 ## Not verified
+
+- "Which apps", with a synth at work. `connectd selftest cua` proved on the
+  real pinned helper (macOS here, Windows in CI) that the bounded daemon
+  lets the chosen app be observed and refuses another running app, the list
+  of every window and the tools the manifest leaves out, and that the app's
+  pipe refuses an excepted app by pid, by window alone and by a window under
+  another app's pid. No tool that acts was run, so nobody has seen a click
+  refused or allowed for real, and nobody has looked at the page in the app.
+  The check by hand: Computer control, "Only these", add one app (say Notes),
+  ask the synth to read a window of Notes (works) and then one of Safari (it
+  says the owner does not allow that app); then "Every app except these"
+  with Notes on the list, and ask for Notes again (refused) and Safari
+  (works). Each choice starts with the synth's next task, five quiet minutes
+  after the last one at the latest.
+- The name under the pointer. The label rule was read in the helper's source
+  and the labels were accepted by the real helper; nobody has seen `Mia:
+  flights` drawn under a moving pointer or on Status. The check by hand: ask
+  the synth to click something on this computer and look under its pointer
+  and at Status, "Right now".
+- "Check the helper", in the app. The self-test ran it against the real
+  helper from a terminal (where macOS gives no permissions, so four lines
+  fail as they should). In the installed app the lines for the permissions
+  and "Started by SNTH Connect" should be green: General, Diagnostics, "Check
+  the helper".
 
 - "How it looks", on a screen. Everything about it was read back from the
   real pinned helper (`connectd selftest cua`, macOS here and Windows in CI):

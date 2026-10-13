@@ -67,7 +67,7 @@ Everything on `Core` is `Send + Sync`; clone the handle freely (it is an
 | `pair_cancel()` | drop the pending pairing |
 | `pending() -> Option<Pending>` | the claimed-not-confirmed pairing (synth_id, synth_url) |
 | `unpair().await` | send `unpair`, await the ack (bounded), then wipe token + grants + state |
-| `apply_preset(Preset) -> rev` | careful / balanced / full. Shared folders and the look are kept |
+| `apply_preset(Preset) -> rev` | careful / balanced / full. Shared folders, the look and the owner's choice of apps are kept |
 | `mutate_settings(FnMut) -> rev` | arbitrary edit; bumps `settings_rev`, persists, pushes a `settings` message. An edit of nothing but `computer.look` is saved without moving the rev and without a message |
 | `settings() -> Settings` | current settings |
 | `add_root(path, write) -> rev` / `remove_root(path) -> rev` | shared folders |
@@ -82,6 +82,9 @@ Everything on `Core` is `Send + Sync`; clone the handle freely (it is an
 | `cua_helper_state()` / `subscribe_cua_helper()` | where the install stands (`idle, checking, downloading{received,total}, installing, verifying, ready{version}, failed{code,detail}`), and a `watch` of it |
 | `cua_stop_install()` | the app is quitting: stop a running install |
 | `look_support()` | which "how it looks" settings this computer's driver follows (`cua_look::Support`: the cursor switch, a fixed colour, the motion settings, the preview window), so a host hides the rest |
+| `computer_apps().await` | the owner's picker for "which apps": every app the driver lists on this computer (`cua_apps::AppChoice`: the identity the driver matches on, the name, running or not, a password manager or security surface or not), read now by the app's own runtime of the driver. A few seconds on a computer with many apps |
+| `computer_task()` | the label the synth gave the computer-control task it is running, in the bounded form the driver shows under the cursor; None when nothing runs. Also in the snapshot |
+| `cua_health().await` | "check the helper": the driver's own `health_report` from OUR daemon plus what the app knows itself (`cua_health::Report`: items with a fixed id, a verdict and a code the host has words for, and a scrubbed text for "copy details") |
 | `cua_driver_command()` / `cua_theme_dir()` | a command of our driver with the environment every driver process of ours gets, and the folder our driver reads cursor themes from |
 | `computer_permissions()` / `request_computer_permissions()` | macOS Accessibility + Screen Recording of the HOST app (what the embedded driver works under): read-only status, and the system prompts |
 | `cua_install_argv()` / `cua_permissions_grant_argv()` / `cua_permissions_status()` | for a host that attaches to the user's own driver (`CuaAttach::User`): argv the host runs, and the read-only CLI status |
@@ -116,7 +119,8 @@ it is started on.
 - `subscribe() -> broadcast::Receiver<CoreEvent>`: `Link{state,detail}`,
   `Settings{rev}`, `Paired{synth_id}`, `Unpaired`, `Paused{paused}`,
   `Browsers` (an extension connected, left, was linked or unlinked, or the
-  sites it may read changed).
+  sites it may read changed), `ComputerTask` (the name of the running
+  computer-control task changed, or there is none any more).
 - `subscribe_journal() -> broadcast::Receiver<Entry>` and
   `recent_journal() -> Vec<Entry>`: the action journal (time, capability,
   action, target, outcome, bytes, count). No content, no cookie values, no
@@ -128,7 +132,8 @@ it is started on.
 
 `Snapshot { link_state, paired, synth_id, synth_name, synth_url,
 synth_version, idle_seconds, screen_locked, paused, metered, settings,
-settings_rev, cua_version, cua_status, egress_month, egress_bytes }`.
+settings_rev, cua_version, cua_status, computer_task, egress_month,
+egress_bytes }`.
 `link_state` is `unpaired | connecting | linked | reconnecting | paused`.
 While the link is down, `synth_id` / `synth_name` come from the stored
 pairing. All fields are `Serialize`, so a Tauri command can return the
@@ -166,8 +171,8 @@ before apps existed loads with apps off.
 `Settings` covers net (enabled, mode all/ask/list, domains, local-network
 toggle, monthly cap, skip-on-metered), cookies (enabled, mode), computer
 (enabled, mode ask/auto/away, foreground never/idle/ask/always, away-idle
-minutes, app blocklist, tool denylist, and `look`: how it looks on the
-screen, see "How it looks"), files (enabled, roots with a write
+minutes, `apps`: which apps the synth may use, see "Which apps", tool
+denylist, and `look`: how it looks on the screen, see "How it looks"), files (enabled, roots with a write
 flag, ask-on-write), apps (enabled, mode ask/ask_new/auto, per-app switches
 that differ from the default). `settings_rev` grows by one on every change;
 writes are atomic.
@@ -185,9 +190,9 @@ writes are atomic.
   browser DB and the extension of a browser the owner linked; values never
   logged or journaled.
 - **computer**: open gate (catalog free, `ask` needs a grant, `away` needs
-  idle), and a per-`tools/call` gate in the mcp pipe (tool denylist, app
-  blocklist, foreground delivery per `never/idle/ask/always`, and the
-  owner's look: see "How it looks"). Our own
+  idle), and a per-`tools/call` gate in the mcp pipe (tool denylist, the
+  owner's choice of apps: see "Which apps", foreground delivery per
+  `never/idle/ask/always`, and the owner's look: see "How it looks"). Our own
   private Cua daemon on a private socket; the user's daemon is never touched.
   With `cua_private_root` the driver itself is the app's own copy too
   (`cua_install.rs`: pinned version, SHA-256 pinned in the source, private
@@ -199,6 +204,119 @@ writes are atomic.
   apps".
 
 The synth has no message that changes settings or grants.
+
+## Which apps (`cua_apps.rs`)
+
+`settings.computer.apps` (`AppScope`): `policy` = `all` (every app),
+`except` (every app except the ones on the `except` list) or `only` (only
+the ones on the `only` list). Both lists are kept whatever the policy is.
+An entry (`AppRef`) is the identity the driver matches on (the bundle id on
+macOS, the path of the program on Windows and Linux) and a name for the
+owner. The synth is told none of it: nothing is in `capabilities`. A change
+does move `settings_rev`. A preset keeps the choice, like the shared
+folders.
+
+A settings file of an older version had `computer.app_blocklist`, words the
+owner typed, each refusing a call that NAMED such an app. `Settings::migrate`
+(run when the file is loaded) moves them to `apps.except` as `loose` entries
+and sets the policy to `except`: a loose entry stands for every app whose
+name, bundle id or path contains the word, and now also holds when the call
+reaches the app by its window or process.
+
+What Cua Driver 0.33.1 can do was read in its source at the pinned tag
+(`session_manifest.rs`, `authorization.rs`, `tool.rs`) and checked on our
+daemon (`connectd selftest cua`):
+
+| The owner's choice | Who holds it |
+|---|---|
+| every app | nobody: the driver's standard mode, as before |
+| only these | THE DRIVER. Our daemon is started with `--permission-mode bounded --capability-manifest <daemon dir>/apps.yaml --approve-capability-manifest`. The manifest (`Scope::manifest`) is deny by default: `allow.tools` = `MANIFEST_TOOLS`, `resources.apps` = one entry per chosen app (`bundle_id` or `executable`, `launch: true`, `windows: all`, `terminate: driver_launched`), `resources.files.write` = the folders shared for writing, `resources.desktop.display: false`, `expires_after: 24h`, `idle_timeout: 24h`. The driver then answers `bounded_resource_outside_manifest` for a window or process of any other app, and for everything that names no process: the unfiltered `list_windows`, input by screen position. A tool that is not listed is refused by name. The pipe decides the same once more, before the driver |
+| every app except these | THE PIPE. The driver has no such mode (a manifest only allows). Every `tools/call` is resolved to an app and refused when the app is excluded |
+
+The pipe's decision (`cua_apps::decide`, called by `mcp::filter_scoped`) is
+one function for both restricted choices. Every tool of the driver has a
+kind (`TOOLS`; a tool that is not there is refused while the apps are
+limited, and fails the self-test):
+
+- a tool that touches no app (sessions, sizes, the driver's own state): passes;
+- a tool for a window (`get_window_state`, `click`, `type_text`, `zoom`,
+  `invoke_menu`, `kill_app`, `page`, ...): every pid it names (`pid`,
+  `target.pid`) and the owner of every window it names (`window_id`,
+  `target.window_id`) must be an app the synth may use. A call that names
+  neither, an `element_token` alone included, is refused, and so is a
+  window or process that is no app the driver lists;
+- the whole screen (`get_desktop_state`, `get_accessibility_tree`,
+  `escalate_session`, `scope: "desktop"`, `target.kind: "desktop"`): refused.
+  A picture of the whole screen shows every app, and a click by screen
+  position lands wherever it lands; the driver has no hit test to ask;
+- `launch_app`: the app it names (bundle id, path, or a name looked up in the
+  driver's list) must be allowed. The driver does not check this even in
+  bounded mode: the manifest's `launch` flag is read and never used;
+- `list_apps` and `list_windows`: answered by the app itself, from its own
+  reading of the driver's lists, without the apps the synth may not use (the
+  bounded daemon refuses both outright);
+- the page tools (`get_browser_state`, `browser_*`): in `only` refused (a
+  manifest that allows them may not allow the window tools); in `except` a
+  call that binds a browser window is checked by that window, and a call by
+  `target_id` passes, because the driver mints a target id only for such a
+  bind on the same connection;
+- the clipboard: refused in `only` (the bounded driver refuses the system
+  clipboard under any manifest), not limited in `except`.
+
+Refusals start with `denied: ` and tell the synth what to say to the owner;
+they never name an app. The journal gets a fixed reason, never an app or a
+window.
+
+`Directory` is the app's own reading of the driver's lists: a second runtime
+of the same driver binary (`cua-driver mcp --direct --embedded
+--no-overlay`: no daemon, no socket) that only ever runs `list_apps` and
+`list_windows`. `pid -> app` is trusted for a minute, `window -> pid` for
+five seconds; an unknown pid or window makes it read again, at most every
+two seconds. It is started on first need and stopped when the last
+computer-control session ends.
+
+A scope belongs to a daemon for its whole life. `Shared::cua_session` starts
+a new daemon when the owner's choice differs from the one the running daemon
+was started with, or when a bounded daemon is half a day old (`RENEW_AFTER`;
+its permissions run out after a day and cannot be extended), but only while
+no session holds it. The synth keeps its stream open between tasks, so the
+pipe ends a stream itself when a call arrives after five quiet minutes
+(the driver has ended every named session by then) on a daemon that is out
+of date: the call is answered `unavailable: SNTH Connect is restarting its
+helper ...; call again`, and the next call opens a new stream on a new
+daemon. The same now carries a new look into effect.
+
+What bounded mode costs, measured on the pinned driver: every call that
+names a process makes the driver run its own `list_apps` first (to learn the
+bundle id), which took 1 to 3 seconds on a Mac with 94 apps; no picture of
+the whole screen; no clipboard tools; no page tools; `move_cursor` only with
+a window target; `kill_app` never matches on macOS (the driver compares it
+by program path, the manifest names a bundle id).
+
+`cua_apps::choices` is the picker's list and `default_exclusions` what a
+list of exceptions starts with: the apps on this computer whose name is in
+`SENSITIVE_APPS` (password managers, Keychain Access, Passwords, System
+Settings, Windows Security ...). The driver protects none of them by
+itself: its "protected host" is its own app only.
+
+## Check the helper (`cua_health.rs`)
+
+`Core::cua_health` asks OUR daemon for the driver's `health_report` over a
+connection of the app's own, and adds what the app knows: whether the
+installed version is the pinned one, whether the synth's pointer can be
+drawn (`get_agent_cursor_state`), and the owner's choice of apps (for
+`only`: whether the daemon really refuses the list of every window). With
+computer control off or the app paused the daemon is not started for it.
+The driver's hints are written for `CuaDriver.app`, so the report carries
+ids and codes for the host's own words, and the driver's English only in
+`details`, after `scrub` (the app's data folder becomes `<app-data>`, a line
+is cut where any other path begins).
+
+`cua-driver doctor` and `cua-driver diagnose` are not used. On macOS
+`doctor` unloads and deletes a LaunchAgent and a script of a driver the
+owner may have installed for themselves; `diagnose` asks the daemon on the
+default socket, which is never ours, and reads the system's permission
+database.
 
 ## How it looks (`cua_look.rs`)
 
@@ -259,10 +377,19 @@ the owner installed for themselves uses them too:
   window on for their own driver in that file, our daemon shows it too.
 
 The name under the cursor is not a setting. The driver draws the `session`
-label the synth passes on its calls (28 characters at most, for a few
-seconds and when the real pointer is over the cursor), in a pill tinted with
-the session's colour. Neither the text nor the tint can be set, by a flag, a
-tool or a theme, so the app offers neither.
+label the synth passes on its calls (for a few seconds and when the real
+pointer is over the cursor), in a pill tinted with the session's colour.
+Neither the text nor the tint can be set, by a flag, a tool or a theme, so
+the app offers neither. The driver takes any text as a label (only an empty
+one, `default` and one that starts with `__cua_runtime_` are not labels) and
+shows it after `sanitize_session_label` (`cursor-overlay/src/session_badge.rs`):
+control characters dropped, runs of white space made one space, at most 28
+characters (27 and an ellipsis beyond), then cut again to the width of the
+pill. Its font has Latin, Cyrillic and Greek letters. The synth is told to
+start the label with its own name (`DesktopOwnerNote` on the synth side).
+The app keeps the label of the running task in memory in that same bounded
+form (`core::task_label`, `Core::computer_task`) for the status line, and
+nowhere else: the journal names the tool, never the label.
 
 The themes are compiled into the core (`assets/cursor-themes/*.cua-theme`,
 14 KB each). `scripts/build-cursor-themes.py` builds them: it takes the
