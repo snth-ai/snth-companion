@@ -13,7 +13,15 @@
 //!     tools only (`get_screen_size`, `list_windows`)
 //!  4. Windows: prove that a child made by the core's spawn helper has no
 //!     console window (nothing can flash on the screen)
-//!  5. how it looks, against the real driver, by reading it back (nothing
+//!  5. what the synth is never allowed to trigger, against the real
+//!     driver's catalog: every tool and argument of this driver that
+//!     installs, records, updates, configures or writes a file is
+//!     classified in `cua_guard` (an unclassified one FAILS the test, so a
+//!     new driver version cannot bring one in unseen); each tool on the
+//!     never list is refused by the app's filter with words for the owner
+//!     and never reaches the driver; a file the driver writes is held to
+//!     the folders shared for writing
+//!  6. how it looks, against the real driver, by reading it back (nothing
 //!     is clicked, typed or moved, so no cursor is ever drawn):
 //!     the cursor themes the app ships are accepted by the pinned driver
 //!     and land in OUR driver home; the owner's look is what every session
@@ -22,7 +30,7 @@
 //!     owner's limit; a new look waits for the open session to end and
 //!     then holds; the look survives a restart of the app; the cursor can
 //!     be switched off; a driver the user runs themselves keeps its files
-//!  6. stop the daemon and check its endpoint is gone
+//!  7. stop the daemon and check its endpoint is gone
 //!
 //! `--preview-window` (macOS, by hand only) also starts the daemon once
 //! with the experimental preview window, which shows that window on the
@@ -326,6 +334,7 @@ async fn exercise(core: &Core, root: &std::path::Path) -> Result<(), String> {
         }
     }
 
+    guard(core, root).await?;
     let endpoint = look(core, root, endpoint).await?;
 
     step("stopping the daemon removes its endpoint");
@@ -337,6 +346,162 @@ async fn exercise(core: &Core, root: &std::path::Path) -> Result<(), String> {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     Err(format!("the endpoint {endpoint} is still served after the daemon was stopped"))
+}
+
+// ---------------------------------------------------------------------
+// What the synth is never allowed to trigger (`connect_core::cua_guard`),
+// held against the catalog of the driver that is really installed. Every
+// call here stops at the app's filter or is read-only: nothing is
+// recorded, installed, updated or written.
+// ---------------------------------------------------------------------
+
+async fn guard(core: &Core, root: &std::path::Path) -> Result<(), String> {
+    use connect_core::cua_guard;
+    let shared = core.shared();
+
+    step("every tool of this driver that installs, records, updates, configures or writes a file is classified");
+    let mut session = Session::open(&shared).await?;
+    let listed = session
+        .synth_raw("tools/list", json!({}))
+        .await?
+        .ok_or("tools/list was not forwarded")?;
+    let tools: Vec<Value> = listed.get("tools").and_then(Value::as_array).cloned().unwrap_or_default();
+    let names: Vec<&str> = tools.iter().filter_map(|t| t.get("name").and_then(Value::as_str)).collect();
+    let unknown = cua_guard::unclassified(&tools);
+    if !unknown.is_empty() {
+        return Err(format!(
+            "this driver has tools or arguments of these kinds that nobody has read and decided: {}. Read each one in the driver's source, then add it to NEVER, WRITE_ARGS, REVIEWED_TOOLS or REVIEWED_ARGS in crates/connect-core/src/cua_guard.rs",
+            unknown.join(", ")
+        ));
+    }
+    println!(
+        "{} tools: {} never allowed, {} read and allowed, {} write arguments held to the shared folders, nothing unclassified",
+        names.len(),
+        cua_guard::NEVER.len(),
+        cua_guard::REVIEWED_TOOLS.len(),
+        cua_guard::WRITE_ARGS.len(),
+    );
+
+    step("the synth is refused what it is never allowed to trigger");
+    let recording = root.join("recording");
+    let recording_s = recording.to_string_lossy().to_string();
+    for never in cua_guard::NEVER {
+        if !names.contains(&never.tool) {
+            println!("{}: not in this driver's catalog", never.tool);
+            continue;
+        }
+        let arguments = match never.tool {
+            "start_recording" => json!({"session": "task-guard", "output_dir": recording_s, "record_video": true}),
+            "install_ffmpeg" => json!({"confirm": true}),
+            "install_extension" => json!({"name": "perception", "confirm": true}),
+            "set_config" => json!({"experimental_pip": true}),
+            "replay_trajectory" => json!({"dir": recording_s}),
+            _ => json!({}),
+        };
+        match session.synth(never.tool, arguments).await? {
+            Synth::Refused(why) if why.starts_with("denied: ") && why.contains("owner") => {
+                println!("{}: refused ({why})", never.tool);
+            }
+            Synth::Refused(why) => {
+                return Err(format!("{}: refused without words for the owner: {why:?}", never.tool));
+            }
+            Synth::Answer(result) => return Err(format!("{} reached the driver: {}", never.tool, short(&result))),
+        }
+    }
+    if recording.exists() {
+        return Err(format!("{} was created", recording.display()));
+    }
+    let journal = serde_json::to_string(&core.recent_journal()).unwrap_or_default();
+    if !journal.contains("denied: never allowed for the synth") {
+        return Err("the refusals are not in the journal".into());
+    }
+
+    step("what was read and found safe still passes");
+    for (tool, why) in cua_guard::REVIEWED_TOOLS {
+        // The download is the write rule's business, below.
+        if *tool == "browser_download" {
+            continue;
+        }
+        let line = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": {"session": "task-guard"}}});
+        match filtered(&shared, &line).await? {
+            Filtered::Forwarded(_) => println!("{tool}: passes ({why})"),
+            Filtered::Refused(said) => return Err(format!("{tool} is refused: {said}")),
+        }
+    }
+    // The read-only one for real: nothing is being recorded.
+    match session.synth("get_recording_state", json!({"session": "task-guard"})).await? {
+        Synth::Answer(result) if result.get("isError").and_then(Value::as_bool) != Some(true) => {
+            println!("get_recording_state: {}", short(&result));
+            if result.pointer("/structuredContent/recording").and_then(Value::as_bool) == Some(true) {
+                return Err("the driver says a recording is running".into());
+            }
+        }
+        Synth::Answer(result) => return Err(format!("get_recording_state failed: {}", short(&result))),
+        Synth::Refused(why) => return Err(format!("get_recording_state was refused: {why}")),
+    }
+
+    step("a file the driver writes goes into a folder shared for writing, or nowhere");
+    for arg in cua_guard::WRITE_ARGS {
+        let has = tools.iter().any(|t| t.pointer(&format!("/inputSchema/properties/{arg}")).is_some());
+        println!("{arg}: {}", if has { "in this driver's catalog" } else { "not in this driver's catalog" });
+    }
+    let (rw, ro, outside) = (root.join("guard shared"), root.join("guard read only"), root.join("guard outside"));
+    for dir in [&rw, &ro, &outside] {
+        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    }
+    let files_before = core.settings().files;
+    core.add_root(rw.clone(), true);
+    core.add_root(ro.clone(), false);
+    let inside = connect_core::files::plain(&std::fs::canonicalize(&rw).map_err(|e| e.to_string())?);
+    let path = |dir: &std::path::Path, name: &str| dir.join(name).to_string_lossy().to_string();
+    let result = async {
+        for (what, tool, arg, arguments, allowed) in [
+            ("a screenshot into the shared folder", "get_window_state", "screenshot_out_file", json!({"pid": 1, "window_id": 1, "screenshot_out_file": path(&rw, "shot.png")}), true),
+            ("a screenshot into a read-only folder", "get_window_state", "screenshot_out_file", json!({"pid": 1, "window_id": 1, "screenshot_out_file": path(&ro, "shot.png")}), false),
+            ("a screenshot outside the shared folders", "get_desktop_state", "screenshot_out_file", json!({"screenshot_out_file": path(&outside, "shot.png")}), false),
+            ("a screenshot into the home folder by ~", "get_desktop_state", "screenshot_out_file", json!({"screenshot_out_file": "~/shot.png"}), false),
+            ("a marked screenshot outside the shared folders", "click", "debug_image_out", json!({"pid": 1, "window_id": 1, "x": 1, "y": 1, "debug_image_out": path(&outside, "mark.png")}), false),
+            ("a download outside the shared folders", "browser_download", "destination_root", json!({"session": "task-guard", "target_id": "t", "tab_id": "t", "ref": "p1:1", "destination_root": outside.to_string_lossy()}), false),
+            ("a download into the shared folder", "browser_download", "destination_root", json!({"session": "task-guard", "target_id": "t", "tab_id": "t", "ref": "p1:1", "destination_root": rw.to_string_lossy()}), true),
+        ] {
+            // Only the filter is asked: nothing is captured or downloaded.
+            let line = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": arguments}});
+            match (filtered(&shared, &line).await?, allowed) {
+                (Filtered::Forwarded(message), true) => {
+                    let got = message.pointer(&format!("/params/arguments/{arg}")).and_then(Value::as_str).unwrap_or("");
+                    if !std::path::Path::new(got).starts_with(&inside) {
+                        return Err(format!("{what}: forwarded as {got:?}, which is not inside {}", inside.display()));
+                    }
+                    println!("{what}: passes");
+                }
+                (Filtered::Refused(why), false) if why.starts_with("denied: ") && why.contains("owner") => {
+                    println!("{what}: refused");
+                }
+                (Filtered::Refused(why), false) => return Err(format!("{what}: refused without words for the owner: {why:?}")),
+                (Filtered::Refused(why), true) => return Err(format!("{what} was refused: {why}")),
+                (Filtered::Forwarded(message), false) => return Err(format!("{what} was let through: {message}")),
+            }
+        }
+        // Files switched off: nothing may be written at all.
+        core.mutate_settings(|s| s.files.enabled = false);
+        let line = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "get_desktop_state", "arguments": {"screenshot_out_file": path(&rw, "shot.png")}}});
+        match filtered(&shared, &line).await? {
+            Filtered::Refused(why) if why.contains("turned off") => println!("with files switched off: refused"),
+            Filtered::Refused(why) => Err(format!("with files switched off: refused for another reason: {why}"))?,
+            Filtered::Forwarded(message) => Err(format!("with files switched off a screenshot file was let through: {message}"))?,
+        }
+        Ok(())
+    }
+    .await;
+    core.mutate_settings(|s| s.files = files_before.clone());
+    session.close().await;
+    result?;
+    for dir in [&rw, &ro, &outside] {
+        if std::fs::read_dir(dir).map(|d| d.count()).unwrap_or(0) != 0 {
+            return Err(format!("something was written into {}", dir.display()));
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------
