@@ -92,6 +92,9 @@ pub const REVIEWED_ARGS: &[(&str, &str, &str)] = &[
     ("browser_set_input_files", "files", "files handed to a page's file field: read, not written"),
     ("browser_pointer", "destination_ref", "an element of the page, not a place on disk"),
     ("invoke_menu", "path", "the names of a menu and its item, not a place on disk"),
+    ("launch_app", "launch_path", "the program to start, as list_apps gave it (Windows, Linux): started, not written"),
+    ("launch_app", "path", "the program to start (Windows): started, not written"),
+    ("drag", "path", "the points a drag passes through (Linux), not a place on disk"),
     ("start_recording", "output_dir", "the tool itself is never allowed"),
     ("replay_trajectory", "dir", "the tool itself is never allowed"),
 ];
@@ -252,6 +255,9 @@ mod tests {
             tool("browser_download", &["destination_root", "ref"]),
             tool("browser_pointer", &["destination_ref", "ref"]),
             tool("invoke_menu", &["pid", "path"]),
+            // Windows and Linux.
+            tool("launch_app", &["name", "launch_path", "path"]),
+            tool("drag", &["from_x", "path"]),
             tool("start_recording", &["output_dir", "record_video"]),
             tool("stop_recording", &["session"]),
             tool("get_recording_state", &["session"]),
