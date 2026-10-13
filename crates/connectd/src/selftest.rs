@@ -13,7 +13,20 @@
 //!     tools only (`get_screen_size`, `list_windows`)
 //!  4. Windows: prove that a child made by the core's spawn helper has no
 //!     console window (nothing can flash on the screen)
-//!  5. stop the daemon and check its endpoint is gone
+//!  5. how it looks, against the real driver, by reading it back (nothing
+//!     is clicked, typed or moved, so no cursor is ever drawn):
+//!     the cursor themes the app ships are accepted by the pinned driver
+//!     and land in OUR driver home; the owner's look is what every session
+//!     gets; the synth's attempts to change it are refused by the app's own
+//!     filter and change nothing; a screenshot is asked for within the
+//!     owner's limit; a new look waits for the open session to end and
+//!     then holds; the look survives a restart of the app; the cursor can
+//!     be switched off; a driver the user runs themselves keeps its files
+//!  6. stop the daemon and check its endpoint is gone
+//!
+//! `--preview-window` (macOS, by hand only) also starts the daemon once
+//! with the experimental preview window, which shows that window on the
+//! screen for a moment.
 //!
 //! Everything lives under one temp dir and a private endpoint. A driver or
 //! daemon the user runs themselves is never used or touched. Exit code 0 =
@@ -26,8 +39,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use connect_core::grant::{Approval, ApprovalFuture, ApprovalRequest, Approver};
-use connect_core::settings::ComputerMode;
-use connect_core::{cookies, Core, CoreConfig, CuaAttach, InstallState, MemSecretStore, MultiReader};
+use connect_core::settings::{ComputerMode, CursorColor, CursorSpeed, LookSettings, ReducedMotion};
+use connect_core::{cookies, Core, CoreConfig, CuaAttach, CuaSession, InstallState, MemSecretStore, MultiReader, Shared};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
@@ -99,7 +112,7 @@ pub async fn run(args: &[String]) -> i32 {
             0
         }
         _ => {
-            eprintln!("usage: connectd selftest cua [--root <dir>] [--keep]\n       connectd selftest apps [--touch]\n       connectd selftest host [--helper <path>] [--system]\n       connectd selftest safari --relay <path> [--group <id>] (macOS)");
+            eprintln!("usage: connectd selftest cua [--root <dir>] [--keep] [--preview-window]\n       connectd selftest apps [--touch]\n       connectd selftest host [--helper <path>] [--system]\n       connectd selftest safari --relay <path> [--group <id>] (macOS)");
             2
         }
     }
@@ -112,6 +125,7 @@ fn step(text: &str) {
 async fn cua(args: &[String]) -> Result<(), String> {
     let mut root: Option<PathBuf> = None;
     let mut keep = false;
+    let mut preview_window = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -120,6 +134,7 @@ async fn cua(args: &[String]) -> Result<(), String> {
                 i += 1;
             }
             "--keep" => keep = true,
+            "--preview-window" => preview_window = true,
             other => return Err(format!("unknown option {other}")),
         }
         i += 1;
@@ -132,8 +147,38 @@ async fn cua(args: &[String]) -> Result<(), String> {
     std::fs::create_dir_all(&root).map_err(|e| format!("create {}: {e}", root.display()))?;
     println!("root: {}", root.display());
 
-    let core = Core::new(CoreConfig {
-        settings_path: None,
+    let users_driver = UsersDriver::read();
+    let core = selftest_core(&root);
+    // Computer control on, no questions: the daemon gate must let us in.
+    core.mutate_settings(|s| {
+        s.computer.enabled = true;
+        s.computer.mode = ComputerMode::Auto;
+        s.computer.look = LookSettings::default();
+    });
+
+    let mut result = exercise(&core, &root).await;
+    if result.is_ok() && preview_window {
+        result = preview(&core).await;
+    }
+
+    step("stop the daemon");
+    core.cua_stop_daemon().await;
+    if result.is_ok() {
+        step("a driver the user runs themselves kept its files");
+        result = users_driver.unchanged();
+    }
+    if !keep {
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    result
+}
+
+/// The core the self-test drives: the app's own driver copy under `root`,
+/// settings in a file there (so a second core can prove what survives a
+/// restart), nothing asked of anybody.
+fn selftest_core(root: &std::path::Path) -> Core {
+    Core::new(CoreConfig {
+        settings_path: Some(root.join("settings.json")),
         journal_path: None,
         approver: Arc::new(DenyAll),
         cookies: Arc::new(MultiReader {
@@ -148,24 +193,10 @@ async fn cua(args: &[String]) -> Result<(), String> {
         cua_bin: String::new(),
         cua_private_root: Some(root.join("cua")),
         cua_attach: CuaAttach::Private,
-    });
-    // Computer control on, no questions: the daemon gate must let us in.
-    core.mutate_settings(|s| {
-        s.computer.enabled = true;
-        s.computer.mode = ComputerMode::Auto;
-    });
-
-    let result = exercise(&core).await;
-
-    step("stop the daemon");
-    core.cua_stop_daemon().await;
-    if !keep {
-        let _ = std::fs::remove_dir_all(&root);
-    }
-    result
+    })
 }
 
-async fn exercise(core: &Core) -> Result<(), String> {
+async fn exercise(core: &Core, root: &std::path::Path) -> Result<(), String> {
     step("install the pinned driver through the core's installer");
     match core.cua_ensure().await {
         InstallState::Ready { version } => println!("driver {version} at {}", core.cua_bin()),
@@ -295,6 +326,8 @@ async fn exercise(core: &Core) -> Result<(), String> {
         }
     }
 
+    let endpoint = look(core, root, endpoint).await?;
+
     step("stopping the daemon removes its endpoint");
     core.cua_stop_daemon().await;
     for _ in 0..50 {
@@ -304,6 +337,519 @@ async fn exercise(core: &Core) -> Result<(), String> {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     Err(format!("the endpoint {endpoint} is still served after the daemon was stopped"))
+}
+
+// ---------------------------------------------------------------------
+// How it looks. Everything is proved by reading it back from the real
+// driver (`get_agent_cursor_state`, `cursor-theme list`); no tool that
+// acts is called, so the driver never draws a cursor.
+// ---------------------------------------------------------------------
+
+/// One computer-control session the way the app runs one: it holds our
+/// daemon (`Shared::cua_session`), talks to it through the core's proxy
+/// spawn, and every line "from the synth" goes through the app's own
+/// filter (`mcp::filter_line`) first.
+struct Session {
+    shared: Arc<Shared>,
+    held: CuaSession,
+    child: tokio::process::Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    next_id: u64,
+}
+
+/// What became of one call "from the synth".
+enum Synth {
+    /// The filter let it through (maybe changed); the driver's result.
+    Answer(Value),
+    /// The filter refused it; the driver never saw it.
+    Refused(String),
+}
+
+impl Session {
+    async fn open(shared: &Arc<Shared>) -> Result<Session, String> {
+        let held = shared.cua_session().await.map_err(|e| format!("no daemon for a session: {e}"))?;
+        let mut child = connect_core::mcp::spawn_proxy(shared, &held.socket, held.embedded)
+            .map_err(|e| format!("spawn the mcp proxy: {e}"))?;
+        let mut stdin = child.stdin.take().ok_or("the proxy has no stdin")?;
+        let mut stdout = BufReader::new(child.stdout.take().ok_or("the proxy has no stdout")?);
+        call(
+            &mut stdin,
+            &mut stdout,
+            1,
+            "initialize",
+            json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "connect-selftest", "version": env!("CARGO_PKG_VERSION")}
+            }),
+        )
+        .await?;
+        send(&mut stdin, &json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).await?;
+        Ok(Session { shared: shared.clone(), held, child, stdin, stdout, next_id: 10 })
+    }
+
+    fn endpoint(&self) -> &str {
+        &self.held.socket
+    }
+
+    /// One `tools/call` as the synth would send it.
+    async fn synth(&mut self, tool: &str, arguments: Value) -> Result<Synth, String> {
+        self.next_id += 1;
+        let id = self.next_id;
+        let line = json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": tool, "arguments": arguments}});
+        match filtered(&self.shared, &line).await? {
+            Filtered::Refused(why) => Ok(Synth::Refused(why)),
+            Filtered::Forwarded(message) => {
+                send(&mut self.stdin, &message).await?;
+                Ok(Synth::Answer(answer(&mut self.stdout, id, tool).await?))
+            }
+        }
+    }
+
+    /// Any other request as the synth would send it (`tools/list`).
+    async fn synth_raw(&mut self, method: &str, params: Value) -> Result<Option<Value>, String> {
+        self.next_id += 1;
+        let id = self.next_id;
+        let line = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        match filtered(&self.shared, &line).await? {
+            Filtered::Refused(_) => Ok(None),
+            Filtered::Forwarded(message) => {
+                send(&mut self.stdin, &message).await?;
+                Ok(Some(answer(&mut self.stdout, id, method).await?))
+            }
+        }
+    }
+
+    /// The cursor of one of this connection's sessions, as the driver
+    /// reports it: Ok(state), or Err(the driver's refusal).
+    async fn cursor(&mut self, arguments: Value) -> Result<Result<Value, String>, String> {
+        match self.synth("get_agent_cursor_state", arguments).await? {
+            Synth::Refused(why) => Err(format!("reading the cursor state was refused by the filter: {why}")),
+            Synth::Answer(result) => {
+                if result.get("isError").and_then(Value::as_bool) == Some(true) {
+                    return Ok(Err(short(&result)));
+                }
+                result
+                    .get("structuredContent")
+                    .cloned()
+                    .map(Ok)
+                    .ok_or_else(|| format!("get_agent_cursor_state answered without a state: {}", short(&result)))
+            }
+        }
+    }
+
+    async fn close(mut self) {
+        drop(self.stdin);
+        let _ = tokio::time::timeout(Duration::from_secs(10), self.child.wait()).await;
+        let _ = self.child.start_kill();
+    }
+}
+
+enum Filtered {
+    Forwarded(Value),
+    Refused(String),
+}
+
+/// Send one line through the app's own filter.
+async fn filtered(shared: &Arc<Shared>, line: &Value) -> Result<Filtered, String> {
+    let bytes = serde_json::to_vec(line).map_err(|e| e.to_string())?;
+    match connect_core::mcp::filter_line(shared, false, &bytes).await {
+        connect_core::mcp::Gate::Forward(out) => serde_json::from_slice(&out)
+            .map(Filtered::Forwarded)
+            .map_err(|e| format!("the filter forwarded something that is not JSON: {e}")),
+        connect_core::mcp::Gate::Refuse(error) => Ok(Filtered::Refused(
+            error.pointer("/error/message").and_then(Value::as_str).unwrap_or("").to_string(),
+        )),
+        connect_core::mcp::Gate::Drop(why) => Err(format!("the filter dropped a well-formed call: {why}")),
+    }
+}
+
+/// What a session's cursor must read back as.
+struct Expect {
+    theme: &'static str,
+    reduced: &'static str,
+    glide_ms: f64,
+    dwell_ms: f64,
+    idle_hide_ms: f64,
+}
+
+fn check_cursor(state: &Value, want: &Expect, whose: &str) -> Result<(), String> {
+    let text = |path: &str| state.pointer(path).and_then(Value::as_str).unwrap_or("?").to_string();
+    let number = |path: &str| state.pointer(path).and_then(Value::as_f64).unwrap_or(-1.0);
+    let got = (
+        text("/theme/id"),
+        text("/theme/reduced_motion"),
+        number("/motion/glide_duration_ms"),
+        number("/motion/dwell_after_click_ms"),
+        number("/motion/idle_hide_ms"),
+    );
+    println!(
+        "{whose}: theme {} (fallback {}), reduced motion {}, glide {} ms, dwell {} ms, idle hide {} ms, enabled {}",
+        got.0,
+        state.pointer("/theme/fallback").unwrap_or(&Value::Null),
+        got.1,
+        got.2,
+        got.3,
+        got.4,
+        state.get("enabled").unwrap_or(&Value::Null),
+    );
+    if !state.pointer("/theme/fallback").is_none_or(Value::is_null) {
+        return Err(format!("{whose}: the driver fell back from the theme: {state}"));
+    }
+    if state.get("enabled").and_then(Value::as_bool) != Some(true) {
+        return Err(format!("{whose}: the cursor is not enabled: {state}"));
+    }
+    let want_tuple = (
+        want.theme.to_string(),
+        want.reduced.to_string(),
+        want.glide_ms,
+        want.dwell_ms,
+        want.idle_hide_ms,
+    );
+    if got != want_tuple {
+        return Err(format!("{whose}: read back {got:?}, expected {want_tuple:?}"));
+    }
+    Ok(())
+}
+
+/// Returns the endpoint of the daemon that runs at the end.
+async fn look(core: &Core, root: &std::path::Path, first_endpoint: String) -> Result<String, String> {
+    use connect_core::cua_look;
+    let shared = core.shared();
+    let support = core.look_support();
+    println!("this computer's driver follows: {support:?}");
+
+    step("the cursor themes the app ships are accepted by the pinned driver, in OUR driver home");
+    let themes = core.cua_theme_dir().ok_or("the core has no theme folder of its own")?;
+    if !themes.starts_with(root) {
+        return Err(format!("the theme folder {} is outside the private root", themes.display()));
+    }
+    cua_look::install_themes(&themes).map_err(|e| format!("write the themes: {e}"))?;
+    let listed = driver(core, &["cursor-theme", "list", "--json"]).await?;
+    let listed: Vec<String> = serde_json::from_str(listed.trim())
+        .map_err(|e| format!("cursor-theme list --json did not answer a list ({e}): {listed}"))?;
+    println!("cursor-theme list: {listed:?}");
+    for theme in cua_look::THEMES {
+        if !listed.iter().any(|id| id == theme.id) {
+            return Err(format!("the driver does not list the theme {}", theme.id));
+        }
+        let file = themes.join(format!("{}.cua-theme", theme.id));
+        let seen = driver(core, &["cursor-theme", "inspect", &file.to_string_lossy()]).await?;
+        if !seen.lines().any(|l| l.trim() == format!("id: {}", theme.id)) {
+            return Err(format!("the driver does not accept {}: {seen}", file.display()));
+        }
+    }
+    println!("inspect: all {} themes accepted", cua_look::THEMES.len());
+
+    step("the owner's look is what every session gets");
+    core.mutate_settings(|s| {
+        s.computer.look = LookSettings {
+            cursor: true,
+            color: CursorColor::Rose,
+            speed: CursorSpeed::Fast,
+            idle_hide_seconds: 5,
+            reduced_motion: ReducedMotion::Always,
+            screenshot_max: 0,
+            preview_window: false,
+        };
+    });
+    // Nobody holds the daemon that ran with the default look: a session
+    // that starts now must get a new one.
+    let mut a = Session::open(&shared).await?;
+    println!("daemon look: {:?}", shared.cua_daemon_look().await.unwrap_or_default());
+    if a.endpoint() == first_endpoint {
+        return Err("the look changed while no session was open, but the old daemon was kept".into());
+    }
+    if connect_core::cua::endpoint_ready(&first_endpoint) {
+        return Err("the daemon with the old look still runs".into());
+    }
+    let rose = if support.color { "ai.snth.connect.rose" } else { "cua.default" };
+    let fast = if support.motion {
+        Expect { theme: rose, reduced: "on", glide_ms: 250.0, dwell_ms: 40.0, idle_hide_ms: 5000.0 }
+    } else {
+        Expect { theme: rose, reduced: "auto", glide_ms: 0.0, dwell_ms: 80.0, idle_hide_ms: 15000.0 }
+    };
+    for (whose, arguments) in [
+        ("a named session", json!({"session": "task-look"})),
+        ("another session", json!({"session": "task-other"})),
+        ("the unnamed session", json!({})),
+    ] {
+        let state = a.cursor(arguments).await?.map_err(|e| format!("{whose}: no cursor state: {e}"))?;
+        check_cursor(&state, &fast, whose)?;
+    }
+
+    step("the synth cannot change the look");
+    for (tool, arguments) in [
+        ("set_agent_cursor_theme", json!({"session": "task-look", "theme_id": "cua.default", "reduced_motion": "off"})),
+        ("set_agent_cursor_motion", json!({"session": "task-look", "glide_duration_ms": 5000, "idle_hide_ms": 0})),
+        ("set_agent_cursor_enabled", json!({"session": "task-look", "enabled": false})),
+        ("set_config", json!({"experimental_pip": true})),
+        ("set_config", json!({"key": "max_image_dimension", "value": 4000})),
+    ] {
+        match a.synth(tool, arguments).await? {
+            Synth::Refused(why) if why.starts_with("denied: ") => println!("{tool}: refused ({why})"),
+            Synth::Refused(why) => return Err(format!("{tool}: refused without a reason the synth can read: {why:?}")),
+            Synth::Answer(result) => return Err(format!("{tool} reached the driver: {}", short(&result))),
+        }
+    }
+    // A session may start; the cursor theme the synth asked for is not passed on.
+    let start = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "start_session", "arguments": {"session": "task-look", "cursor_theme": {"theme_id": "cua.default", "reduced_motion": "off"}}}});
+    match filtered(&shared, &start).await? {
+        Filtered::Forwarded(message) if message.pointer("/params/arguments/cursor_theme").is_none() => {
+            println!("start_session: forwarded as {}", message["params"]["arguments"]);
+        }
+        Filtered::Forwarded(message) => return Err(format!("start_session kept the synth's theme: {message}")),
+        Filtered::Refused(why) => return Err(format!("start_session was refused: {why}")),
+    }
+    match a
+        .synth("start_session", json!({"session": "task-look", "cursor_theme": {"theme_id": "cua.default", "reduced_motion": "off"}}))
+        .await?
+    {
+        Synth::Answer(result) if result.get("isError").and_then(Value::as_bool) != Some(true) => {
+            println!("start_session: {}", short(&result));
+        }
+        Synth::Answer(result) => return Err(format!("start_session failed: {}", short(&result))),
+        Synth::Refused(why) => return Err(format!("start_session was refused: {why}")),
+    }
+    let state = a.cursor(json!({"session": "task-look"})).await?.map_err(|e| format!("no cursor state: {e}"))?;
+    check_cursor(&state, &fast, "after the synth's attempts")?;
+    let journal = serde_json::to_string(&core.recent_journal()).unwrap_or_default();
+    if !journal.contains("denied: the look is the owner's to set") {
+        return Err("the refusals are not in the journal".into());
+    }
+
+    step("a screenshot is asked for within the owner's limit");
+    let listed = match a.synth_raw("tools/list", json!({})).await? {
+        Some(v) => v,
+        None => return Err("tools/list was not forwarded".into()),
+    };
+    for tool in cua_look::SCREENSHOT_TOOLS {
+        let has = listed
+            .get("tools")
+            .and_then(Value::as_array)
+            .and_then(|tools| tools.iter().find(|t| t.get("name").and_then(Value::as_str) == Some(tool)))
+            .is_some_and(|t| t.pointer("/inputSchema/properties/max_image_dimension").is_some());
+        if !has {
+            return Err(format!("the driver's {tool} no longer takes max_image_dimension"));
+        }
+    }
+    core.mutate_settings(|s| s.computer.look.screenshot_max = 1024);
+    for (tool, arguments, want) in [
+        ("get_window_state", json!({"session": "task-look", "pid": 1, "window_id": 1}), 1024),
+        ("get_window_state", json!({"session": "task-look", "pid": 1, "window_id": 1, "max_image_dimension": 0}), 1024),
+        ("get_desktop_state", json!({"max_image_dimension": 4000}), 1024),
+        ("get_desktop_state", json!({"max_image_dimension": 640}), 640),
+    ] {
+        // Only the filter is asked: no screenshot is taken.
+        let line = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": arguments}});
+        match filtered(&shared, &line).await? {
+            Filtered::Forwarded(message) => {
+                let got = message.pointer("/params/arguments/max_image_dimension").and_then(Value::as_u64);
+                println!("{tool} {arguments} -> max_image_dimension {got:?}");
+                if got != Some(want) {
+                    return Err(format!("{tool}: forwarded with max_image_dimension {got:?}, expected {want}"));
+                }
+            }
+            Filtered::Refused(why) => return Err(format!("{tool} was refused: {why}")),
+        }
+    }
+
+    step("a new look waits for the open session to end, then holds");
+    core.mutate_settings(|s| {
+        s.computer.look.color = CursorColor::Green;
+        s.computer.look.speed = CursorSpeed::Relaxed;
+        s.computer.look.idle_hide_seconds = 0;
+        s.computer.look.reduced_motion = ReducedMotion::Never;
+    });
+    let mut b = Session::open(&shared).await?;
+    if b.endpoint() != a.endpoint() {
+        return Err("the daemon was replaced while a session was open".into());
+    }
+    let state = a.cursor(json!({"session": "task-look"})).await?.map_err(|e| format!("the open session lost its cursor: {e}"))?;
+    check_cursor(&state, &fast, "the session that was open")?;
+    let state = b.cursor(json!({"session": "task-second"})).await?.map_err(|e| format!("no cursor state: {e}"))?;
+    check_cursor(&state, &fast, "a session opened meanwhile")?;
+    let held_endpoint = a.endpoint().to_string();
+    b.close().await;
+    a.close().await;
+    if shared.cua_sessions_open() != 0 {
+        return Err(format!("{} sessions still hold the daemon after they ended", shared.cua_sessions_open()));
+    }
+    let green = if support.color { "ai.snth.connect.green" } else { "cua.default" };
+    let relaxed = if support.motion {
+        Expect { theme: green, reduced: "off", glide_ms: 1500.0, dwell_ms: 400.0, idle_hide_ms: 0.0 }
+    } else {
+        Expect { theme: green, reduced: "auto", glide_ms: 0.0, dwell_ms: 80.0, idle_hide_ms: 15000.0 }
+    };
+    let mut c = Session::open(&shared).await?;
+    println!("daemon look: {:?}", shared.cua_daemon_look().await.unwrap_or_default());
+    if c.endpoint() == held_endpoint {
+        return Err("the new look did not get a new daemon after the sessions ended".into());
+    }
+    let state = c.cursor(json!({"session": "task-look"})).await?.map_err(|e| format!("no cursor state: {e}"))?;
+    check_cursor(&state, &relaxed, "the next session")?;
+    c.close().await;
+
+    step("the look survives a restart of the app");
+    core.cua_stop_daemon().await;
+    let chosen = core.settings().computer.look;
+    let again = selftest_core(root);
+    if again.settings().computer.look != chosen {
+        return Err(format!("settings.json gave back {:?}, expected {chosen:?}", again.settings().computer.look));
+    }
+    let again_shared = again.shared();
+    let mut d = Session::open(&again_shared).await?;
+    let state = d.cursor(json!({"session": "task-look"})).await?.map_err(|e| format!("no cursor state: {e}"))?;
+    check_cursor(&state, &relaxed, "after the restart")?;
+    d.close().await;
+    again.cua_stop_daemon().await;
+
+    step("the cursor can be switched off");
+    core.mutate_settings(|s| s.computer.look.cursor = false);
+    let mut e = Session::open(&shared).await?;
+    println!("daemon look: {:?}", shared.cua_daemon_look().await.unwrap_or_default());
+    match e.cursor(json!({"session": "task-look"})).await? {
+        // macOS: the driver has no overlay at all and says so.
+        Err(refusal) => println!("no cursor: {refusal}"),
+        Ok(state) if state.get("enabled").and_then(Value::as_bool) == Some(false) => println!("the cursor is disabled: {state}"),
+        Ok(state) => return Err(format!("the cursor is still on with the overlay switched off: {state}")),
+    }
+    // The one tool that moves nothing but that cursor is answered by the
+    // app, in words the synth can act on (and nothing is moved).
+    match e.synth("move_cursor", json!({"session": "task-look", "x": 40, "y": 40})).await? {
+        Synth::Refused(why) if why.contains("switched the agent cursor off") => println!("move_cursor: refused ({why})"),
+        Synth::Refused(why) => return Err(format!("move_cursor: refused with {why:?}")),
+        Synth::Answer(result) => return Err(format!("move_cursor reached the driver: {}", short(&result))),
+    }
+    // The rest of the driver works without it.
+    match e.synth("get_screen_size", json!({})).await? {
+        Synth::Answer(result) if result.get("isError").and_then(Value::as_bool) != Some(true) => {
+            println!("get_screen_size without the cursor: ok ({})", short(&result));
+        }
+        Synth::Answer(result) => return Err(format!("get_screen_size failed without the cursor: {}", short(&result))),
+        Synth::Refused(why) => return Err(format!("get_screen_size was refused: {why}")),
+    }
+    let endpoint = e.endpoint().to_string();
+    e.close().await;
+    core.mutate_settings(|s| s.computer.look = LookSettings::default());
+    Ok(endpoint)
+}
+
+/// Run one of the driver's own subcommands with our environment.
+async fn driver(core: &Core, args: &[&str]) -> Result<String, String> {
+    let out = core
+        .cua_driver_command()
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|e| format!("run the driver ({}): {e}", args.join(" ")))?;
+    if !out.status.success() {
+        return Err(format!(
+            "the driver's `{}` failed: {}{}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// macOS, by hand: the experimental preview window is a start flag of our
+/// daemon. The window shows on the screen for a moment.
+async fn preview(core: &Core) -> Result<(), String> {
+    if !core.look_support().preview_window {
+        println!("the preview window does not exist on this system: nothing to start");
+        return Ok(());
+    }
+    step("the experimental preview window (shows on the screen for a moment)");
+    core.mutate_settings(|s| s.computer.look.preview_window = true);
+    let shared = core.shared();
+    let mut session = Session::open(&shared).await?;
+    let look = shared.cua_daemon_look().await.unwrap_or_default();
+    println!("daemon look: {look:?}");
+    let listed = session.synth("get_config", json!({})).await;
+    session.close().await;
+    core.mutate_settings(|s| s.computer.look.preview_window = false);
+    core.cua_stop_daemon().await;
+    if !look.iter().any(|a| a == "--experimental-pip") {
+        return Err("the daemon was not started with the preview window".into());
+    }
+    match listed? {
+        Synth::Answer(result) => println!("the daemon runs with the preview window: {}", short(&result)),
+        Synth::Refused(why) => return Err(format!("get_config was refused: {why}")),
+    }
+    Ok(())
+}
+
+/// The files of a driver the user may run themselves that our daemon could
+/// reach if the app did not keep it away: the driver's settings file and
+/// its cursor-theme folder. Read before and after; they must be the same.
+struct UsersDriver {
+    config: PathBuf,
+    config_before: Option<Vec<u8>>,
+    themes: Option<PathBuf>,
+    themes_before: Option<Vec<String>>,
+}
+
+impl UsersDriver {
+    fn read() -> UsersDriver {
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        let config = home.join(".cua-driver").join("config.json");
+        let themes = if cfg!(windows) {
+            std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("Cua Driver").join("cursor-themes"))
+        } else if cfg!(target_os = "macos") {
+            Some(home.join("Library").join("Application Support").join("Cua Driver").join("cursor-themes"))
+        } else {
+            Some(
+                std::env::var_os("XDG_DATA_HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| home.join(".local").join("share"))
+                    .join("cua-driver")
+                    .join("cursor-themes"),
+            )
+        };
+        UsersDriver {
+            config_before: std::fs::read(&config).ok(),
+            themes_before: themes.as_deref().and_then(Self::list),
+            config,
+            themes,
+        }
+    }
+
+    fn list(dir: &std::path::Path) -> Option<Vec<String>> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .map(|e| format!("{} {}", e.file_name().to_string_lossy(), e.metadata().map(|m| m.len()).unwrap_or(0)))
+            .collect();
+        names.sort();
+        Some(names)
+    }
+
+    fn unchanged(&self) -> Result<(), String> {
+        if std::fs::read(&self.config).ok() != self.config_before {
+            return Err(format!("{} changed during the self-test", self.config.display()));
+        }
+        if self.themes.as_deref().and_then(Self::list) != self.themes_before {
+            return Err(format!(
+                "the user's own cursor-theme folder changed during the self-test: {:?}",
+                self.themes
+            ));
+        }
+        println!(
+            "{}: {}; the user's cursor-theme folder: {}",
+            self.config.display(),
+            if self.config_before.is_some() { "unchanged" } else { "still absent" },
+            if self.themes_before.is_some() { "unchanged" } else { "still absent" },
+        );
+        Ok(())
+    }
 }
 
 async fn send(stdin: &mut ChildStdin, message: &Value) -> Result<(), String> {
@@ -323,6 +869,11 @@ async fn call(
     params: Value,
 ) -> Result<Value, String> {
     send(stdin, &json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})).await?;
+    answer(stdout, id, method).await
+}
+
+/// Wait for the answer to request `id`; returns its `result`.
+async fn answer(stdout: &mut BufReader<ChildStdout>, id: u64, method: &str) -> Result<Value, String> {
     let wait = async {
         loop {
             let mut line = String::new();
