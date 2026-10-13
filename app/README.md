@@ -39,6 +39,8 @@ app/
     src/browsers.rs    where browsers keep cookies; the Chromium key source
     src/logins.rs      the Logins page: host manifests for the SNTH Vault
                        extension, the browser link, the vault list
+    src/safari.rs      Safari (macOS): is the extension that ships in the
+                       app switched on, open Safari's settings at it
     src/bin/snth-connect-host.rs   the helper the browsers start (see
                        "The SNTH Vault extension")
     windows/hooks.nsh  uninstall: remove the helper's registry keys
@@ -47,6 +49,9 @@ app/
     build.rs           the command list (turns on per-command permissions)
     capabilities/      what each window may call
     tauri.conf.json, tauri.release.conf.json
+  safari/              the Safari extension's native half (Swift): the relay
+                       to the running app, its tests, the Xcode project of
+                       the app extension (see safari/README.md)
 ```
 
 ## Review the UI in a browser (mock mode)
@@ -70,6 +75,7 @@ URL parameters stage a screen or a state directly:
 | `screen` | `onboarding`, `status`, `internet`, `logins` (`cookies` still works), `computer`, `files`, `apps`, `activity`, `general` |
 | `logins` | what the synth's vault answers on the Logins page: `ready` (default: three passwords), `empty`, `asking` (never answers), `offline`, `outdated` (the synth is older than the feature), `novault`, `failed` |
 | `ext` | the SNTH Vault extension in the browsers: `mixed` (default: Chrome linked with one site, Edge connected but not linked, Brave never heard from), `none`, `installed`, `linked`, `closed` (linked but the browser is closed, and one seen earlier), `nobrowser`, `busy` (another copy of the app holds the browser link) |
+| `safari` | with `os=macos`, Safari's row (its extension ships inside the app): `off` (default: not switched on in Safari yet; "Open Safari settings" then plays the rest, switched on and then connected), `unknown` (Safari did not say), `on` (switched on, never connected), `moved` (the app runs from the disk image), `installed` (connected, not linked), `away` (connected earlier, not linked), `linked`, `closed` (linked, not connected right now), `allsites` (Safari lets the extension read every site), `both` (the stand-alone SNTH Vault app is installed too), `none` (this copy of the app has no extension: no row) |
 | `link` | what "Link this browser" does: `ok` (default), `synth_offline`, `synth_outdated`, `other_synth`, `busy`, `failed` |
 | `step` (with `screen=onboarding`) | `1` welcome, `2` code, `3` confirmation, `4` preset, `5` folders, `6` computer control, `7` done |
 | `state` | `paused`, `working`, `connecting`, `offline`, `repair`, `empty`, `off`, `appsoff` (only Apps off), `metered` |
@@ -85,6 +91,8 @@ URL parameters stage a screen or a state directly:
 | `os` | `macos` (default), `windows`, `linux`. Apps follows it: the Mac apps are listed only with `macos` |
 
 Examples: `?screen=logins`, `?screen=logins&logins=offline&ext=closed&os=windows`,
+`?screen=logins&safari=off`, `?screen=logins&ext=linked&safari=closed&lang=ru`,
+`?screen=logins&safari=allsites`, `?screen=logins&safari=both&lang=ru`,
 `?screen=logins&logins=empty&state=empty&ext=none&lang=ru`, `?approval=vault`,
 `?screen=onboarding&step=3`, `?screen=status&state=paused`,
 `?approval=cookies`, `?screen=computer&cua=noperm&lang=ru&theme=dark`,
@@ -147,6 +155,10 @@ nobody, and no other kind of release may be published as "latest" there.
    ```
 
    It builds the arm64 app signed with the Developer ID (hardened runtime),
+   builds the Safari extension (the native handler with Xcode, the web
+   extension from the committed tree of `../snth-vault-extension`), puts it
+   into the app (`Contents/PlugIns/SNTH Vault.appex`) and signs inside out:
+   the extension sandboxed and in the app group, then the app around it. It
    notarizes and staples it, checks it with `codesign` and `spctl`, makes a
    signed and notarized DMG (first install) and the `.app.tar.gz` of the
    stapled app with its updater signature, uploads all three to the draft
@@ -173,7 +185,22 @@ Application: Aleksandr Sabri (CZAP38JFAE)` and the notary profile
 `SNTH_NOTARY` in the login keychain, the updater key at
 `~/.tauri/snth-connect.key`, its password in the login keychain (service
 `snth-connect-updater-key-password`), and `gh` signed in with write access
-to the repo. The header of the script lists the environment overrides.
+to the repo. Since the Safari extension: the full Xcode (`xcodebuild`; the
+command line tools alone do not build an app extension) and the
+`snth-vault-extension` repository next to this one, on the commit to ship
+(`SNTH_VAULT_EXTENSION`, `SNTH_VAULT_REF`). Nothing new in the keychain and
+no provisioning profile: the app group's id starts with the team id. The
+header of the script lists the environment overrides.
+
+What the script checks about the Safari extension before anything is
+notarized: it is in the app, signed by the same identity with the hardened
+runtime and a timestamp, sandboxed, in the app group
+`CZAP38JFAE.ai.snth.connect` and entitled to nothing else; its bundle id is
+`ai.snth.connect.safari`, under the app's own; its version is the app's; the
+app is in the same group and kept the entitlements Tauri signed it with; and
+the updater bundle, unpacked, still carries it signed and sandboxed. The
+copies of the app the script makes are taken off the system's list of apps
+at the end, so Safari on the release Mac does not show their extensions.
 
 ### What an installed copy does with an update
 
@@ -373,6 +400,60 @@ round.
   is shown as "needs an update", an unreachable one as "cannot be reached
   right now"; sign-ins from this computer are listed either way.
 
+### Safari
+
+The same three things, another way in. Safari has no native messaging host:
+its extension has to live inside an app. So the macOS app CARRIES the
+extension (`Contents/PlugIns/SNTH Vault.appex`, built and signed by the
+release script; Safari lists it as "SNTH Vault (Connect)") and the owner
+installs one thing. `app/safari/README.md` has the mechanics; in short:
+
+- **The channel.** The extension's JavaScript is the same code as in
+  Chrome. Where Chrome opens a native port, Safari calls the app
+  extension's native handler (Swift, sandboxed), which relays to the RUNNING
+  app over a Unix socket in the folder of an app group the two are signed
+  into (`~/Library/Group Containers/CZAP38JFAE.ai.snth.connect/run`). That
+  is a second door of the browser link (`connect_host::Door::Safari`): the
+  same messages and checks, the same user only, and each door takes its own
+  callers only. A browser that comes in there is Safari whatever it says.
+- **Switching it on is the owner's.** macOS shows the extension in Safari's
+  settings once the app has been opened from Applications; every extension
+  starts switched off, and no program can switch it on. The Logins page has
+  Safari's row from the start and follows the owner through it: "switched
+  off" with a button that opens Safari's settings at the extension
+  (`SFSafariApplication.showPreferencesForExtension`), "switched on, not
+  connected yet" (`SFSafariExtensionManager` is asked every few seconds
+  while that row is waiting, and when the window comes back), then
+  "connected, not linked" with "Link this browser", then "linked". An app
+  opened from the disk image says that Safari cannot use it from there.
+- **Pairing** is the same as in Chrome: "Link this browser" in the popup or
+  on the Logins page, the owner's yes in the app, a code from the synth,
+  redeemed at the hub by the extension. No permission is asked for in
+  Safari at this point: talking to the app is part of what this copy is.
+- **Sign-ins.** Safari's files are never read, so its extension is the only
+  source of a Safari sign-in. The app asks it after the owner allowed the
+  site; the extension opens its "Step 2 of 2" page and Safari asks, in its
+  own prompt, whether the extension may access that one site. With more
+  than one linked browser, one that has no cookie of the site is not the
+  end: the next is asked.
+- **What is different from Chrome, and shown as such.** Safari stops an
+  extension it finds idle. The extension keeps itself awake while Safari
+  runs (an open port it writes to, and a timer as a fallback); a linked
+  Safari that is not connected reads "not connected right now" with what to
+  do, not "closed". In Safari the owner can also give an extension every
+  website at once ("Always Allow on Every Website"): Safari then asks
+  nothing per site, the extension reports it, and the row says that the
+  answers given in the app are the only gate. A site allowed "for one day"
+  is asked about again by Safari later.
+- **The stand-alone "SNTH Vault" app for Safari** (extension 0.1.0, paired
+  with a code, passwords only) stays for people without this app. The two
+  are separate extensions with separate pairings; with both installed
+  Safari lists both, and the Logins row says which is which and that the
+  other can be switched off. The stand-alone one never talks to the app.
+- A debug build carries no extension: no Safari row, and the Safari door
+  stays shut (an unsigned program is not in the app group, and macOS would
+  ask the owner whether it may open that folder).
+
 ### Firefox
 
 Not done. The extension's code would run there (it already uses `browser.*`
@@ -384,7 +465,7 @@ registry key; the helper is then started with the manifest path and the
 extension id instead of an origin); and a signature from addons.mozilla.org,
 without which Firefox loads an extension only until it restarts. Firefox
 cookies are read from its files on every system already, so the gain would
-be pairing without a code. Safari stays on the code as well.
+be pairing without a code.
 
 ## Windows: what else could be driven, and why it is not built
 
@@ -427,6 +508,60 @@ with classic Outlook to verify on; the CI machines have none.
 - Chrome and Edge on Windows through the extension: built for exactly that,
   proven only as far as the Windows self-test goes (the helper, the pipe,
   the registry). No browser was driven on Windows.
+- Safari, from the moment Safari itself is involved. What was run: the
+  relay's own tests (`swift test`); the whole path with the relay in a test
+  host against a real core on a real socket (`connectd selftest safari`);
+  the same pair signed the way the release signs them, the relay sandboxed,
+  meeting in an app group folder (`scripts/safari-sandbox-probe.sh`, macOS
+  26.6); the extension's JavaScript against a stand-in for the handler; the
+  two calls into SafariServices against classes of the test's own; the app
+  extension built with Xcode, signed and checked by the release script's dry
+  run. NEVER run, because it takes a person in Safari: the extension showing
+  up in Safari's settings and being switched on; Safari starting the app
+  extension and the handler reaching the app from inside Safari's own
+  sandbox for extensions; `SFSafariExtensionManager` answering the signed
+  app; the popup; pairing; Safari's prompt for a site and what its `cookies`
+  API then returns (in particular HttpOnly cookies and cookies of a
+  subdomain); whether Safari really keeps the background script awake while
+  the port is written to (read in WebKit's source, not observed); the page
+  that asks for a site opening as a small window or as a tab; notarization
+  of an app with an app extension in it. The order to try it in:
+
+  1. Install the release into Applications, open it, link it to a synth.
+     Logins shows Safari "switched off". Likely failure: no Safari row (the
+     app extension is not in the bundle, or the app runs from the disk
+     image: the row then says so).
+  2. "Open Safari settings": Safari opens Settings > Extensions with "SNTH
+     Vault (Connect)" in the list. Likely failures: Safari opens without the
+     list (then find it by hand); the extension is not listed (run
+     `pluginkit -m -i ai.snth.connect.safari`: no line means macOS did not
+     register it; open the app from Applications once more).
+  3. Tick it. Within a few seconds the row reads "switched on", then
+     "connected, not linked". Likely failure: it stays "switched on, not
+     connected": click the SNTH Vault button in Safari's toolbar; if the
+     popup says the app is not running, the handler cannot reach the app
+     (General > diagnostics has a "safari:" line with the door's state).
+  4. "Link this browser" on the Logins page (or in the popup, then "Allow"
+     in the app's window): the row reads "linked", the popup "Linked through
+     SNTH Connect". Likely failure: the hub refuses the code (Safari did not
+     let the extension call the hub: the popup then shows a network error).
+  5. Share one password from a sign-in page with the popup: unchanged code,
+     never run in Safari either.
+  6. Ask the synth for something that needs a sign-in on one site (signed in
+     in Safari, not in Chrome). Allow in the app ("Step 1 of 2" is shown when
+     the extension goes first), then the extension's page ("Step 2 of 2"),
+     then Safari's own prompt. The synth gets the cookies; the journal says
+     "from safari-extension". Likely failures: no page opens (the extension
+     was asleep: the row says "not connected right now"); Safari's prompt
+     does not appear from the page's button; the read comes back empty
+     although signed in (what Safari's `cookies` API returns for that site).
+  7. Revoke the site on the Logins page: it leaves the row's list, and
+     Safari's settings no longer list the site for the extension.
+  8. Leave Safari idle for ten minutes, look at the row: still "linked" and
+     connected. If it reads "not connected right now", the keep-awake does
+     not hold in this Safari and the fallback timer is all there is.
+  9. Quit and reopen the app with Safari open: the row reconnects by itself
+     within about ten seconds.
 
 - The owner's apps on a real Mac. Every script compiles against the real
   apps' dictionaries (`scripts/check-applescripts.sh`) and everything
