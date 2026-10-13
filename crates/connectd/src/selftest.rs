@@ -30,7 +30,22 @@
 //!     owner's limit; a new look waits for the open session to end and
 //!     then holds; the look survives a restart of the app; the cursor can
 //!     be switched off; a driver the user runs themselves keeps its files
-//!  7. stop the daemon and check its endpoint is gone
+//!  7. which apps the synth may use, against the real driver and windows
+//!     that are already open (nothing is launched, closed, clicked or typed
+//!     through the driver; where no two apps have a window, the test starts
+//!     two harmless ones itself and ends them): every tool of this driver
+//!     has a place in the app's decision; "only these" starts OUR daemon in
+//!     the driver's bounded mode, where the driver ITSELF lets the allowed
+//!     app be observed and refuses another running app, the list of every
+//!     app and the picture of the whole screen with its own refusal code,
+//!     while the tools that touch no app still work; "every app except
+//!     these" is held by the app's pipe, which resolves a call to an app by
+//!     pid, by window alone and by a window under another app's pid, and
+//!     refuses the whole screen; the two lists are answered by the app
+//!     without the other apps; a session keeps the choice it began with
+//!  8. "check the helper": the driver's own health report from OUR daemon,
+//!     and a text for "copy details" with no path outside the test's folder
+//!  9. stop the daemon and check its endpoint is gone
 //!
 //! `--preview-window` (macOS, by hand only) also starts the daemon once
 //! with the experimental preview window, which shows that window on the
@@ -336,6 +351,11 @@ async fn exercise(core: &Core, root: &std::path::Path) -> Result<(), String> {
 
     guard(core, root).await?;
     let endpoint = look(core, root, endpoint).await?;
+    apps_scope(core, root).await?;
+    let endpoint = match core.shared().cua_socket().await {
+        Ok((now, _)) => now,
+        Err(_) => endpoint,
+    };
 
     step("stopping the daemon removes its endpoint");
     core.cua_stop_daemon().await;
@@ -572,6 +592,32 @@ impl Session {
         }
     }
 
+    /// One `tools/call` as the synth would send it in THIS session: decided
+    /// by the choice of apps the session's daemon was started with, as the
+    /// app's own pipe decides it.
+    async fn ask(&mut self, tool: &str, arguments: Value) -> Result<Asked, String> {
+        self.next_id += 1;
+        let id = self.next_id;
+        let line = json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": tool, "arguments": arguments}});
+        match piped(&self.shared, Some(&self.held.scope), &line).await? {
+            Piped::Refused(why) => Ok(Asked::Refused(why)),
+            Piped::App(result) => Ok(Asked::App(result)),
+            Piped::Driver(message) => {
+                send(&mut self.stdin, &message).await?;
+                Ok(Asked::Driver(answer(&mut self.stdout, id, tool).await?))
+            }
+        }
+    }
+
+    /// One `tools/call` handed to the driver as it is, past the app's
+    /// filter: what the DRIVER itself does with it.
+    async fn direct(&mut self, tool: &str, arguments: Value) -> Result<Value, String> {
+        self.next_id += 1;
+        let id = self.next_id;
+        send(&mut self.stdin, &json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": tool, "arguments": arguments}})).await?;
+        answer(&mut self.stdout, id, tool).await
+    }
+
     /// Any other request as the synth would send it (`tools/list`).
     async fn synth_raw(&mut self, method: &str, params: Value) -> Result<Option<Value>, String> {
         self.next_id += 1;
@@ -616,14 +662,51 @@ enum Filtered {
     Refused(String),
 }
 
-/// Send one line through the app's own filter.
+/// Send one line through the app's own filter, by the owner's settings as
+/// they are now. For the checks that do not limit the apps: there the app
+/// never answers a call itself.
 async fn filtered(shared: &Arc<Shared>, line: &Value) -> Result<Filtered, String> {
+    match piped(shared, None, line).await? {
+        Piped::Driver(message) => Ok(Filtered::Forwarded(message)),
+        Piped::Refused(why) => Ok(Filtered::Refused(why)),
+        Piped::App(result) => Err(format!("the app answered a call itself where the apps are not limited: {}", short(&result))),
+    }
+}
+
+/// What the app's pipe does with one call of the synth's.
+enum Piped {
+    /// Handed to the driver, as this message (maybe changed).
+    Driver(Value),
+    /// Answered by the app itself with this result (a list, cut down to
+    /// the apps the synth may use); the driver is not asked.
+    App(Value),
+    /// Refused with this sentence; the driver never sees it.
+    Refused(String),
+}
+
+/// What became of one call "from the synth" in a session (`Session::ask`).
+enum Asked {
+    /// The driver's result.
+    Driver(Value),
+    /// The app's own result.
+    App(Value),
+    Refused(String),
+}
+
+/// Send one line through the app's own filter. `scope`: the choice of apps
+/// of a session that is open; None = the owner's settings as they are now.
+async fn piped(shared: &Arc<Shared>, scope: Option<&connect_core::cua_apps::Scope>, line: &Value) -> Result<Piped, String> {
     let bytes = serde_json::to_vec(line).map_err(|e| e.to_string())?;
-    match connect_core::mcp::filter_line(shared, false, &bytes).await {
+    let gate = match scope {
+        Some(scope) => connect_core::mcp::filter_scoped(shared, scope, false, &bytes).await,
+        None => connect_core::mcp::filter_line(shared, false, &bytes).await,
+    };
+    match gate {
         connect_core::mcp::Gate::Forward(out) => serde_json::from_slice(&out)
-            .map(Filtered::Forwarded)
+            .map(Piped::Driver)
             .map_err(|e| format!("the filter forwarded something that is not JSON: {e}")),
-        connect_core::mcp::Gate::Refuse(error) => Ok(Filtered::Refused(
+        connect_core::mcp::Gate::Answer(answer) => Ok(Piped::App(answer.get("result").cloned().unwrap_or(Value::Null))),
+        connect_core::mcp::Gate::Refuse(error) => Ok(Piped::Refused(
             error.pointer("/error/message").and_then(Value::as_str).unwrap_or("").to_string(),
         )),
         connect_core::mcp::Gate::Drop(why) => Err(format!("the filter dropped a well-formed call: {why}")),
@@ -899,6 +982,414 @@ async fn look(core: &Core, root: &std::path::Path, first_endpoint: String) -> Re
     e.close().await;
     core.mutate_settings(|s| s.computer.look = LookSettings::default());
     Ok(endpoint)
+}
+
+// ---------------------------------------------------------------------
+// Which apps the synth may use (`connect_core::cua_apps`), against the
+// real driver and windows that are open anyway. The driver is only ever
+// asked to list and to read: nothing is launched, closed, clicked or typed
+// through it. Calls that would act are shown to the app's filter alone.
+// ---------------------------------------------------------------------
+
+/// One app that has a window right now.
+#[derive(Clone)]
+struct Seen {
+    /// What the driver matches it by: bundle id or program path.
+    key: String,
+    name: String,
+    pid: i64,
+    window: u64,
+}
+
+/// The running apps that have a window, as the app's own reading of the
+/// driver's lists has them. Never the driver's own app (a driver the user
+/// runs themselves is left alone, even by a look).
+async fn apps_with_windows(shared: &Arc<Shared>) -> Result<Vec<Seen>, String> {
+    let dir = shared.cua_directory();
+    let apps = dir.apps_fresh().await.map_err(|e| format!("the app's own list of apps: {e}"))?;
+    let listed = dir.windows_listing().await.map_err(|e| format!("the app's own list of windows: {e}"))?;
+    let windows: Vec<(u64, i64)> = listed
+        .get("windows")
+        .and_then(Value::as_array)
+        .map(|all| all.iter().filter_map(|w| Some((w.get("window_id")?.as_u64()?, w.get("pid")?.as_i64()?))).collect())
+        .unwrap_or_default();
+    let mut seen: Vec<Seen> = Vec::new();
+    for app in apps.iter().filter(|a| a.running) {
+        let Some(key) = app.key() else {
+            continue;
+        };
+        let lower = format!("{key} {}", app.name).to_lowercase();
+        if lower.contains("trycua") || lower.contains("cua driver") || lower.contains("cua-driver") {
+            continue;
+        }
+        if seen.iter().any(|s| s.key.eq_ignore_ascii_case(key)) {
+            continue;
+        }
+        if let Some((window, _)) = windows.iter().find(|(_, pid)| *pid == app.pid) {
+            seen.push(Seen { key: key.to_string(), name: app.name.clone(), pid: app.pid, window: *window });
+        }
+    }
+    Ok(seen)
+}
+
+/// The driver's own refusal code of a result, if it is a refusal.
+fn refusal_code(result: &Value) -> Option<&str> {
+    result.pointer("/structuredContent/refusal/code").and_then(Value::as_str)
+}
+
+fn is_error(result: &Value) -> bool {
+    result.get("isError").and_then(Value::as_bool) == Some(true)
+}
+
+async fn apps_scope(core: &Core, root: &std::path::Path) -> Result<(), String> {
+    use connect_core::cua_apps::{self, Scope};
+    use connect_core::settings::{AppRef, AppScope, AppsPolicy};
+    let shared = core.shared();
+
+    step("every tool of this driver has a place in the app's decision about apps");
+    let mut session = Session::open(&shared).await?;
+    let listed = session.synth_raw("tools/list", json!({})).await?.ok_or("tools/list was not forwarded")?;
+    let tools: Vec<Value> = listed.get("tools").and_then(Value::as_array).cloned().unwrap_or_default();
+    let unplaced = cua_apps::unplaced(&tools);
+    if !unplaced.is_empty() {
+        return Err(format!(
+            "this driver has tools the app cannot place: {}. Read each one in the driver's source and add it to TOOLS in crates/connect-core/src/cua_apps.rs (and to MANIFEST_TOOLS if it may be used when only chosen apps are allowed)",
+            unplaced.join(", ")
+        ));
+    }
+    println!("{} tools, all placed; {} of them allowed in a daemon for chosen apps only", tools.len(), cua_apps::MANIFEST_TOOLS.len());
+    session.close().await;
+
+    step("the app's own reading of the driver's lists (a runtime of its own, never the synth's daemon)");
+    let picker = core.computer_apps().await.map_err(|e| format!("the list of apps for the owner's picker: {e}"))?;
+    let by_path = picker.iter().filter(|c| std::path::Path::new(&c.id).is_absolute()).count();
+    println!(
+        "picker: {} apps ({} running), {} known by a bundle id, {} by the path of the program; {} sensitive ones would start a list of exceptions",
+        picker.len(),
+        picker.iter().filter(|c| c.running).count(),
+        picker.len() - by_path,
+        by_path,
+        cua_apps::default_exclusions(&picker).len(),
+    );
+    if picker.is_empty() {
+        return Err("the driver lists no app at all".into());
+    }
+
+    // Two apps that have a window. Where there are none (a bare CI
+    // machine), the test starts harmless ones ITSELF, not through the
+    // driver, and ends them when it is done.
+    let mut started: Vec<tokio::process::Child> = Vec::new();
+    let mut seen = apps_with_windows(&shared).await?;
+    if seen.len() < 2 && cfg!(windows) {
+        for program in ["charmap.exe", "notepad.exe", "winver.exe", "mspaint.exe"] {
+            if seen.len() >= 2 {
+                break;
+            }
+            match connect_core::proc::command(program).kill_on_drop(true).spawn() {
+                Ok(child) => {
+                    println!("started {program} for the test (pid {:?})", child.id());
+                    started.push(child);
+                }
+                Err(e) => {
+                    println!("{program} could not be started: {e}");
+                    continue;
+                }
+            }
+            for _ in 0..20 {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                seen = apps_with_windows(&shared).await?;
+                if seen.len() >= started.len().min(2) {
+                    break;
+                }
+            }
+        }
+    }
+    let result = async {
+        if seen.len() < 2 {
+            return Err(format!(
+                "this test needs two apps with a window open, and the driver lists {} ({}); open two ordinary apps and run it again",
+                seen.len(),
+                seen.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        let (allowed, other) = (seen[0].clone(), seen[1].clone());
+        println!("allowed for the test: {} [{}] pid {} window {}", allowed.name, allowed.key, allowed.pid, allowed.window);
+        println!("the other app:        {} [{}] pid {} window {}", other.name, other.key, other.pid, other.window);
+        let pick = |app: &Seen| AppRef { id: app.key.clone(), name: app.name.clone(), loose: false };
+
+        // ---- only these: the driver itself ----
+        step("only these: our daemon runs in the driver's bounded mode, and the DRIVER refuses the rest");
+        core.mutate_settings(|s| s.computer.apps = AppScope { policy: AppsPolicy::Only, except: vec![], only: vec![pick(&allowed)] });
+        let scope = Scope::of(&core.settings());
+        println!("--- the manifest ---\n{}--------------------", scope.manifest().ok_or("no manifest for only these")?);
+        let mut only = Session::open(&shared).await?;
+        if shared.cua_daemon_scope().await.as_deref() != Some(&scope) {
+            return Err("the daemon was not started with the owner's choice of apps".into());
+        }
+        // Past the app's filter, straight to the driver.
+        let at = std::time::Instant::now();
+        let mine = only.direct("list_windows", json!({"pid": allowed.pid})).await?;
+        let took = at.elapsed();
+        let count = mine.pointer("/structuredContent/windows").and_then(Value::as_array).map(Vec::len).unwrap_or(0);
+        if is_error(&mine) || count == 0 {
+            return Err(format!("the driver did not list the allowed app's windows: {}", short(&mine)));
+        }
+        println!("driver, list_windows of the allowed app: {count} window(s), in {:.1} s", took.as_secs_f32());
+        let state = only
+            .direct("get_window_state", json!({"pid": allowed.pid, "window_id": allowed.window, "include_screenshot": false, "max_elements": 40}))
+            .await?;
+        if refusal_code(&state) == Some("bounded_resource_outside_manifest") {
+            return Err(format!("the driver refused the ALLOWED app's window as outside the manifest: {}", short(&state)));
+        }
+        println!("driver, get_window_state of the allowed app: {} ({})", if is_error(&state) { "answered with an error of its own, not a refusal of the manifest" } else { "observed" }, short(&state));
+        for (what, tool, arguments) in [
+            ("the other app's windows", "list_windows", json!({"pid": other.pid})),
+            ("the other app's window", "get_window_state", json!({"pid": other.pid, "window_id": other.window, "include_screenshot": false})),
+            ("the other app's window by its id alone", "zoom", json!({"window_id": other.window, "x1": 0, "y1": 0, "x2": 4, "y2": 4})),
+            ("the list of every window", "list_windows", json!({})),
+        ] {
+            let result = only.direct(tool, arguments).await?;
+            match refusal_code(&result) {
+                Some("bounded_resource_outside_manifest") => println!("driver, {what}: refused (bounded_resource_outside_manifest)"),
+                other_code => return Err(format!("the driver did not refuse {what} as outside the manifest (code {other_code:?}): {}", short(&result))),
+            }
+        }
+        // Tools the manifest does not list at all (the whole screen, the
+        // clipboard): the driver refuses them by name.
+        for (what, tool, arguments) in [
+            ("the list of every app", "list_apps", json!({})),
+            ("the picture of the whole screen", "get_desktop_state", json!({"max_image_dimension": 64})),
+            ("the clipboard", "clipboard_read", json!({})),
+        ] {
+            let result = only.direct(tool, arguments).await?;
+            let said = result.pointer("/content/0/text").and_then(Value::as_str).unwrap_or("");
+            if !is_error(&result) || !said.contains("outside the capability manifest") {
+                return Err(format!("the bounded driver did not refuse {what} ({tool}), which the manifest does not list: {}", short(&result)));
+            }
+            println!("driver, {what}: refused ({said})");
+        }
+        // What touches no app still works.
+        for (tool, arguments) in [
+            ("get_screen_size", json!({})),
+            ("start_session", json!({"session": "Mia: self-test"})),
+            ("get_agent_cursor_state", json!({"session": "Mia: self-test"})),
+            ("health_report", json!({"include": ["binary_version", "session_active"]})),
+            ("list_sessions", json!({})),
+        ] {
+            let result = only.direct(tool, arguments).await?;
+            if is_error(&result) {
+                return Err(format!("{tool} does not work in the bounded daemon: {}", short(&result)));
+            }
+            println!("driver, {tool}: ok ({})", short(&result));
+        }
+        // And as the synth: the same answers come from the app first, in
+        // words, and the two lists are the app's own.
+        match only.ask("get_window_state", json!({"pid": other.pid, "window_id": other.window})).await? {
+            Asked::Refused(why) if why.starts_with("denied: ") && why.contains("only the apps they chose") && why.contains("owner") => println!("synth, the other app's window: refused ({why})"),
+            Asked::Refused(why) => return Err(format!("the other app's window was refused in other words: {why}")),
+            _ => return Err("the other app's window passed the app's filter".into()),
+        }
+        match only.ask("list_apps", json!({})).await? {
+            Asked::App(result) => {
+                let apps = result.pointer("/structuredContent/apps").and_then(Value::as_array).cloned().unwrap_or_default();
+                let keys: Vec<String> = apps.iter().map(|a| a.to_string()).collect();
+                if apps.is_empty() || !keys.iter().all(|a| a.contains(&serde_json::to_string(&allowed.key).unwrap_or_default())) {
+                    return Err(format!("the app's list_apps is not the allowed app alone: {}", short(&result)));
+                }
+                println!("synth, list_apps: answered by the app, {} entr(ies), all of the allowed app", apps.len());
+            }
+            _ => return Err("list_apps was not answered by the app".into()),
+        }
+        match only.ask("list_windows", json!({})).await? {
+            Asked::App(result) => {
+                let windows = result.pointer("/structuredContent/windows").and_then(Value::as_array).cloned().unwrap_or_default();
+                if windows.is_empty() || windows.iter().any(|w| w.get("pid").and_then(Value::as_i64) != Some(allowed.pid)) {
+                    return Err(format!("the app's list_windows has windows of other apps or none: {} window(s)", windows.len()));
+                }
+                println!("synth, list_windows: answered by the app, {} window(s), all of the allowed app", windows.len());
+            }
+            _ => return Err("list_windows was not answered by the app".into()),
+        }
+        // Starting an app: the driver does not check which, the app does.
+        // Only the filter is asked: nothing is started.
+        let launch = |key: &str| {
+            let field = if std::path::Path::new(key).is_absolute() { "launch_path" } else { "bundle_id" };
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "launch_app", "arguments": {field: key}}})
+        };
+        match piped(&shared, Some(&only.held.scope), &launch(&other.key)).await? {
+            Piped::Refused(why) if why.starts_with("denied: ") => println!("synth, starting the other app: refused by the app"),
+            _ => return Err("starting an app that is not allowed passed the app's filter".into()),
+        }
+        match piped(&shared, Some(&only.held.scope), &launch(&allowed.key)).await? {
+            Piped::Driver(_) => println!("synth, starting the allowed app: would pass (not sent)"),
+            _ => return Err("starting the allowed app was refused".into()),
+        }
+        // The helper check sees the bounded daemon for what it is.
+        let health = core.cua_health().await;
+        match health.items.iter().find(|i| i.id == "apps") {
+            Some(item) if item.code == "bounded" => println!("check the helper: apps = only {} (the helper refuses the rest itself)", item.value),
+            other_item => return Err(format!("the helper check does not see the bounded daemon: {other_item:?}")),
+        }
+        let only_endpoint = only.endpoint().to_string();
+        only.close().await;
+        let journal = serde_json::to_string(&core.recent_journal()).unwrap_or_default();
+        if !journal.contains("denied: not one of the apps the owner chose") {
+            return Err("the refusal is not in the journal".into());
+        }
+
+        // ---- every app except these: the app's pipe ----
+        step("every app except these: the app resolves every call to an app and refuses the excluded one");
+        core.mutate_settings(|s| s.computer.apps = AppScope { policy: AppsPolicy::Except, except: vec![pick(&other)], only: vec![] });
+        let mut except = Session::open(&shared).await?;
+        if except.endpoint() == only_endpoint {
+            return Err("the owner's choice of apps changed while no session was open, but the bounded daemon was kept".into());
+        }
+        // The daemon is an ordinary one now: the driver itself answers
+        // the list of every app (the driver has no "except").
+        let every = except.direct("list_apps", json!({})).await?;
+        if is_error(&every) {
+            return Err(format!("the daemon for exceptions is not an ordinary one: {}", short(&every)));
+        }
+        println!("driver, list_apps: answered (the driver has no way to except an app; the app does it)");
+        let refused = |what: &str, got: Piped| match got {
+            Piped::Refused(why) if why.starts_with("denied: ") && why.contains("owner") => {
+                println!("synth, {what}: refused ({})", why.chars().take(90).collect::<String>());
+                Ok(())
+            }
+            Piped::Refused(why) => Err(format!("{what}: refused without words for the owner: {why}")),
+            Piped::Driver(message) => Err(format!("{what} passed the app's filter: {message}")),
+            Piped::App(_) => Err(format!("{what} was answered by the app")),
+        };
+        let call = |tool: &str, arguments: Value| json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": arguments}});
+        // Only the filter is asked for everything that would act.
+        for (what, tool, arguments) in [
+            ("the excluded app's window by pid and window", "get_window_state", json!({"pid": other.pid, "window_id": other.window})),
+            ("the excluded app's window by its id alone", "zoom", json!({"window_id": other.window, "x1": 0, "y1": 0, "x2": 4, "y2": 4})),
+            ("the excluded app by pid alone", "list_windows", json!({"pid": other.pid})),
+            ("a click with the allowed app's pid and the excluded app's window", "click", json!({"pid": allowed.pid, "window_id": other.window, "x": 1, "y": 1})),
+            ("a click in a target object", "click", json!({"x": 1, "y": 1, "target": {"kind": "window", "pid": other.pid, "window_id": other.window}})),
+            ("a click by screen position", "click", json!({"x": 10, "y": 10, "scope": "desktop"})),
+            ("typing with no window named", "type_text", json!({"text": "x"})),
+            ("the picture of the whole screen", "get_desktop_state", json!({})),
+            ("the desktop's tree of every app", "get_accessibility_tree", json!({})),
+            ("starting the excluded app", "launch_app", launch(&other.key)["params"]["arguments"].clone()),
+        ] {
+            refused(what, piped(&shared, Some(&except.held.scope), &call(tool, arguments)).await?)?;
+        }
+        match piped(&shared, Some(&except.held.scope), &call("click", json!({"pid": allowed.pid, "window_id": allowed.window, "x": 1, "y": 1}))).await? {
+            Piped::Driver(_) => println!("synth, a click in the other app's own window: would pass (not sent)"),
+            _ => return Err("a click in an app that is not excluded was refused".into()),
+        }
+        match except.ask("get_window_state", json!({"pid": allowed.pid, "window_id": allowed.window, "include_screenshot": false, "max_elements": 40})).await? {
+            Asked::Driver(result) => println!("synth, a window of an app that is not excluded: reaches the driver ({})", short(&result)),
+            Asked::Refused(why) => return Err(format!("a window of an app that is not excluded was refused: {why}")),
+            Asked::App(_) => return Err("get_window_state was answered by the app".into()),
+        }
+        match except.ask("list_windows", json!({})).await? {
+            Asked::App(result) => {
+                let windows = result.pointer("/structuredContent/windows").and_then(Value::as_array).cloned().unwrap_or_default();
+                let pids: Vec<i64> = windows.iter().filter_map(|w| w.get("pid").and_then(Value::as_i64)).collect();
+                if pids.contains(&other.pid) || !pids.contains(&allowed.pid) {
+                    return Err(format!("the app's list_windows is wrong: excluded app listed {}, the other app listed {}", pids.contains(&other.pid), pids.contains(&allowed.pid)));
+                }
+                println!("synth, list_windows: answered by the app, {} window(s), none of the excluded app", windows.len());
+            }
+            _ => return Err("list_windows was not answered by the app".into()),
+        }
+        match except.ask("list_apps", json!({})).await? {
+            Asked::App(result) => {
+                let text = result.pointer("/structuredContent/apps").map(Value::to_string).unwrap_or_default();
+                if text.contains(&serde_json::to_string(&other.key).unwrap_or_default()) {
+                    return Err("the app's list_apps names the excluded app".into());
+                }
+                println!("synth, list_apps: answered by the app, without the excluded app");
+            }
+            _ => return Err("list_apps was not answered by the app".into()),
+        }
+
+        step("a session keeps the choice of apps it began with; the next one gets the new choice");
+        core.mutate_settings(|s| s.computer.apps = AppScope::default());
+        refused("the excluded app, after the owner allowed every app, in the session that was open", piped(&shared, Some(&except.held.scope), &call("get_window_state", json!({"pid": other.pid, "window_id": other.window}))).await?)?;
+        if !except.held.outdated() {
+            return Err("the open session does not know the owner's choice moved on".into());
+        }
+        match filtered(&shared, &call("get_window_state", json!({"pid": other.pid, "window_id": other.window}))).await? {
+            Filtered::Forwarded(_) => println!("by the settings as they are now: passes"),
+            Filtered::Refused(why) => return Err(format!("with every app allowed the call is refused: {why}")),
+        }
+        except.close().await;
+
+        step("a word the owner typed by hand in an older version still excludes the app, now by its window too");
+        let word: String = other.name.to_lowercase().chars().take(6).collect();
+        core.mutate_settings(|s| {
+            s.computer.apps = AppScope::default();
+            s.computer.app_blocklist = vec![word.clone()];
+            s.migrate();
+        });
+        let migrated = core.settings().computer.apps;
+        if migrated.policy != AppsPolicy::Except || migrated.except.len() != 1 || !migrated.except[0].loose {
+            return Err(format!("the old blocked apps were not carried over: {migrated:?}"));
+        }
+        refused("the app named by an old word, reached by its window", piped(&shared, None, &call("get_window_state", json!({"window_id": other.window}))).await?)?;
+
+        let journal = serde_json::to_string(&core.recent_journal()).unwrap_or_default();
+        if !journal.contains("denied: an app the owner excluded") || !journal.contains("denied: the whole screen, while apps are limited") {
+            return Err("the refusals are not in the journal".into());
+        }
+        if journal.contains(&other.key) || journal.contains("Mia") {
+            return Err("the journal names an app or a task label".into());
+        }
+        Ok(())
+    }
+    .await;
+
+    core.mutate_settings(|s| s.computer.apps = AppScope::default());
+    shared.cua_directory().stop().await;
+    for mut child in started {
+        let _ = child.start_kill();
+        let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
+    }
+    result?;
+
+    step("check the helper: the driver's own health report from OUR daemon");
+    let health = core.cua_health().await;
+    println!("overall: {}", health.overall);
+    for item in &health.items {
+        println!("  {:?} {}{}{}", item.verdict, item.id, if item.code.is_empty() { String::new() } else { format!(" ({})", item.code) }, if item.value.is_empty() { String::new() } else { format!(": {}", item.value) });
+    }
+    println!("--- copy details ---\n{}\n--------------------", health.details);
+    let ok = |id: &str| health.items.iter().any(|i| i.id == id && i.verdict == connect_core::cua_health::Verdict::Ok);
+    if !ok("installed") || !ok("daemon") {
+        return Err("the helper check did not find the helper installed and its daemon answering".into());
+    }
+    if !health.items.iter().any(|i| i.id == "platform_supported") {
+        return Err("the helper check has none of the driver's own checks".into());
+    }
+    let mut places = vec![root.to_string_lossy().to_string()];
+    if let Ok(real) = std::fs::canonicalize(root) {
+        places.push(real.to_string_lossy().to_string());
+    }
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        places.push(home.to_string_lossy().to_string());
+    }
+    for place in places.iter().filter(|p| p.len() > 3) {
+        if health.details.contains(place.as_str()) {
+            return Err(format!("the text for copy details names a place on this computer: {place}"));
+        }
+    }
+
+    // For the record of what the driver's other diagnostic answers. Not on
+    // macOS: there `doctor` deletes files of a driver the user may have
+    // installed for themselves. `diagnose` is run nowhere: it asks the
+    // daemon on the default socket, which is never ours.
+    if !cfg!(target_os = "macos") {
+        step("for the record: the driver's `doctor --json` (the app does not use it)");
+        match driver(core, &["doctor", "--json"]).await {
+            Ok(out) => println!("{}", out.chars().take(4000).collect::<String>()),
+            Err(why) => println!("{}", why.chars().take(4000).collect::<String>()),
+        }
+    }
+    Ok(())
 }
 
 /// Run one of the driver's own subcommands with our environment.
