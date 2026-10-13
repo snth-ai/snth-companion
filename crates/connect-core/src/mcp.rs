@@ -14,10 +14,14 @@
 //!    `auto` passes);
 //!  - per `tools/call`: a catalog stream refuses every call; the tool
 //!    denylist and app blocklist refuse; a foreground-delivery call
-//!    follows `computer.foreground` (never / idle / ask / always); the
-//!    owner's look stays the owner's (`cua_look::gate`: the synth's calls
-//!    that change the cursor or the helper's settings are refused, and a
-//!    screenshot is asked for within the owner's limit).
+//!    follows `computer.foreground` (never / idle / ask / always); what
+//!    the synth may never trigger is refused whatever the settings say
+//!    (`cua_guard`: recording the screen, installing software, updating or
+//!    reconfiguring the helper, replaying a recording), and the driver
+//!    writes a file only into a folder shared for writing; the owner's
+//!    look stays the owner's (`cua_look::gate`: the synth's calls that
+//!    change the cursor are refused, and a screenshot is asked for within
+//!    the owner's limit).
 //!
 //! A stream holds our daemon for as long as it lives (`CuaSession`), so a
 //! new look, which needs a new daemon, never cuts a session short.
@@ -290,6 +294,19 @@ pub async fn filter_line(shared: &Arc<Shared>, is_catalog: bool, line: &[u8]) ->
 
     let s = shared.settings();
 
+    // Never, whatever the owner's settings say: recording the screen,
+    // installing software, updating or reconfiguring the helper, replaying
+    // a recording (the list and the reasons: `cua_guard::NEVER`).
+    if let Some(why) = crate::cua_guard::refusal(tool) {
+        shared.journal().record(Entry::new(
+            "computer",
+            "tools/call",
+            tool,
+            "denied: never allowed for the synth",
+        ));
+        return Gate::Refuse(jsonrpc_error(id, why));
+    }
+
     // Tool denylist.
     if s.computer.tool_denylist.iter().any(|t| t == tool) {
         shared
@@ -361,8 +378,20 @@ pub async fn filter_line(shared: &Arc<Shared>, is_catalog: bool, line: &[u8]) ->
         }
     }
 
-    // The owner's look: the synth does not change the cursor or the
-    // helper's settings, and gets a screenshot within the owner's limit.
+    // A file the driver writes (a screenshot, a download) goes into a
+    // folder the owner shared for writing, or nowhere.
+    if let Err(why) = crate::cua_guard::confine_paths(&mut msg, &s.files).await {
+        shared.journal().record(Entry::new(
+            "computer",
+            "tools/call",
+            tool,
+            "denied: outside the shared folders",
+        ));
+        return Gate::Refuse(jsonrpc_error(id, why));
+    }
+
+    // The owner's look: the synth does not change the cursor, and gets a
+    // screenshot within the owner's limit.
     match crate::cua_look::gate(tool, &mut msg, &s.computer.look) {
         crate::cua_look::Gate::Refuse(why) => {
             shared.journal().record(Entry::new(

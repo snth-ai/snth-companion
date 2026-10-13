@@ -232,7 +232,7 @@ open keeps its daemon and its look; the change starts with the next task.
 
 The synth and the look (`cua_look::gate`, called by `mcp::filter_line`):
 `set_agent_cursor_enabled`, `set_agent_cursor_motion`,
-`set_agent_cursor_theme` and `set_config` are refused with a sentence the
+`set_agent_cursor_theme` are refused with a sentence the
 synth can read (`denied: the cursor's look on this computer is its owner's
 choice ...`), and a `cursor_theme` is taken out of `start_session`. While
 the owner has the cursor switched off, `move_cursor` (which moves nothing
@@ -254,8 +254,8 @@ the owner installed for themselves uses them too:
   (`max_image_dimension`, `experimental_pip`). Nothing redirects it. The app
   never writes it, which is why the screenshot limit rides on each call and
   the preview window is a start flag, and why the synth's `set_config` is
-  refused: its `experimental_pip` keys are written to that shared file from
-  any session. One consequence stays: if the owner switched the preview
+  never allowed (next section): its `experimental_pip` keys are written to
+  that shared file from any session. One consequence stays: if the owner switched the preview
   window on for their own driver in that file, our daemon shows it too.
 
 The name under the cursor is not a setting. The driver draws the `session`
@@ -282,6 +282,58 @@ shared renderer and follow all of it. On a Wayland session the driver may
 hand the cursor to a helper inside the desktop shell that takes only a
 position and the session's colour, so there `Support` offers only the
 on/off switch. The preview window exists on macOS only.
+
+## What the synth is never allowed to trigger (`cua_guard.rs`)
+
+The driver's catalog is built for an agent on its own machine. A few of its
+tools do things on the owner's computer that the owner has no switch for in
+this app. The mcp pipe refuses them whatever the settings say, with a
+sentence that tells the synth what to say to the owner. The list is `NEVER`
+in `cua_guard.rs`, one line of reason each:
+
+| Tool | Why never |
+|---|---|
+| `start_recording` | keeps screenshots, window contents and optionally a video of the owner's screen in a folder on disk; the owner has no switch for it yet |
+| `install_ffmpeg` | installs a program with the system's package manager |
+| `install_extension` | downloads and installs a component of the driver |
+| `check_for_update` | asks GitHub from the owner's computer, writes its answer into `~/.cua-driver` (the home of a driver the owner may run themselves) and returns an install command that would replace that driver |
+| `set_config` | changes the driver's own settings; its `experimental_pip` keys go to `~/.cua-driver/config.json`, shared with the owner's own driver |
+| `replay_trajectory` | runs stored actions inside the driver, where the app cannot check them one by one |
+
+The cursor's look is refused separately (`set_agent_cursor_*`, see "How it
+looks").
+
+One rule for a file the driver writes (`WRITE_ARGS`: `screenshot_out_file`
+of `get_window_state` and `get_desktop_state`, `debug_image_out` of `click`,
+`destination_root` of `browser_download`): the place must be inside a folder
+the owner shared for writing, checked after symlinks are resolved with the
+files tool's own check, and the call goes on with the resolved path. With
+files off, with nothing shared for writing there, with a path that is not
+absolute, or when the owner is asked before every write (the driver cannot
+ask), the call is refused.
+
+Read and left alone, with the reason next to each in `REVIEWED_TOOLS` /
+`REVIEWED_ARGS`: `stop_recording`, `get_recording_state`, `get_config`
+(read-only or harmless), `check_permissions` (an embedded daemon never
+raises a system prompt, whatever `prompt` says), `escalate_session`
+(deprecated, one session's capture scope in memory). The legacy `page`
+actions that change a page or a browser setting are off in the driver
+itself unless the daemon is started with
+`CUA_DRIVER_ENABLE_LEGACY_PAGE_MUTATIONS`, which the app never sets, and the
+driver's screen history needs `--experimental-history`, which the app never
+passes (it has no tool in the catalog either).
+
+Not in these kinds and not changed: `browser_set_input_files` and the
+`file_path` / `image_path` of `clipboard_write` READ a file from anywhere
+(the same reach computer control has through any file dialog).
+
+`connectd selftest cua` holds the lists against the catalog of the driver
+that is really installed (`unclassified`): a tool whose name has install,
+record, update, upgrade, config, permission, history, extension, download,
+escalate, replay, telemetry, autostart, skill, grant or revoke in it, or an
+argument whose name has file, path, dir, out, output, destination, save or
+folder in it, that no list mentions fails the self-test. A new pin cannot
+bring one in unseen.
 
 ## Logins: requests to the synth and the browser link
 

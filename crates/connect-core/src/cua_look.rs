@@ -32,7 +32,8 @@
 //!    (`CUA_DRIVER_RS_HOME` does not move it either). The app never writes
 //!    it: the screenshot limit is put on each call instead, and the preview
 //!    window is a start flag. For the same reason the synth's `set_config`
-//!    is refused: one of its keys is written to that shared file.
+//!    is never allowed (`cua_guard::NEVER`): one of its keys is written to
+//!    that shared file.
 //!
 //! A change of look needs a new daemon. The daemon is replaced only when no
 //! computer-control session is open (`Shared::cua_session`), so a task in
@@ -265,11 +266,9 @@ pub enum Gate {
 /// parsed, `tool` is its name) and change its arguments where needed.
 ///
 /// Refused, not silently dropped: the synth is told the truth and goes on.
-///  - `set_agent_cursor_*`: the cursor's look.
-///  - `set_config`: its `experimental_pip` keys are written to
-///    `~/.cua-driver/config.json`, which a driver the owner installed for
-///    themselves reads too, and its `max_image_dimension` would lift the
-///    owner's screenshot limit for the session.
+///  - `set_agent_cursor_*`: the cursor's look. (`set_config`, which would
+///    lift the screenshot limit and switch the preview window on, is never
+///    allowed at all: `cua_guard::NEVER`.)
 ///
 ///  - `move_cursor`, while the owner has the cursor switched off: the tool
 ///    moves nothing but that cursor, and the driver's own answer then
@@ -283,17 +282,12 @@ pub enum Gate {
 pub fn gate(tool: &str, msg: &mut Value, look: &LookSettings) -> Gate {
     if CURSOR_SETTERS.contains(&tool) {
         return Gate::Refuse(
-            "the cursor's look on this computer is its owner's choice (SNTH Connect); go on without changing it",
-        );
-    }
-    if tool == "set_config" {
-        return Gate::Refuse(
-            "the helper's settings on this computer are its owner's (SNTH Connect); for a smaller screenshot pass max_image_dimension on the call itself",
+            "the cursor's look on this computer is its owner's choice, in SNTH Connect under Computer control; go on without changing it, and tell the owner where the setting is if they asked for another look",
         );
     }
     if tool == "move_cursor" && !look.cursor {
         return Gate::Refuse(
-            "the owner of this computer switched the agent cursor off (SNTH Connect); nothing is wrong, go on without it",
+            "the owner of this computer switched the agent cursor off, in SNTH Connect under Computer control; nothing is wrong, go on without it, and tell the owner where the switch is if they miss the cursor",
         );
     }
     let Some(params) = msg.get_mut("params").and_then(Value::as_object_mut) else {
@@ -450,7 +444,7 @@ mod tests {
     #[test]
     fn the_synth_cannot_change_the_cursor() {
         let look = LookSettings::default();
-        for tool in ["set_agent_cursor_enabled", "set_agent_cursor_motion", "set_agent_cursor_theme", "set_config"] {
+        for tool in ["set_agent_cursor_enabled", "set_agent_cursor_motion", "set_agent_cursor_theme"] {
             let mut msg = call(tool, json!({"session": "task-a", "enabled": false}));
             assert!(matches!(gate(tool, &mut msg, &look), Gate::Refuse(_)), "{tool}");
         }

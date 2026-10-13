@@ -1499,6 +1499,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_pipe_refuses_what_the_synth_may_never_trigger() {
+        use crate::mcp::{filter_line, Gate};
+        use serde_json::json;
+        let (core, _) = test_core();
+        // The most permissive settings there are.
+        core.apply_preset(Preset::Full);
+        let sh = core.shared();
+        let line = |tool: &str, args: serde_json::Value| {
+            serde_json::to_vec(&json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": tool, "arguments": args}})).unwrap()
+        };
+        let refused = |gate: Gate| match gate {
+            Gate::Refuse(v) => {
+                assert_eq!(v["id"], 9, "the answer must carry the call's id");
+                v["error"]["message"].as_str().unwrap_or("").to_string()
+            }
+            Gate::Forward(b) => panic!("forwarded: {}", String::from_utf8_lossy(&b)),
+            Gate::Drop(why) => panic!("dropped: {why}"),
+        };
+
+        for (tool, args) in [
+            ("start_recording", json!({"output_dir": "/tmp/rec", "record_video": true})),
+            ("install_ffmpeg", json!({"confirm": true})),
+            ("install_extension", json!({"name": "perception", "confirm": true})),
+            ("check_for_update", json!({})),
+            ("set_config", json!({"experimental_pip": true})),
+            ("replay_trajectory", json!({"dir": "/tmp/rec"})),
+        ] {
+            let said = refused(filter_line(&sh, false, &line(tool, args)).await);
+            assert!(said.starts_with("denied: "), "{tool}: {said}");
+            assert!(said.contains("owner"), "{tool}: no words for the owner: {said}");
+        }
+        // Ending and reading a recording, and ordinary work, pass.
+        for tool in ["stop_recording", "get_recording_state", "get_config", "click", "get_window_state"] {
+            match filter_line(&sh, false, &line(tool, json!({"session": "task-a"}))).await {
+                Gate::Forward(_) => {}
+                _ => panic!("{tool} must pass"),
+            }
+        }
+        // A file the driver writes: no folder is shared, so nowhere.
+        let said = refused(
+            filter_line(&sh, false, &line("get_desktop_state", json!({"screenshot_out_file": "/tmp/shot.png"}))).await,
+        );
+        assert!(said.starts_with("denied: ") && said.contains("owner"), "{said}");
+        let said = refused(
+            filter_line(&sh, false, &line("browser_download", json!({"ref": "p1:1", "destination_root": "/tmp"}))).await,
+        );
+        assert!(said.starts_with("denied: "), "{said}");
+
+        // One line in the journal per refusal, with a reason the UI knows.
+        let journal = core.recent_journal();
+        assert_eq!(journal.iter().filter(|e| e.outcome == "denied: never allowed for the synth").count(), 6);
+        assert_eq!(journal.iter().filter(|e| e.outcome == "denied: outside the shared folders").count(), 2);
+    }
+
+    #[tokio::test]
     async fn a_session_holds_the_daemon_until_it_ends() {
         let (core, _) = test_core();
         let sh = core.shared();
