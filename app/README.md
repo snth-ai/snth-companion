@@ -317,6 +317,18 @@ hidden "Advanced" override that accepts only `https://` addresses.
   embedded, as the app's child): the app checks and requests Accessibility and
   Screen Recording itself (`connect-core/src/tcc.rs`), and they show up under
   "SNTH Connect" in System Settings.
+- What the synth is never allowed to trigger through computer control,
+  whatever the settings say (`connect-core/src/cua_guard.rs`; the core README
+  has the reasons): `start_recording` (it would keep pictures of the screen
+  on disk and there is no switch for it yet), `install_ffmpeg` and
+  `install_extension` (they install software), `check_for_update` (it writes
+  into the home of a driver the owner may run themselves and answers with an
+  installer command), `set_config` (the helper's own settings),
+  `replay_trajectory` (stored actions the app cannot check). A screenshot or
+  a download the helper writes to disk goes only into a folder shared for
+  writing in Files. Each refusal tells the synth what to say to the owner,
+  and shows in Activity as "never allowed". The self-test fails when a new
+  helper version brings a tool of these kinds that nobody has classified.
 - "How it looks" on the Computer control page (`settings.computer.look`,
   `connect-core/src/cua_look.rs`) is the helper's own look, applied as the
   start flags of the app's own helper daemon; the core README has the whole

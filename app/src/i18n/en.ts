@@ -574,6 +574,7 @@ export const en = {
       metered: "metered connection",
       blockedApp: "blocked app",
       yourLook: "the look is yours to set",
+      never: "never allowed",
       screenOff: "taking over the screen is off",
       screenAway: "you were at the computer",
       away: "you were at the computer",

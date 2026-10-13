@@ -246,6 +246,7 @@ function refusalReason(outcome: string, s: Strings): string {
   if (o.includes("traffic cap")) return why.cap;
   if (o.includes("metered")) return why.metered;
   if (o.includes("the look is the owner's")) return why.yourLook;
+  if (o.includes("never allowed")) return why.never;
   if (o.includes("blocklist") || o.includes("denylist")) return why.blockedApp;
   if (o.includes("only while you are away")) return why.away;
   if (o.includes("outside the shared folders")) return why.outsideFolders;
