@@ -12,6 +12,7 @@ name = "connect_core"
 path = "src/lib.rs"
 
 [dependencies]
+connect-host = { path = "../connect-host" }
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 tokio-util.workspace = true

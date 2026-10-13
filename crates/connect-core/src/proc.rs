@@ -81,7 +81,7 @@ mod tests {
         let core = Path::new(env!("CARGO_MANIFEST_DIR"));
         let repo = core.parent().and_then(Path::parent).expect("repo root");
         let mut files = Vec::new();
-        for dir in ["crates/connect-core/src", "crates/connectd/src", "app/src-tauri/src"] {
+        for dir in ["crates/connect-core/src", "crates/connect-host/src", "crates/connectd/src", "app/src-tauri/src"] {
             let dir = repo.join(dir);
             assert!(dir.is_dir(), "{} is missing", dir.display());
             rust_files(&dir, &mut files);

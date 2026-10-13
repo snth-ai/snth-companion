@@ -30,6 +30,7 @@ macro_rules! logln {
 }
 
 pub mod apps;
+pub mod browser;
 pub mod cookies;
 pub mod core;
 pub mod cua;
@@ -43,6 +44,7 @@ pub mod pairing;
 pub mod presence;
 pub mod proc;
 pub mod proto;
+pub mod requests;
 pub mod rpc;
 pub mod secret;
 pub mod settings;

@@ -36,6 +36,9 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
 const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 const PRESENCE_EVERY: Duration = Duration::from_secs(15);
 
+/// One control line from the synth (connect.md: 256 KiB).
+const MAX_CONTROL_LINE: usize = 256 * 1024;
+
 const MAX_STREAMS: usize = 128;
 const MAX_CONNECTION_WINDOW: usize = 48 * 1024 * 1024;
 const SPLIT_SEND: usize = 64 * 1024;
@@ -202,8 +205,21 @@ async fn run_one(
     }
 }
 
-/// hello, then presence / settings / unpair until the link drops.
+/// Ends the app's requests to the synth when the control stream ends,
+/// however it ends (a dropped link, a shutdown, an aborted task).
+struct RequestsAttached(Arc<Shared>, u64);
+
+impl Drop for RequestsAttached {
+    fn drop(&mut self) {
+        self.0.requests.detach(self.1);
+    }
+}
+
+/// hello, then presence / settings / unpair / requests until the link
+/// drops.
 async fn control_loop(mut s: MuxStream, shared: Arc<Shared>, established: Arc<AtomicBool>) -> String {
+    let (mut requests_rx, generation) = shared.requests.attach();
+    let _requests = RequestsAttached(shared.clone(), generation);
     if let Err(e) = write_json_line(&mut s, &json!({"kind": "control"})).await {
         return format!("send header: {e}");
     }
@@ -244,13 +260,14 @@ async fn control_loop(mut s: MuxStream, shared: Arc<Shared>, established: Arc<At
     let est = established.clone();
     let reader = async move {
         loop {
-            match read_line(&mut rd, MAX_HEADER_LINE).await {
+            match read_line(&mut rd, MAX_CONTROL_LINE).await {
                 Ok(Some(line)) => {
                     let msg: Value = serde_json::from_slice(&line).unwrap_or_default();
                     match msg.get("type").and_then(|t| t.as_str()) {
                         Some("hello_ack") => {
                             let ack: wire::HelloAck =
                                 serde_json::from_slice(&line).unwrap_or_default();
+                            shared_r.requests.set_supported(ack.has(crate::requests::FEATURE));
                             shared_r.set_synth(ack.clone());
                             shared_r.set_link_state(
                                 LinkState::Linked,
@@ -259,6 +276,7 @@ async fn control_loop(mut s: MuxStream, shared: Arc<Shared>, established: Arc<At
                             est.store(true, Ordering::Release);
                             logln!("linked as device {}", shared_r.device_id());
                         }
+                        Some("response") => shared_r.requests.resolve(&msg),
                         Some("unpair_ack") => {
                             shared_r.unpair_ack.notify_one();
                             return "unpaired (ack)".to_string();
@@ -315,6 +333,11 @@ async fn control_loop(mut s: MuxStream, shared: Arc<Shared>, established: Arc<At
                 _ = shared_w.unpair_req.notified() => {
                     if let Err(e) = write_json_line(&mut wr, &json!({"type":"unpair"})).await {
                         return format!("send unpair: {e}");
+                    }
+                }
+                Some(request) = requests_rx.recv() => {
+                    if let Err(e) = write_json_line(&mut wr, &request).await {
+                        return format!("send request: {e}");
                     }
                 }
             }

@@ -103,6 +103,16 @@ pub struct HelloAck {
     pub synth_name: String,
     #[serde(default)]
     pub synth_version: String,
+    /// What this synth supports beyond the first release of protocol v1
+    /// ("requests", "vault"). An older synth sends none.
+    #[serde(default)]
+    pub features: Vec<String>,
+}
+
+impl HelloAck {
+    pub fn has(&self, feature: &str) -> bool {
+        self.features.iter().any(|f| f == feature)
+    }
 }
 
 /// device.info result (connect.md rpc).

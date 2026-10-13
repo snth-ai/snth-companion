@@ -185,6 +185,7 @@ async fn files_method(shared: &Arc<Shared>, req: &Request) -> Result<Value, Stri
 }
 
 async fn cookies_get(shared: &Arc<Shared>, req: &Request) -> Result<Value, String> {
+    let started = std::time::Instant::now();
     if shared.paused() {
         return Err("denied: cookies are paused by the owner".into());
     }
@@ -199,6 +200,12 @@ async fn cookies_get(shared: &Arc<Shared>, req: &Request) -> Result<Value, Strin
         .ok_or("bad request: params.domain is required")?;
     let reason = req.params.get("reason").and_then(Value::as_str).unwrap_or("");
     let domain = core::registrable_domain(raw);
+    // One site at a time. "com" or "co.uk" would cover every site under
+    // it, so it is refused before the owner is asked anything.
+    if !core::is_one_site(&domain) {
+        return Err("bad request: params.domain must name one site".into());
+    }
+    let extension_first = shared.cookies_extension_first.load(std::sync::atomic::Ordering::Acquire);
 
     use crate::settings::CookiesMode;
     let need_ask = match s.cookies.mode {
@@ -207,12 +214,22 @@ async fn cookies_get(shared: &Arc<Shared>, req: &Request) -> Result<Value, Strin
         CookiesMode::Ask => true,
     };
     if need_ask {
-        let ask = ApprovalRequest::new(
+        let mut ask = ApprovalRequest::new(
             "cookies",
             &domain,
             reason,
             format!("hand the synth your browser cookies for {domain}"),
         );
+        // When the answer leads to a second question, in the browser, the
+        // window says so before the owner answers: the two read as one.
+        if extension_first {
+            if let Some((browser, false)) = shared.extension_for(&domain) {
+                ask = ask.with_details(vec![(
+                    "browser_step".to_string(),
+                    crate::browser::browser_name(&browser).to_string(),
+                )]);
+            }
+        }
         let appr = shared.ask_scoped("cookies", &domain, ask).await;
         if !appr.allow {
             shared
@@ -222,28 +239,83 @@ async fn cookies_get(shared: &Arc<Shared>, req: &Request) -> Result<Value, Strin
         }
     }
 
+    // The owner allowed the site (now, earlier, or by "never ask"). Two
+    // sources: a browser the owner linked through the SNTH Vault
+    // extension, and the browsers' own files. Where the files of the
+    // common browsers cannot be read (Chrome and Edge on Windows) the
+    // extension goes first; elsewhere it is the fallback.
+    let done = |r: crate::cookies::CookieRead| {
+        // Journal: domain, count, browser. NEVER a value.
+        shared.journal().record(Entry::new(
+            "cookies",
+            "cookies.get",
+            format!("{domain} ({} from {})", r.cookies.len(), r.source),
+            "ok",
+        ));
+        Ok(json!({"cookies": r.cookies, "source": r.source}))
+    };
+    // What is left of the answer window (the synth gives up at 60 s).
+    let left = || {
+        crate::grant::APPROVAL_TIMEOUT
+            .saturating_sub(started.elapsed())
+            .max(std::time::Duration::from_secs(3))
+    };
+    use crate::browser::ExtensionRead;
+    let refused = |outcome: ExtensionRead| -> Option<String> {
+        let why = match outcome {
+            ExtensionRead::Denied(why) | ExtensionRead::NoAnswer(why) => format!("denied: {why}"),
+            ExtensionRead::Failed(why) => {
+                // Not the owner's decision: the other source may still serve.
+                logln!("cookies.get: {why}");
+                return None;
+            }
+            _ => return None,
+        };
+        shared.journal().record(Entry::new("cookies", "cookies.get", domain.clone(), why.clone()));
+        Some(why)
+    };
+
+    if extension_first {
+        match shared.cookies_via_extension(&domain, left()).await {
+            ExtensionRead::Cookies(r) if !r.cookies.is_empty() => return done(r),
+            other => {
+                if let Some(why) = refused(other) {
+                    return Err(why);
+                }
+            }
+        }
+    }
+
     // Read on a blocking pool: rusqlite + file copy are blocking.
     let source = shared.cookies.clone();
     let dom = domain.clone();
     let read = tokio::task::spawn_blocking(move || source.get(&dom))
         .await
         .map_err(|e| format!("cookies.get: join: {e}"))?;
-    match read {
-        Ok(r) => {
-            // Journal: domain, count, browser. NEVER a value.
-            shared.journal().record(Entry::new(
-                "cookies",
-                "cookies.get",
-                format!("{domain} ({} from {})", r.cookies.len(), r.source),
-                "ok",
-            ));
-            Ok(json!({"cookies": r.cookies, "source": r.source}))
+    let unavailable = match read {
+        Ok(r) if !r.cookies.is_empty() => return done(r),
+        Ok(_) | Err(crate::cookies::CookieError::NotFound) => None,
+        Err(crate::cookies::CookieError::Unavailable(m)) => Some(m),
+        Err(crate::cookies::CookieError::Failed(m)) => return Err(format!("cookies.get: {m}")),
+    };
+
+    if !extension_first {
+        match shared.cookies_via_extension(&domain, left()).await {
+            ExtensionRead::Cookies(r) if !r.cookies.is_empty() => return done(r),
+            other => {
+                if let Some(why) = refused(other) {
+                    return Err(why);
+                }
+            }
         }
-        Err(crate::cookies::CookieError::Unavailable(m)) => Err(format!("unavailable: {m}")),
-        Err(crate::cookies::CookieError::NotFound) => {
-            Ok(json!({"cookies": [], "source": ""}))
-        }
-        Err(crate::cookies::CookieError::Failed(m)) => Err(format!("cookies.get: {m}")),
+    }
+
+    match unavailable {
+        // The files could not be read and no linked browser could help.
+        Some(m) => Err(format!(
+            "unavailable: {m}; the owner can link that browser in the SNTH Connect app (Logins) to share its sign-ins"
+        )),
+        None => Ok(json!({"cookies": [], "source": ""})),
     }
 }
 

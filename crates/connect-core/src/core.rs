@@ -61,6 +61,9 @@ pub enum CoreEvent {
     Paired { synth_id: String },
     Unpaired,
     Paused { paused: bool },
+    /// A browser's extension connected, left, was linked or unlinked, or
+    /// the sites it may read changed.
+    Browsers,
 }
 
 /// After a failed start of our daemon the next try waits: 5 s, 15 s, 1 min,
@@ -182,6 +185,15 @@ pub struct Shared {
     pub(crate) control_tx: watch::Sender<u64>,  // bumped on pause/resume so the link reacts
     pub(crate) unpair_req: tokio::sync::Notify,  // the owner asked to unpair
     pub(crate) unpair_ack: tokio::sync::Notify,  // the synth acknowledged
+    /// What the app asks the synth over the control stream (requests.rs).
+    pub(crate) requests: crate::requests::LinkRequests,
+    /// The owner's browsers, through the SNTH Vault extension (browser.rs).
+    pub(crate) browsers: crate::browser::Hub,
+    /// Ask a linked browser for cookies BEFORE reading browser files.
+    /// True where the files of the common browsers cannot be read at all
+    /// (Chrome and Edge on Windows); elsewhere the extension is the
+    /// fallback.
+    pub(crate) cookies_extension_first: AtomicBool,
 }
 
 impl Shared {
@@ -208,6 +220,17 @@ impl Shared {
     }
     pub fn grants(&self) -> &GrantStore {
         &self.grants
+    }
+    /// A confirmed pairing with a synth exists (link up or not).
+    pub(crate) fn is_paired(&self) -> bool {
+        self.identity.read().unwrap().is_some()
+    }
+    pub(crate) fn emit(&self, event: CoreEvent) {
+        let _ = self.events.send(event);
+    }
+    /// Write the persisted record; the caller holds its write lock.
+    pub(crate) fn save_persisted(&self, p: &Persisted) {
+        self.save_locked(p);
     }
 
     pub(crate) fn set_link_state(&self, s: LinkState, detail: &str) {
@@ -662,6 +685,9 @@ impl Core {
             control_tx,
             unpair_req: tokio::sync::Notify::new(),
             unpair_ack: tokio::sync::Notify::new(),
+            requests: crate::requests::LinkRequests::default(),
+            browsers: crate::browser::Hub::default(),
+            cookies_extension_first: AtomicBool::new(cfg!(windows)),
         });
         // A stored token means we are already paired: reflect it. The
         // synth url/id come back from settings.json (see above); the CLI
@@ -767,6 +793,18 @@ impl Core {
     pub fn revoke(&self, capability: &str, scope: &str) {
         self.shared.grants.revoke(capability, scope);
         self.shared.persist_grants();
+        // A site taken back here is taken back in the browsers too: no
+        // extension keeps the right to read its cookies.
+        if capability == "cookies" {
+            self.shared.browsers_revoke_site(scope);
+        }
+    }
+
+    /// Which cookie source goes first: a linked browser's extension
+    /// (true) or the browsers' files (false). The default follows the
+    /// system: the extension first on Windows, the files first elsewhere.
+    pub fn set_cookies_extension_first(&self, first: bool) {
+        self.shared.cookies_extension_first.store(first, Ordering::Release);
     }
 
     // --- connection facts the host observes ---
@@ -862,6 +900,7 @@ impl Core {
         let _ = self.shared.events.send(CoreEvent::Paired {
             synth_id: p.synth_id.clone(),
         });
+        self.shared.browsers_link_changed(true);
         Ok(p)
     }
 
@@ -928,6 +967,7 @@ impl Core {
         }
         self.shared.set_link_state(LinkState::Unpaired, "unpaired");
         let _ = self.shared.events.send(CoreEvent::Unpaired);
+        self.shared.browsers_link_changed(false);
     }
 
     // --- cua helpers for the UI ---
@@ -1175,6 +1215,14 @@ pub fn registrable_domain(host: &str) -> String {
         Some(d) => d.to_string(),
         None => host,
     }
+}
+
+/// Is this something a cookie grant can be for: one site (a registrable
+/// domain, as `registrable_domain` returns it) or one address? A bare
+/// public suffix ("com", "co.uk") is not: its "subdomains" are every
+/// site under it.
+pub fn is_one_site(domain: &str) -> bool {
+    domain.parse::<std::net::IpAddr>().is_ok() || psl::domain_str(domain).is_some_and(|d| d == domain)
 }
 
 /// Read the user's running daemon socket from `cua-driver status`

@@ -216,7 +216,7 @@ pub fn read_chromium(
         .map_err(|e| CookieError::Failed(format!("read key for {browser}: {e}")))?;
     let Some(password) = password else {
         return Err(CookieError::Unavailable(format!(
-            "no Safe Storage key for {browser} on this OS (Chrome on Windows encrypts cookies per application; not supported yet)"
+            "the cookies of {browser} cannot be read from its files on this system (Chrome and Edge on Windows lock them to the browser itself)"
         )));
     };
     let key = derive_key(&password);

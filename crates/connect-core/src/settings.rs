@@ -368,6 +368,29 @@ pub struct StoredGrant {
     pub until: i64,
 }
 
+/// A browser whose SNTH Vault extension has talked to this app. Kept so the
+/// Logins page can show it while the browser is closed, and so only a
+/// browser the owner linked here is ever asked for a site's cookies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredBrowser {
+    /// A random id the extension made for its own profile.
+    pub install: String,
+    /// "chrome", "edge", "brave", "chromium" or "browser".
+    pub browser: String,
+    /// The owner linked it in this app and it holds a vault pairing of
+    /// this synth.
+    #[serde(default)]
+    pub linked: bool,
+    /// The vault's id of that pairing ("dev_..."), for unlinking.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub device_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ext_version: String,
+    /// Unix seconds of its last hello.
+    #[serde(default)]
+    pub last_seen: i64,
+}
+
 /// What is actually written to disk: the settings plus the monotonic rev,
 /// and the small amount of state that must survive a restart.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -389,6 +412,10 @@ pub struct Persisted {
     pub egress_month: String,
     #[serde(default)]
     pub egress_bytes: u64,
+    /// Browsers whose extension has talked to this app (see
+    /// `StoredBrowser`). Not part of `settings_rev`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub browsers: Vec<StoredBrowser>,
 }
 
 impl Persisted {
@@ -401,6 +428,7 @@ impl Persisted {
             grants: Vec::new(),
             egress_month: String::new(),
             egress_bytes: 0,
+            browsers: Vec::new(),
         }
     }
 }
