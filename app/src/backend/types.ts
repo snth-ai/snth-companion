@@ -127,6 +127,53 @@ export interface Pending {
   synth_url: string;
 }
 
+/** A browser we know by name, or "browser" for one we do not. */
+export type BrowserId = "chrome" | "edge" | "brave" | "chromium" | "browser";
+
+/** One browser on the Logins page. */
+export interface BrowserRow {
+  browser: BrowserId;
+  name: string;
+  /** The extension's id for its browser profile. null = no extension has
+   * talked to the app from this browser. */
+  install: string | null;
+  /** missing: no extension heard from. installed: heard from, not linked.
+   * linked: the owner linked it and it can share logins with the synth. */
+  state: "missing" | "installed" | "linked";
+  /** The extension is talking to the app right now. */
+  connected: boolean;
+  ext_version: string;
+  /** The sites it may hand a sign-in for. */
+  sites: string[];
+  /** Unix seconds of its last hello. */
+  last_seen: number;
+}
+
+/** One login the synth's vault holds. Never the login itself. */
+export interface VaultSite {
+  site: string;
+  has_totp: boolean;
+  /** Unix seconds; 0 = unknown / never. */
+  updated: number;
+  last_used: number;
+  use_count: number;
+}
+
+/** What the synth's vault holds, as far as the app knows.
+ * unknown: not asked yet. offline: the synth cannot be asked right now.
+ * outdated: the synth is older than this feature. unavailable: the synth
+ * has no vault. */
+export type VaultView =
+  | { state: "unknown" | "offline" | "outdated" | "unavailable" | "failed" }
+  | { state: "ready"; sites: VaultSite[]; devices: number; fetched_at: number };
+
+export interface LoginsState {
+  browsers: BrowserRow[];
+  /** The browser link is being served by this copy of the app. */
+  link_ready: boolean;
+  vault: VaultView;
+}
+
 export interface UiState {
   core: Snapshot;
   link_detail: string;
@@ -140,6 +187,8 @@ export interface UiState {
   /** The apps this computer offers (no Mac app on Windows), with the
    * owner's switches. */
   apps: AppView[];
+  /** The Logins page: the browsers and what the synth's vault holds. */
+  logins: LoginsState;
   prefs: {
     onboarded: boolean;
     /** "en" / "ru" when the owner picked one; null = follow the system. */
@@ -247,6 +296,7 @@ export type ExternalTarget =
   | "privacy_automation"
   | "privacy_full_disk"
   | "helper"
+  | "vault_extension"
   | "releases";
 
 export type UiEvent =
@@ -298,6 +348,17 @@ export interface Backend {
   appsCheck(): Promise<AppsStatus>;
   /** macOS asks whether SNTH Connect may control this app. */
   appsRequestPermission(app: string): Promise<void>;
+
+  /** Ask the synth which sites its vault holds a login for. */
+  loginsRefresh(): Promise<UiState>;
+  /** Remove one saved login from the synth's vault. */
+  vaultForget(site: string): Promise<UiState>;
+  /** Link a browser whose extension is connected. The click is the
+   * owner's confirmation. Rejects with the reason's code. */
+  browserLink(install: string): Promise<UiState>;
+  browserUnlink(install: string): Promise<UiState>;
+  /** Take a browser that is gone off the list. */
+  browserForget(install: string): Promise<UiState>;
 
   setLanguage(language: string | null, resolved: string): Promise<UiState>;
   setAutostart(enabled: boolean): Promise<UiState>;

@@ -95,6 +95,15 @@ pub fn approval_title(lang: Lang, synth: &str) -> String {
     }
 }
 
+/// The title when it is not the synth that asks but the owner's own
+/// browser (its SNTH Vault extension wants to be linked).
+pub fn browser_asks_title(lang: Lang, browser: &str) -> String {
+    match lang {
+        Lang::En => format!("{browser} asks to be linked"),
+        Lang::Ru => format!("{browser} просит привязку"),
+    }
+}
+
 /// One plain line for the notification. The approval window has the full
 /// wording; this only says what kind of request is waiting.
 pub fn approval_body(lang: Lang, capability: &str, scope: &str) -> String {
@@ -126,6 +135,9 @@ pub fn approval_body(lang: Lang, capability: &str, scope: &str) -> String {
         (Lang::Ru, "apps") if scope.starts_with("messages.send:") => "Отправить сообщение от вашего имени".into(),
         (Lang::En, "apps") => "Change something in your apps".into(),
         (Lang::Ru, "apps") => "Изменить что-то в ваших приложениях".into(),
+        // The SNTH Vault extension in a browser on this computer.
+        (Lang::En, "vault") => "Share site passwords with your synth from this browser".into(),
+        (Lang::Ru, "vault") => "Передавать синту пароли сайтов из этого браузера".into(),
         (Lang::En, _) => "Open the request window to answer.".into(),
         (Lang::Ru, _) => "Откройте окно запроса, чтобы ответить.".into(),
     }

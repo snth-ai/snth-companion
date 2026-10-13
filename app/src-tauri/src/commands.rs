@@ -19,7 +19,7 @@ use tauri_plugin_dialog::DialogExt;
 use crate::i18n::Lang;
 use crate::state::{build_state, matching_preset, Ctx, PendingDto, UiState, HUB_URL};
 use crate::ui::{self, UiEvent};
-use crate::{actions, tray, updates, windows};
+use crate::{actions, logins, tray, updates, windows};
 
 type Cx<'a> = State<'a, Arc<Ctx>>;
 
@@ -523,6 +523,62 @@ pub async fn apps_request_permission(ctx: Cx<'_>, app: String) -> Result<(), Str
     .map_err(|e| format!("helper_failed: {e}"))
 }
 
+// --- logins: the synth's vault and the browsers ---
+
+/// Ask the synth which sites its vault holds a login for (names and
+/// dates only; there is no request that returns a login).
+#[tauri::command]
+pub async fn logins_refresh(ctx: Cx<'_>) -> Result<UiState, String> {
+    if ctx.core.is_paired() {
+        match ctx.core.vault_list().await {
+            Ok(list) => ctx.vault.ready(list),
+            Err(e) => ctx.vault.set(logins::vault_failure(&e)),
+        }
+    } else {
+        ctx.vault.set(logins::VaultView::Unknown);
+    }
+    Ok(build_state(&ctx).await)
+}
+
+/// Remove one saved login from the synth's vault.
+#[tauri::command]
+pub async fn vault_forget(ctx: Cx<'_>, site: String) -> Result<UiState, String> {
+    ctx.core.vault_forget(&site).await.map_err(|e| format!("vault_failed: {e}"))?;
+    ctx.vault.drop_site(&site.trim().to_ascii_lowercase());
+    Ok(build_state(&ctx).await)
+}
+
+/// "Link this browser": the owner's click here is the confirmation. The
+/// app gets a pairing code from the synth and hands it to that browser's
+/// extension, which redeems it at the hub.
+#[tauri::command]
+pub async fn browser_link(ctx: Cx<'_>, install: String) -> Result<UiState, String> {
+    ctx.core.browser_link(&install).await.map_err(|why| why.code().to_string())?;
+    Ok(build_state(&ctx).await)
+}
+
+/// Unlink one browser: its extension forgets the pairing and every site,
+/// and the synth removes the pairing at the vault.
+#[tauri::command]
+pub async fn browser_unlink(ctx: Cx<'_>, install: String) -> Result<UiState, String> {
+    // The browser is unlinked here whatever the synth answers; an error
+    // only means the vault could not be told right now.
+    let told = ctx.core.browser_unlink(&install).await;
+    ctx.vault.set(logins::VaultView::Unknown);
+    match told {
+        Ok(()) => Ok(build_state(&ctx).await),
+        Err(e) if e == "unknown browser" => Err("unknown_browser".into()),
+        Err(_) => Ok(build_state(&ctx).await),
+    }
+}
+
+/// Take a browser that is gone off the list.
+#[tauri::command]
+pub async fn browser_forget(ctx: Cx<'_>, install: String) -> Result<UiState, String> {
+    ctx.core.browser_forget(&install);
+    Ok(build_state(&ctx).await)
+}
+
 // --- general ---
 
 /// `language`: "en" / "ru", or None to follow the OS again. `resolved` is
@@ -641,7 +697,13 @@ pub async fn diagnostics(ctx: Cx<'_>) -> Result<String, String> {
         format!("internet: {} (mode {:?}, {} listed sites, local network {}, limit {} bytes, skip metered {})",
             on(s.net.enabled), s.net.mode, s.net.domains.len(), on(s.net.allow_local_network), s.net.monthly_cap_bytes, on(s.net.skip_on_metered)),
         format!("internet used in {}: {} bytes (metered now: {})", c.egress_month, c.egress_bytes, c.metered),
-        format!("sites and cookies: {} (mode {:?})", on(s.cookies.enabled), s.cookies.mode),
+        format!("logins: sign-ins {} (mode {:?}); browser link {}; browsers: {}",
+            on(s.cookies.enabled), s.cookies.mode,
+            if st.logins.link_ready { "served" } else { "not served" },
+            // The browser and where it stands, never a site name.
+            if st.logins.browsers.is_empty() { "none".to_string() } else {
+                st.logins.browsers.iter().map(|b| format!("{} {}{}", b.browser, b.state, if b.connected { " (connected)" } else { "" })).collect::<Vec<_>>().join(", ")
+            }),
         format!("computer control: {} (mode {:?}, screen {:?}, away after {} min, {} blocked apps)",
             on(s.computer.enabled), s.computer.mode, s.computer.foreground, s.computer.away_idle_minutes, s.computer.app_blocklist.len()),
         format!("files: {} ({} folders, ask before writing {})", on(s.files.enabled), s.files.roots.len(), on(s.files.ask_on_write)),
@@ -684,6 +746,7 @@ fn on(b: bool) -> &'static str {
 /// the place; it never supplies a URL.
 #[tauri::command]
 pub fn open_external(target: String) -> Result<(), String> {
+    let extension = logins::extension_url(HUB_URL);
     let url = match target.as_str() {
         "privacy_accessibility" => {
             "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
@@ -698,6 +761,8 @@ pub fn open_external(target: String) -> Result<(), String> {
             "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
         }
         "helper" => "https://cua.ai/docs/cua-driver",
+        // Where the SNTH Vault extension is installed from.
+        "vault_extension" => extension.as_str(),
         "releases" => "https://github.com/snth-ai/snth-companion/releases/latest",
         _ => return Err("unknown_target".into()),
     };

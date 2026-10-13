@@ -63,6 +63,12 @@ pub struct Ctx {
     pub updater_ready: bool,
     /// The stop shortcut is registered with the OS right now.
     pub shortcut_active: Mutex<bool>,
+    /// The app's data folder (the journal, the helper, the browser link).
+    pub data_dir: PathBuf,
+    /// Why the browser link is not being served, when it is not.
+    pub browser_link: Mutex<Option<String>>,
+    /// What the synth's vault holds, as last asked (Logins page).
+    pub vault: crate::logins::VaultCache,
 }
 
 impl Ctx {
@@ -147,6 +153,8 @@ pub struct UiState {
     /// The owner's own apps this computer offers (no Mac app on
     /// Windows), with the owner's switches.
     pub apps: Vec<connect_core::apps::AppView>,
+    /// The Logins page: the browsers and what the synth's vault holds.
+    pub logins: crate::logins::LoginsState,
     pub prefs: PrefsDto,
     pub app: AppInfo,
 }
@@ -175,6 +183,7 @@ pub async fn build_state(ctx: &Ctx) -> UiState {
             .map(|(capability, scope, until)| GrantDto { capability, scope, until })
             .collect(),
         apps: ctx.core.apps_views(),
+        logins: crate::logins::state(ctx),
         prefs: PrefsDto {
             onboarded: prefs.onboarded,
             language: prefs.language,

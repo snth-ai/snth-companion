@@ -10,6 +10,7 @@ mod approvals;
 mod browsers;
 mod commands;
 mod i18n;
+mod logins;
 #[cfg(target_os = "macos")]
 mod menu;
 mod prefs;
@@ -138,6 +139,9 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
         cua_bin: core.cua_bin(),
         updater_ready,
         shortcut_active: Mutex::new(false),
+        data_dir: data_dir.clone(),
+        browser_link: Mutex::new(None),
+        vault: logins::VaultCache::default(),
     });
     app.manage(ctx.clone());
 
@@ -151,6 +155,11 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
     spawn_event_forwarder(ctx.clone());
     spawn_link(ctx.clone(), shutdown_rx.clone());
     spawn_helper(ctx.clone(), shutdown_rx.clone());
+    // The SNTH Vault extension: serve its helper, and tell the installed
+    // browsers where that helper is (only while linked to a synth; this
+    // also follows the app after an update or a move).
+    logins::spawn_link(ctx.clone(), shutdown_rx.clone());
+    logins::sync(&ctx);
     updates::spawn(ctx.clone(), shutdown_rx);
 
     tray::build(&handle, &ctx)?;
@@ -287,6 +296,15 @@ fn spawn_event_forwarder(ctx: Arc<Ctx>) {
                             ui::emit(&ctx.app, UiEvent::State);
                         }
                     }
+                    // Linked or unlinked: the browsers learn or forget
+                    // where the helper is, and what the vault held is no
+                    // longer known.
+                    Ok(CoreEvent::Paired { .. } | CoreEvent::Unpaired) => {
+                        logins::sync(&ctx);
+                        ctx.vault.set(logins::VaultView::Unknown);
+                        tray::refresh(&ctx);
+                        ui::emit(&ctx.app, UiEvent::State);
+                    }
                     Ok(_) | Err(RecvError::Lagged(_)) => {
                         tray::refresh(&ctx);
                         ui::emit(&ctx.app, UiEvent::State);
@@ -376,6 +394,11 @@ fn main() {
             commands::cua_install,
             commands::apps_check,
             commands::apps_request_permission,
+            commands::logins_refresh,
+            commands::vault_forget,
+            commands::browser_link,
+            commands::browser_unlink,
+            commands::browser_forget,
             commands::set_language,
             commands::set_autostart,
             commands::set_stop_shortcut,

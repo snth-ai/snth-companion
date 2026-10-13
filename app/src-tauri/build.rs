@@ -37,6 +37,12 @@ const COMMANDS: &[&str] = &[
     // the owner's own apps
     "apps_check",
     "apps_request_permission",
+    // logins: the vault list and the browsers
+    "logins_refresh",
+    "vault_forget",
+    "browser_link",
+    "browser_unlink",
+    "browser_forget",
     // general
     "set_language",
     "set_autostart",

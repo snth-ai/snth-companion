@@ -40,6 +40,12 @@ export const tauriBackend: Backend = {
   appsCheck: () => invoke("apps_check"),
   appsRequestPermission: (app) => invoke("apps_request_permission", { app }),
 
+  loginsRefresh: () => invoke("logins_refresh"),
+  vaultForget: (site) => invoke("vault_forget", { site }),
+  browserLink: (install) => invoke("browser_link", { install }),
+  browserUnlink: (install) => invoke("browser_unlink", { install }),
+  browserForget: (install) => invoke("browser_forget", { install }),
+
   setLanguage: (language, resolved) => invoke("set_language", { language, resolved }),
   setAutostart: (enabled) => invoke("set_autostart", { enabled }),
   setStopShortcut: (accelerator) => invoke("set_stop_shortcut", { accelerator }),

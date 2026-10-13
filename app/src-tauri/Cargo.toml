@@ -12,11 +12,20 @@ default-run = "snth-connect"
 name = "snth-connect"
 path = "src/main.rs"
 
+# The helper the browsers start for the SNTH Vault extension. A second
+# program of this package so the bundler ships it next to the app (in
+# Contents/MacOS on macOS, the install folder on Windows, /usr/bin in the
+# Linux packages) and signs it with the app.
+[[bin]]
+name = "snth-connect-host"
+path = "src/bin/snth-connect-host.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
 connect-core = { path = "../../crates/connect-core" }
+connect-host = { path = "../../crates/connect-host" }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-deep-link = "2"

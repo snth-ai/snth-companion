@@ -72,11 +72,15 @@ pub fn notify_approval(app: &AppHandle, dto: &ApprovalDto) {
         .synth_name
         .or(brief.synth_id)
         .unwrap_or_else(|| "SNTH".to_string());
-    notify(
-        app,
-        &i18n::approval_title(lang, &synth),
-        &i18n::approval_body(lang, &dto.capability, &dto.scope),
-    );
+    // A browser link is asked for by the owner's own browser, not by
+    // the synth: the title says so (the scope is the browser's name, from
+    // the app's own list).
+    let title = if dto.capability == connect_core::browser::CAP {
+        i18n::browser_asks_title(lang, &dto.scope)
+    } else {
+        i18n::approval_title(lang, &synth)
+    };
+    notify(app, &title, &i18n::approval_body(lang, &dto.capability, &dto.scope));
 }
 
 pub fn notify_paused(app: &AppHandle) {
