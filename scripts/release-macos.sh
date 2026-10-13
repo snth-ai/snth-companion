@@ -7,6 +7,10 @@
 #
 # What it does:
 #   1. builds the app (arm64) signed with the Developer ID, hardened runtime
+#   1a. builds the Safari extension (scripts/build-safari-appex.sh: the native
+#      handler with Xcode, the web extension from its own repository), puts it
+#      into the app (Contents/PlugIns/SNTH Vault.appex) and signs inside out:
+#      the extension sandboxed and in the app group, then the app around it
 #   2. notarizes it with the keychain profile, staples the ticket, and checks
 #      it with codesign and Gatekeeper (spctl)
 #   3. makes the first-install download (a signed, notarized, stapled DMG)
@@ -26,11 +30,14 @@
 #                `rustup target add x86_64-apple-darwin`; about twice the
 #                build time; not the default yet and never tried)
 #
-# Needs: Xcode command line tools, node + npm, rustup/cargo, gh (signed in),
-# the Developer ID certificate and the notary profile in the login keychain,
-# the updater key file, and its password in the login keychain.
+# Needs: Xcode (the full app: xcodebuild builds the Safari extension), node +
+# npm, rustup/cargo, gh (signed in), the SNTH Vault extension's repository next
+# to this one, the Developer ID certificate and the notary profile in the login
+# keychain, the updater key file, and its password in the login keychain.
 #
 # Settings (environment, all optional):
+#   SNTH_VAULT_EXTENSION           the SNTH Vault extension's repository (../snth-vault-extension)
+#   SNTH_VAULT_REF                 the commit of it to ship               (HEAD)
 #   SNTH_CONNECT_REPO              GitHub repo           (snth-ai/snth-companion)
 #   SNTH_CONNECT_SIGNING_IDENTITY  codesign identity     (Developer ID Application: Aleksandr Sabri (CZAP38JFAE))
 #   SNTH_CONNECT_NOTARY_PROFILE    notarytool profile    (SNTH_NOTARY)
@@ -47,6 +54,13 @@ KEY_FILE="${SNTH_CONNECT_UPDATER_KEY:-$HOME/.tauri/snth-connect.key}"
 KEYCHAIN_SERVICE="snth-connect-updater-key-password"
 KEYCHAIN_ACCOUNT="${SNTH_CONNECT_KEYCHAIN_ACCOUNT:-$USER}"
 APP_NAME="SNTH Connect.app"
+APP_ID="ai.snth.connect"
+# The Safari extension inside the app, and the app group the two share.
+APPEX_REL="Contents/PlugIns/SNTH Vault.appex"
+APPEX_ID="ai.snth.connect.safari"
+APP_ENTITLEMENTS="app/src-tauri/Entitlements.plist"
+APPEX_ENTITLEMENTS="app/safari/Extension/Extension.entitlements"
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
 
 VERSION=""
 DRY_RUN=0
@@ -113,7 +127,20 @@ TARBALL="$OUT/SNTH-Connect_${VERSION}_${ARCH_LABEL}.app.tar.gz"
 SIGNATURE="$TARBALL.sig"
 TARBALL_URL="https://github.com/$REPO/releases/download/$TAG/$(basename "$TARBALL")"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/snth-connect-release.XXXXXX")"
-trap 'rm -rf "$WORK"' EXIT
+
+# macOS notices an app wherever it lies, and with it the Safari extension
+# inside: the copies this script makes (the build tree, the disk image's
+# folder, the unpacked updater bundle) would show up in Safari's settings next
+# to the installed app's own. Take every copy off the system's list again.
+forget_copies() {
+    local copy
+    for copy in "$APP" "$WORK/dmg/$APP_NAME" "$WORK/unpacked/$APP_NAME"; do
+        [ -e "$copy" ] || continue
+        pluginkit -r "$copy/$APPEX_REL" >/dev/null 2>&1 || true
+        "$LSREGISTER" -u "$copy" >/dev/null 2>&1 || true
+    done
+}
+trap 'forget_copies; rm -rf "$WORK"' EXIT
 
 UPLOAD=1
 if [ "$DRY_RUN" = "1" ] || [ "$NO_UPLOAD" = "1" ]; then
@@ -124,9 +151,26 @@ fi
 
 step "Preflight ($TAG, $TARGET$([ "$DRY_RUN" = "1" ] && echo ", dry run"))"
 
-for tool in node npm cargo xcrun codesign hdiutil ditto tar security; do
+for tool in node npm cargo xcrun xcodebuild git codesign hdiutil ditto tar security pluginkit; do
     command -v "$tool" >/dev/null 2>&1 || die "$tool is not installed"
 done
+xcodebuild -version >/dev/null 2>&1 ||
+    die "xcodebuild does not work: the Safari extension needs the full Xcode, not only the command line tools (xcode-select -s /Applications/Xcode.app)"
+
+# The team id is the part of the identity in brackets. The app group starts
+# with it: that is what lets the two programs share a folder without a
+# provisioning profile.
+TEAM="$(printf '%s' "$IDENTITY" | sed -n 's/.*(\([A-Z0-9]\{10\}\))$/\1/p')"
+[ -n "$TEAM" ] || die "cannot read the team id from the signing identity: $IDENTITY"
+GROUP="$TEAM.$APP_ID"
+for file in "$APP_ENTITLEMENTS" "$APPEX_ENTITLEMENTS"; do
+    grep -F "<string>$GROUP</string>" "$ROOT/$file" >/dev/null ||
+        die "$file does not name the app group $GROUP"
+done
+grep -F "APP_GROUP: &str = \"$GROUP\"" "$ROOT/crates/connect-host/src/safari.rs" >/dev/null ||
+    die "crates/connect-host/src/safari.rs does not name the app group $GROUP"
+grep -F "group = \"$GROUP\"" "$ROOT/app/safari/Sources/ConnectRelay/Appex.swift" >/dev/null ||
+    die "app/safari/Sources/ConnectRelay/Appex.swift does not name the app group $GROUP"
 
 PACKAGE_VERSION="$(node -p "require('$ROOT/app/package.json').version")"
 [ "$PACKAGE_VERSION" = "$VERSION" ] ||
@@ -175,6 +219,42 @@ step "Build and sign the app"
 BUILT_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
 [ "$BUILT_VERSION" = "$VERSION" ] || die "the built app is version $BUILT_VERSION, not $VERSION"
 
+# ------------------------------------------------------- Safari extension
+
+# The entitlements of a signed program, as a file.
+entitlements_of() { # entitlements_of <program or bundle> <file>
+    codesign -d --entitlements - --xml "$1" >"$2" 2>/dev/null || true
+    [ -s "$2" ] || echo '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict/></plist>' >"$2"
+}
+# Its entitlement names, sorted, one per line.
+entitlement_keys() { # entitlement_keys <file>
+    plutil -convert json -o - "$1" | node -e '
+        let text = "";
+        process.stdin.on("data", (c) => { text += c; }).on("end", () => {
+            console.log(Object.keys(JSON.parse(text || "{}")).sort().join("\n"));
+        });'
+}
+
+step "Build the Safari extension, put it into the app, sign inside out"
+"$ROOT/scripts/build-safari-appex.sh" "$WORK/appex" --version "$VERSION"
+APPEX="$APP/$APPEX_REL"
+# What Tauri signed the app with: the same must come out of the second signing.
+entitlements_of "$APP" "$WORK/app-before.entitlements"
+rm -rf "$APP/Contents/PlugIns"
+mkdir -p "$APP/Contents/PlugIns"
+ditto "$WORK/appex/$(basename "$APPEX_REL")" "$APPEX"
+# The extension first, with its own entitlements (sandboxed, the app group,
+# nothing else). Then the app again: adding a folder broke its seal, and its
+# signature has to cover the extension. The helper next to the app's own
+# program keeps the signature Tauri gave it.
+codesign --force --options runtime --timestamp --sign "$IDENTITY" \
+    --entitlements "$ROOT/$APPEX_ENTITLEMENTS" "$APPEX" || die "could not sign the Safari extension"
+codesign --force --options runtime --timestamp --sign "$IDENTITY" \
+    --entitlements "$ROOT/$APP_ENTITLEMENTS" "$APP" || die "could not sign the app around the Safari extension"
+entitlements_of "$APP" "$WORK/app-after.entitlements"
+[ "$(entitlement_keys "$WORK/app-before.entitlements")" = "$(entitlement_keys "$WORK/app-after.entitlements")" ] ||
+    die "signing the app again changed its entitlements (before: $(entitlement_keys "$WORK/app-before.entitlements" | tr '\n' ' '); after: $(entitlement_keys "$WORK/app-after.entitlements" | tr '\n' ' '))"
+
 step "Check the signature"
 codesign --verify --deep --strict --verbose=2 "$APP" || die "codesign --verify failed for the built app"
 # The helper the browsers start for the SNTH Vault extension ships inside
@@ -201,6 +281,49 @@ codesign -d --entitlements - --xml "$APP" 2>/dev/null | grep -F "com.apple.secur
 /usr/libexec/PlistBuddy -c 'Print :NSAppleEventsUsageDescription' "$APP/Contents/Info.plist" >/dev/null 2>&1 ||
     die "the built app has no NSAppleEventsUsageDescription (app/src-tauri/Info.plist)"
 note "entitled to ask for control of other apps (Automation), with its usage sentence"
+
+# The Safari extension: present, signed like the app, sandboxed (Safari loads
+# no other), in the app group and entitled to nothing else, and named under
+# the app's own id (macOS registers an extension only under its app's prefix).
+[ -d "$APPEX" ] || die "the Safari extension is missing from the app (expected $APPEX)"
+codesign --verify --strict --verbose=2 "$APPEX" || die "codesign --verify failed for the Safari extension"
+APPEX_INFO="$(codesign -dvv "$APPEX" 2>&1)"
+printf '%s\n' "$APPEX_INFO" | grep -F "Authority=$IDENTITY" >/dev/null ||
+    die "the Safari extension is not signed by: $IDENTITY"
+printf '%s\n' "$APPEX_INFO" | grep -E '^CodeDirectory .*flags=.*runtime' >/dev/null ||
+    die "the Safari extension is signed without the hardened runtime (notarization would refuse it)"
+printf '%s\n' "$APPEX_INFO" | grep -E '^Timestamp=' >/dev/null ||
+    die "the Safari extension's signature has no secure timestamp (notarization would refuse it)"
+printf '%s\n' "$APPEX_INFO" | grep -x "Identifier=$APPEX_ID" >/dev/null ||
+    die "the Safari extension is signed as $(printf '%s\n' "$APPEX_INFO" | sed -n 's/^Identifier=//p'), not $APPEX_ID"
+printf '%s\n' "$APPEX_INFO" | grep -x "TeamIdentifier=$TEAM" >/dev/null ||
+    die "the Safari extension is not signed by team $TEAM"
+printf '%s\n' "$SIGN_INFO" | grep -x "TeamIdentifier=$TEAM" >/dev/null ||
+    die "the app is not signed by team $TEAM"
+BUILT_APP_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")"
+BUILT_APPEX_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APPEX/Contents/Info.plist")"
+[ "$BUILT_APP_ID" = "$APP_ID" ] || die "the app's bundle id is $BUILT_APP_ID, not $APP_ID"
+[ "$BUILT_APPEX_ID" = "$APPEX_ID" ] || die "the Safari extension's bundle id is $BUILT_APPEX_ID, not $APPEX_ID"
+case "$BUILT_APPEX_ID" in
+    "$BUILT_APP_ID".*) ;;
+    *) die "the Safari extension's id ($BUILT_APPEX_ID) is not under the app's ($BUILT_APP_ID.)" ;;
+esac
+[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APPEX/Contents/Info.plist")" = "$VERSION" ] ||
+    die "the Safari extension is not version $VERSION"
+[ "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$APPEX/Contents/Info.plist")" = "com.apple.Safari.web-extension" ] ||
+    die "the extension in the app is not a Safari web extension"
+[ -f "$APPEX/Contents/Resources/manifest.json" ] || die "the Safari extension has no manifest.json"
+entitlements_of "$APPEX" "$WORK/appex.entitlements"
+[ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.app-sandbox' "$WORK/appex.entitlements" 2>/dev/null)" = "true" ] ||
+    die "the Safari extension is not sandboxed (Safari would not load it)"
+[ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.application-groups:0' "$WORK/appex.entitlements" 2>/dev/null)" = "$GROUP" ] ||
+    die "the Safari extension is not in the app group $GROUP (it could not reach the app)"
+APPEX_KEYS="$(entitlement_keys "$WORK/appex.entitlements" | tr '\n' ' ')"
+[ "$APPEX_KEYS" = "com.apple.security.app-sandbox com.apple.security.application-groups " ] ||
+    die "the Safari extension is entitled to more (or less) than the sandbox and the app group: $APPEX_KEYS"
+[ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.application-groups:0' "$WORK/app-after.entitlements" 2>/dev/null)" = "$GROUP" ] ||
+    die "the app is not in the app group $GROUP (its Safari extension could not reach it)"
+note "the Safari extension is in the app: $APPEX_ID, signed, hardened runtime, sandboxed, app group $GROUP, nothing else"
 
 mkdir -p "$OUT"
 
@@ -275,6 +398,12 @@ UNPACKED="$WORK/unpacked"
 mkdir -p "$UNPACKED"
 tar -xzf "$TARBALL" -C "$UNPACKED"
 codesign --verify --deep --strict "$UNPACKED/$APP_NAME" || die "the app inside the updater bundle fails codesign --verify"
+# An update must bring the Safari extension with it, still signed and sandboxed.
+[ -d "$UNPACKED/$APP_NAME/$APPEX_REL" ] || die "the updater bundle carries no Safari extension"
+codesign --verify --strict "$UNPACKED/$APP_NAME/$APPEX_REL" || die "the Safari extension inside the updater bundle fails codesign --verify"
+entitlements_of "$UNPACKED/$APP_NAME/$APPEX_REL" "$WORK/appex-unpacked.entitlements"
+[ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.app-sandbox' "$WORK/appex-unpacked.entitlements" 2>/dev/null)" = "true" ] ||
+    die "the Safari extension inside the updater bundle is not sandboxed"
 if [ "$DRY_RUN" != "1" ]; then
     xcrun stapler validate "$UNPACKED/$APP_NAME" || die "the app inside the updater bundle has no valid notarization ticket"
 fi
