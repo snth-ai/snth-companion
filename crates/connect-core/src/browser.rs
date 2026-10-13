@@ -954,7 +954,23 @@ impl Core {
         endpoint: &connect_host::endpoint::Endpoint,
         mut shutdown: watch::Receiver<bool>,
     ) -> std::io::Result<()> {
-        let mut listener = Listener::bind(endpoint)?;
+        // An app that restarts (an update) can come up a moment before
+        // the endpoint of its previous run is gone: try for a few seconds
+        // before deciding that another copy of the app holds it.
+        let mut tries = 0;
+        let mut listener = loop {
+            match Listener::bind(endpoint) {
+                Ok(l) => break l,
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && tries < 10 => {
+                    tries += 1;
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_millis(300)) => {}
+                        _ = shutdown.changed() => return Ok(()),
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        };
         // Dropped on return: every open connection closes with the
         // listener, so a helper learns at once that the app is gone.
         let mut serving = tokio::task::JoinSet::new();

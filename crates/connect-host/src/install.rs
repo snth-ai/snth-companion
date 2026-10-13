@@ -221,11 +221,36 @@ impl Locations {
     /// Safe to call at every start: it writes only what differs.
     pub fn install(&self, helper: &Path, extension_ids: &[&str]) -> Vec<(Browser, io::Result<Change>)> {
         let text = manifest_json(&self.host_name, helper, extension_ids);
-        BROWSERS
-            .iter()
-            .filter(|b| self.present(b))
-            .map(|b| (*b, self.install_one(b, &text)))
-            .collect()
+        let present: Vec<&Browser> = BROWSERS.iter().filter(|b| self.present(b)).collect();
+        #[cfg(unix)]
+        {
+            present.into_iter().map(|b| (*b, self.install_one(b, &text))).collect()
+        }
+        #[cfg(windows)]
+        {
+            if present.is_empty() {
+                return Vec::new();
+            }
+            // One manifest file for every browser: written once, and a
+            // change to it is a change for each of them.
+            let file = write_if_changed(&self.manifest_dir, &self.host_name, &text);
+            present
+                .into_iter()
+                .map(|b| {
+                    let result = match &file {
+                        Ok(changed) => self.register(b).map(|registered| {
+                            if *changed || registered {
+                                Change::Written
+                            } else {
+                                Change::Unchanged
+                            }
+                        }),
+                        Err(e) => Err(io::Error::new(e.kind(), e.to_string())),
+                    };
+                    (*b, result)
+                })
+                .collect()
+        }
     }
 
     #[cfg(unix)]
@@ -234,17 +259,17 @@ impl Locations {
         Ok(if write_if_changed(&dir, &self.host_name, text)? { Change::Written } else { Change::Unchanged })
     }
 
+    /// Point one browser's registry key at the manifest file. Returns
+    /// whether the key had to be written.
     #[cfg(windows)]
-    fn install_one(&self, b: &Browser, text: &str) -> io::Result<Change> {
-        let mut changed = write_if_changed(&self.manifest_dir, &self.host_name, text)?;
-        let file = self.manifest_file(b);
-        let want = file.to_string_lossy().into_owned();
+    fn register(&self, b: &Browser) -> io::Result<bool> {
+        let want = self.manifest_file(b).to_string_lossy().into_owned();
         let key = self.registry_key(b);
-        if crate::win::reg_get_default(&key)?.as_deref() != Some(want.as_str()) {
-            crate::win::reg_set_default(&key, &want)?;
-            changed = true;
+        if crate::win::reg_get_default(&key)?.as_deref() == Some(want.as_str()) {
+            return Ok(false);
         }
-        Ok(if changed { Change::Written } else { Change::Unchanged })
+        crate::win::reg_set_default(&key, &want)?;
+        Ok(true)
     }
 
     /// Take our manifest away from every browser, present or not. Returns
