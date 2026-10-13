@@ -36,6 +36,7 @@ pub mod core;
 pub mod cua;
 pub mod cua_apps;
 pub mod cua_guard;
+pub mod cua_health;
 pub mod cua_install;
 pub mod cua_look;
 pub mod files;

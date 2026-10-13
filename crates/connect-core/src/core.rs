@@ -1035,6 +1035,14 @@ impl Core {
         Ok(crate::cua_apps::choices(&rows?))
     }
 
+    /// "Check the helper": the driver's own health report from OUR daemon,
+    /// with what the app itself knows (the pinned version, the pointer,
+    /// the owner's choice of apps). See `cua_health.rs`.
+    pub async fn cua_health(&self) -> crate::cua_health::Report {
+        let app_data = crate::cua_health::app_data_of(&self.shared.cua_env);
+        crate::cua_health::check(&self.shared, app_data.as_deref()).await
+    }
+
     /// The label of the computer-control task that is running (see
     /// `Shared::computer_task`).
     pub fn computer_task(&self) -> Option<String> {
