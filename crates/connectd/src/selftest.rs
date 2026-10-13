@@ -45,7 +45,13 @@
 //!     without the other apps; a session keeps the choice it began with
 //!  8. "check the helper": the driver's own health report from OUR daemon,
 //!     and a text for "copy details" with no path outside the test's folder
-//!  9. stop the daemon and check its endpoint is gone
+//!  9. an update of the app with a new driver version, with the real
+//!     driver: the copy of the version before (the installed copy, moved
+//!     to another version's folder) is what runs while the new one is not
+//!     there; the new one is installed next to it while a session is open;
+//!     that session goes on, on the old copy, which stays on disk; the next
+//!     session starts on the new copy and the old one is removed
+//! 10. stop the daemon and check its endpoint is gone
 //!
 //! `--preview-window` (macOS, by hand only) also starts the daemon once
 //! with the experimental preview window, which shows that window on the
@@ -352,6 +358,7 @@ async fn exercise(core: &Core, root: &std::path::Path) -> Result<(), String> {
     guard(core, root).await?;
     let endpoint = look(core, root, endpoint).await?;
     apps_scope(core, root).await?;
+    update_path(core, root).await?;
     let endpoint = match core.shared().cua_socket().await {
         Ok((now, _)) => now,
         Err(_) => endpoint,
@@ -733,7 +740,7 @@ fn check_cursor(state: &Value, want: &Expect, whose: &str) -> Result<(), String>
         number("/motion/idle_hide_ms"),
     );
     println!(
-        "{whose}: theme {} (fallback {}), reduced motion {}, glide {} ms, dwell {} ms, idle hide {} ms, enabled {}",
+        "{whose}: theme {} (fallback {}), reduced motion {}, glide {} ms, dwell {} ms, idle hide {} ms, enabled {}, style {} ({} timing)",
         got.0,
         state.pointer("/theme/fallback").unwrap_or(&Value::Null),
         got.1,
@@ -741,6 +748,8 @@ fn check_cursor(state: &Value, want: &Expect, whose: &str) -> Result<(), String>
         got.3,
         got.4,
         state.get("enabled").unwrap_or(&Value::Null),
+        text("/motion/style"),
+        text("/motion/timing"),
     );
     if !state.pointer("/theme/fallback").is_none_or(Value::is_null) {
         return Err(format!("{whose}: the driver fell back from the theme: {state}"));
@@ -831,6 +840,8 @@ async fn look(core: &Core, root: &std::path::Path, first_endpoint: String) -> Re
     for (tool, arguments) in [
         ("set_agent_cursor_theme", json!({"session": "task-look", "theme_id": "cua.default", "reduced_motion": "off"})),
         ("set_agent_cursor_motion", json!({"session": "task-look", "glide_duration_ms": 5000, "idle_hide_ms": 0})),
+        ("set_agent_cursor_motion", json!({"session": "task-look", "style": "magnetic", "timing": "fixed", "effects": {"trail": true}})),
+        ("set_config", json!({"cursor.motion.style": "classic"})),
         ("set_agent_cursor_enabled", json!({"session": "task-look", "enabled": false})),
         ("set_config", json!({"experimental_pip": true})),
         ("set_config", json!({"key": "max_image_dimension", "value": 4000})),
@@ -841,21 +852,24 @@ async fn look(core: &Core, root: &std::path::Path, first_endpoint: String) -> Re
             Synth::Answer(result) => return Err(format!("{tool} reached the driver: {}", short(&result))),
         }
     }
-    // A session may start; the cursor theme the synth asked for is not passed on.
-    let start = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "start_session", "arguments": {"session": "task-look", "cursor_theme": {"theme_id": "cua.default", "reduced_motion": "off"}}}});
+    // A session may start; neither the cursor theme nor (since 0.34) the
+    // motion style the synth asked for is passed on.
+    let wanted = json!({"session": "task-look", "cursor_theme": {"theme_id": "cua.default", "reduced_motion": "off"}, "cursor_motion": {"style": "comet_swoop", "timing": "fitts", "effects": {"trail": true}}});
+    let start = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "start_session", "arguments": wanted}});
     match filtered(&shared, &start).await? {
-        Filtered::Forwarded(message) if message.pointer("/params/arguments/cursor_theme").is_none() => {
+        Filtered::Forwarded(message) if message["params"]["arguments"] == json!({"session": "task-look"}) => {
             println!("start_session: forwarded as {}", message["params"]["arguments"]);
         }
-        Filtered::Forwarded(message) => return Err(format!("start_session kept the synth's theme: {message}")),
+        Filtered::Forwarded(message) => return Err(format!("start_session kept the synth's theme or motion: {message}")),
         Filtered::Refused(why) => return Err(format!("start_session was refused: {why}")),
     }
-    match a
-        .synth("start_session", json!({"session": "task-look", "cursor_theme": {"theme_id": "cua.default", "reduced_motion": "off"}}))
-        .await?
+    match a.synth("start_session", wanted.clone()).await?
     {
         Synth::Answer(result) if result.get("isError").and_then(Value::as_bool) != Some(true) => {
             println!("start_session: {}", short(&result));
+            if result.pointer("/structuredContent/cursor_motion").is_some() {
+                return Err(format!("the driver was given a motion style for the session: {}", short(&result)));
+            }
         }
         Synth::Answer(result) => return Err(format!("start_session failed: {}", short(&result))),
         Synth::Refused(why) => return Err(format!("start_session was refused: {why}")),
@@ -1390,6 +1404,99 @@ async fn apps_scope(core: &Core, root: &std::path::Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------
+// An update of the app that brings a new driver version. The "version
+// before" is the copy that is installed, moved into another version's
+// folder: to the installer that is exactly what an older app version left.
+// ---------------------------------------------------------------------
+
+async fn update_path(core: &Core, root: &std::path::Path) -> Result<(), String> {
+    step("an app update with a new driver: the old copy runs until the new one is in place and nobody holds it");
+    core.cua_stop_daemon().await;
+    let pinned = std::path::PathBuf::from(core.cua_bin());
+    let pinned_dir = pinned.parent().ok_or("the driver has no folder")?.to_path_buf();
+    let releases = pinned_dir.parent().ok_or("the driver has no releases folder")?.to_path_buf();
+    let old_dir = releases.join("0.0.1-before");
+    let _ = std::fs::remove_dir_all(&old_dir);
+    std::fs::rename(&pinned_dir, &old_dir).map_err(|e| format!("move the installed copy aside: {e}"))?;
+    let old_bin = old_dir.join(pinned.file_name().ok_or("the driver has no file name")?);
+
+    // "The app after the update": a new core, whose pinned copy is missing.
+    let next = selftest_core(root);
+    let shared = next.shared();
+    if std::path::Path::new(&shared.cua_bin_now()) != old_bin {
+        return Err(format!("with the new version missing, the app would run {} and not the old copy", shared.cua_bin_now()));
+    }
+    let mut held = Session::open(&shared).await.map_err(|e| format!("computer control does not work on the old copy: {e}"))?;
+    match held.synth("get_screen_size", json!({})).await? {
+        Synth::Answer(result) if !is_error(&result) => println!("on the old copy, before the new one is there: get_screen_size ok ({})", short(&result)),
+        Synth::Answer(result) => return Err(format!("the old copy does not answer: {}", short(&result))),
+        Synth::Refused(why) => return Err(format!("get_screen_size was refused: {why}")),
+    }
+    let old_endpoint = held.endpoint().to_string();
+
+    // The new version arrives while that session is open.
+    match next.cua_ensure().await {
+        InstallState::Ready { version } => println!("the new copy is installed: {version}"),
+        other => return Err(format!("the new copy was not installed: {other:?}")),
+    }
+    if !pinned.is_file() {
+        return Err("the new copy is not in place".into());
+    }
+    if !old_bin.is_file() {
+        return Err("the old copy was removed while a session ran on it".into());
+    }
+    match held.synth("get_screen_size", json!({})).await? {
+        Synth::Answer(result) if !is_error(&result) => println!("the open session goes on, on the old copy: ok"),
+        Synth::Answer(result) => return Err(format!("the open session broke when the new copy was installed: {}", short(&result))),
+        Synth::Refused(why) => return Err(format!("get_screen_size was refused: {why}")),
+    }
+    if !connect_core::cua::endpoint_ready(&old_endpoint) {
+        return Err("the daemon of the open session was stopped by the install".into());
+    }
+    if !held.held.outdated() {
+        return Err("the open session does not know a new version is in place".into());
+    }
+    held.close().await;
+
+    // Nobody holds the old daemon now: the next session gets the new copy.
+    let mut fresh = Session::open(&shared).await?;
+    if fresh.endpoint() == old_endpoint {
+        return Err("the next session is still on the daemon of the old copy".into());
+    }
+    if std::path::Path::new(&shared.cua_bin_now()) != pinned {
+        return Err(format!("the app would still run {}", shared.cua_bin_now()));
+    }
+    match fresh.synth("get_screen_size", json!({})).await? {
+        Synth::Answer(result) if !is_error(&result) => println!("the next session runs on the new copy: ok"),
+        Synth::Answer(result) => return Err(format!("the new copy does not answer: {}", short(&result))),
+        Synth::Refused(why) => return Err(format!("get_screen_size was refused: {why}")),
+    }
+    // The old copy goes once its daemon has stopped (on Windows a program
+    // that still runs cannot be deleted, so give it a moment).
+    let mut gone = false;
+    for _ in 0..30 {
+        if !old_dir.exists() {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // What a later check of the install does: remove what is left over.
+        let _ = next.cua_ensure().await;
+    }
+    fresh.close().await;
+    next.cua_stop_daemon().await;
+    if !gone {
+        return Err(format!("the old copy is still on disk: {}", old_dir.display()));
+    }
+    println!("the old copy was removed");
+    // The core of the rest of the test sees the same installed copy again.
+    match core.cua_ensure().await {
+        InstallState::Ready { .. } => Ok(()),
+        other => Err(format!("after the update the first core does not find the driver: {other:?}")),
+    }
 }
 
 /// Run one of the driver's own subcommands with our environment.
