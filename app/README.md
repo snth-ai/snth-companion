@@ -83,6 +83,14 @@ URL parameters stage a screen or a state directly:
 | `apps` | the macOS permissions of the apps: `granted` (default), `noperm` (macOS has not asked yet), `denied`, `nodisk` (Messages may be controlled, its history cannot be read) |
 | `messages` | `on`: the Messages switch, which is off by default |
 | `preset` | `careful` (default), `balanced`, `full` |
+| `cursor` | Computer control, "How it looks": `on` (default), `off` (the rest of the pointer's rows disappear) |
+| `color` | the pointer's colour: `auto` (default: the helper's own pointer, a colour per task), `sky`, `violet`, `rose`, `green`, `amber`, `red`, `graphite` |
+| `speed` | `fast`, `normal` (default), `relaxed` |
+| `idlehide` | hide the pointer when nothing happens: `5`, `15` (default), `60`, `0` (never) |
+| `motion` | the pointer's animation: `system` (default), `always` (always still), `never` (always animated) |
+| `shot` | under Advanced, the largest screenshot the synth gets: `0` (default: the helper decides), `1024`, `1568`, `2048`. Any other value than `0` opens Advanced |
+| `pip` | under Advanced, the experimental preview window: `on`, `off` (default). Exists with `os=macos` only; `on` opens Advanced |
+| `wayland` | `1` with `os=linux`: a desktop that draws the pointer itself, where only the on/off switch is offered |
 | `cua` | the helper: `ready` (default), `checking`, `downloading` (frozen at 42%), `installing` (plays the whole automatic install, about 7 s), `verifying`, `failed` (with `why=offline`, `download`, `checksum`, `disk`, `verify`, `unsupported`, `timeout`); the macOS permissions: `noperm`, `half` |
 | `update` | the app's own updates: `checking`, `downloading` (frozen at 40%), `ready` (downloaded, waiting for a quiet moment), `available` (the setting is off), `applying`, `applied` (first run after an update), `failed` (with `step=check`, `download`, `install`), `blocked` (with `block=translocated`, `read_only`, `package`), `flow` (plays check, download, ready), `off`, `unconfigured` |
 | `pair` | a 6-digit code: behaves as if `snth://pair?code=...` was opened |
@@ -96,6 +104,9 @@ Examples: `?screen=logins`, `?screen=logins&logins=offline&ext=closed&os=windows
 `?screen=logins&logins=empty&state=empty&ext=none&lang=ru`, `?approval=vault`,
 `?screen=onboarding&step=3`, `?screen=status&state=paused`,
 `?approval=cookies`, `?screen=computer&cua=noperm&lang=ru&theme=dark`,
+`?screen=computer&preset=balanced&color=rose&speed=relaxed&idlehide=0&motion=always`,
+`?screen=computer&cursor=off&lang=ru`, `?screen=computer&shot=1024&pip=on`,
+`?screen=computer&os=windows&shot=2048`, `?screen=computer&os=linux&wayland=1`,
 `?screen=apps&apps=noperm&messages=on`, `?screen=apps&os=windows`,
 `?approval=message&lang=ru`.
 `/approval.html` is the approval window's own page.
@@ -306,6 +317,19 @@ hidden "Advanced" override that accepts only `https://` addresses.
   embedded, as the app's child): the app checks and requests Accessibility and
   Screen Recording itself (`connect-core/src/tcc.rs`), and they show up under
   "SNTH Connect" in System Settings.
+- "How it looks" on the Computer control page (`settings.computer.look`,
+  `connect-core/src/cua_look.rs`) is the helper's own look, applied as the
+  start flags of the app's own helper daemon; the core README has the whole
+  account ("How it looks"). What the shell adds: `update_settings` brings the
+  values to the offered ones (`LookSettings::normalize`), a look does not
+  make a preset "custom" (`matching_preset`), applying a preset keeps the
+  look, and `UiState.look_support` says which controls this computer's helper
+  follows (a fixed colour and the motion rows are not shown on a Wayland
+  session, the preview window only on macOS). A look change does not move
+  `settings_rev` and nothing of it is sent to the synth. It starts with the
+  synth's next task: a session that is open keeps the helper it started with.
+  The name under the pointer is the helper's, not a setting: it is the label
+  the synth gives its task.
 - Pairing links: `snth://pair?code=XXXXXX` only brings the window up and hands
   the code to the UI, which asks the hub who the code belongs to and shows the
   confirmation screen. The token is stored and the link opened only on the
@@ -497,6 +521,20 @@ with classic Outlook to verify on; the CI machines have none.
 
 ## Not verified
 
+- "How it looks", on a screen. Everything about it was read back from the
+  real pinned helper (`connectd selftest cua`, macOS here and Windows in CI):
+  the theme, the motion values, the reduced motion choice and the hidden
+  pointer as `get_agent_cursor_state` reports them, the seven themes as the
+  helper's own `cursor-theme list` and `inspect` accept them, and two of them
+  drawn to pictures by its `cursor-theme preview`. Nobody has LOOKED at a
+  pointer moving in a chosen colour or at a chosen speed: no tool that acts
+  was run. The preview window was only started once (the helper ran and
+  answered with it); whether the window is useful was not judged. Linux was
+  read in the helper's source only. The check by hand: Computer control, pick
+  Rose and Relaxed, ask the synth to click something in a window; the pointer
+  should be pink, take a second and a half per move, and show the task's name
+  under it for a few seconds. Then switch "Show the pointer" off and ask
+  again: no pointer.
 - The SNTH Vault extension with the INSTALLED app, on any system. What was
   run: the core and the helper as real processes (`connectd selftest host`,
   also on Windows CI with the shipped helper and real per-user registry

@@ -15,6 +15,39 @@ export type AppsMode = "ask" | "ask_new" | "auto";
 /** The owner's own apps. Which of them exist depends on the system. */
 export type AppId = "messages" | "contacts" | "calendar" | "reminders" | "notes" | "shortcuts" | "notify" | "clipboard" | "open";
 
+/** The colour of the synth's cursor. "auto" is the helper's own cursor,
+ * which gets a colour per task; the rest are fixed colours. */
+export type CursorColor = "auto" | "sky" | "violet" | "rose" | "green" | "amber" | "red" | "graphite";
+export type CursorSpeed = "fast" | "normal" | "relaxed";
+/** Whether the cursor's animation plays: as the system is set, never
+ * (always still), or always. */
+export type ReducedMotion = "system" | "always" | "never";
+
+/** How computer control looks on this screen. The app's own: the synth is
+ * told none of it and cannot change it. */
+export interface Look {
+  cursor: boolean;
+  color: CursorColor;
+  speed: CursorSpeed;
+  /** Seconds before an idle cursor hides: 5, 15, 60, or 0 for never. */
+  idle_hide_seconds: number;
+  reduced_motion: ReducedMotion;
+  /** The largest screenshot the synth gets (long edge, pixels): 1024,
+   * 1568, 2048, or 0 for no limit of the owner's. */
+  screenshot_max: number;
+  /** The helper's experimental preview window (macOS only). */
+  preview_window: boolean;
+}
+
+/** Which look settings the helper follows on this computer. */
+export interface LookSupport {
+  cursor: boolean;
+  color: boolean;
+  /** Speed, idle hide and reduced motion. */
+  motion: boolean;
+  preview_window: boolean;
+}
+
 export interface Root {
   path: string;
   /** false = read only, true = read and write. */
@@ -39,6 +72,7 @@ export interface Settings {
     away_idle_minutes: number;
     app_blocklist: string[];
     tool_denylist: string[];
+    look: Look;
   };
   files: { enabled: boolean; roots: Root[]; ask_on_write: boolean };
   apps: {
@@ -203,6 +237,9 @@ export interface UiState {
   /** The apps this computer offers (no Mac app on Windows), with the
    * owner's switches. */
   apps: AppView[];
+  /** Which "how it looks" settings the helper follows on this computer;
+   * the rest are not shown. */
+  look_support: LookSupport;
   /** The Logins page: the browsers and what the synth's vault holds. */
   logins: LoginsState;
   prefs: {

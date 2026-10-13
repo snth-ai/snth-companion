@@ -27,6 +27,15 @@
 //         nodisk = Messages may be controlled but its history not read)
 //   &messages=on                        (the Messages switch, off by default)
 //   &preset=careful|balanced|full
+//   &cursor=on|off  &color=auto|sky|violet|rose|green|amber|red|graphite
+//   &speed=fast|normal|relaxed  &idlehide=5|15|60|0
+//   &motion=system|always|never  &shot=0|1024|1568|2048  &pip=on|off
+//        (Computer control, "How it looks": the pointer, its colour, its
+//         speed, when it hides, its animation; under Advanced the largest
+//         screenshot and the preview window, which exists with &os=macos
+//         only. &shot and &pip=on open Advanced.)
+//   &wayland=1   (with &os=linux: a desktop that draws the pointer itself,
+//         so only the on/off switch is offered)
 //   &cua=ready|checking|downloading|installing|verifying|failed|noperm|half
 //        (installing plays the whole automatic install; failed takes
 //         &why=offline|download|checksum|disk|verify|unsupported|timeout)
@@ -42,6 +51,8 @@
 import type {
   AnswerDuration,
   AppId,
+  Look,
+  LookSupport,
   BrowserRow,
   LoginsState,
   VaultView,
@@ -66,11 +77,41 @@ import type {
 const params = new URLSearchParams(window.location.search);
 const HOME = "/Users/alex";
 
+/** The helper's own look: what every preset has. */
+function defaultLook(): Look {
+  return { cursor: true, color: "auto", speed: "normal", idle_hide_seconds: 15, reduced_motion: "system", screenshot_max: 0, preview_window: false };
+}
+
+function oneOf<T extends string | number>(raw: string | null, offered: readonly T[], fallback: T): T {
+  const found = offered.find((o) => String(o) === raw);
+  return found === undefined ? fallback : found;
+}
+
+/** The look staged from the URL (`&color=rose&speed=fast` ...). */
+function stagedLook(): Look {
+  const base = defaultLook();
+  return {
+    cursor: params.get("cursor") !== "off",
+    color: oneOf(params.get("color"), ["auto", "sky", "violet", "rose", "green", "amber", "red", "graphite"] as const, base.color),
+    speed: oneOf(params.get("speed"), ["fast", "normal", "relaxed"] as const, base.speed),
+    idle_hide_seconds: oneOf(params.get("idlehide"), [5, 15, 60, 0] as const, base.idle_hide_seconds),
+    reduced_motion: oneOf(params.get("motion"), ["system", "always", "never"] as const, base.reduced_motion),
+    screenshot_max: oneOf(params.get("shot"), [0, 1024, 1568, 2048] as const, base.screenshot_max),
+    preview_window: params.get("pip") === "on",
+  };
+}
+
+/** What the helper follows on each system (`cua_look::support`). */
+function lookSupport(os: string): LookSupport {
+  const shellPointer = os === "linux" && params.get("wayland") === "1";
+  return { cursor: true, color: !shellPointer, motion: !shellPointer, preview_window: os === "macos" };
+}
+
 function presetSettings(preset: Exclude<Preset, "custom">, roots: Settings["files"]["roots"]): Settings {
   const base: Settings = {
     net: { enabled: true, mode: "ask", domains: [], allow_local_network: false, monthly_cap_bytes: 0, skip_on_metered: true },
     cookies: { enabled: true, mode: "ask" },
-    computer: { enabled: true, mode: "ask", foreground: "never", away_idle_minutes: 5, app_blocklist: [], tool_denylist: [] },
+    computer: { enabled: true, mode: "ask", foreground: "never", away_idle_minutes: 5, app_blocklist: [], tool_denylist: [], look: defaultLook() },
     files: { enabled: true, roots, ask_on_write: true },
     apps: { enabled: true, mode: "ask", apps: {} },
     preset,
@@ -124,7 +165,7 @@ function offSettings(): Settings {
   return {
     net: { enabled: false, mode: "ask", domains: [], allow_local_network: false, monthly_cap_bytes: 0, skip_on_metered: false },
     cookies: { enabled: false, mode: "ask" },
-    computer: { enabled: false, mode: "ask", foreground: "never", away_idle_minutes: 5, app_blocklist: [], tool_denylist: [] },
+    computer: { enabled: false, mode: "ask", foreground: "never", away_idle_minutes: 5, app_blocklist: [], tool_denylist: [], look: defaultLook() },
     files: { enabled: false, roots: [], ask_on_write: false },
     apps: { enabled: false, mode: "ask", apps: {} },
     preset: "custom",
@@ -496,6 +537,9 @@ class MockBackend implements Backend {
     settings.net.monthly_cap_bytes = 10 * GB;
     settings.computer.app_blocklist = ["Mail", "1Password"];
     const os = params.get("os") ?? "macos";
+    settings.computer.look = stagedLook();
+    // The preview window exists on macOS only.
+    if (os !== "macos") settings.computer.look.preview_window = false;
     this.state = {
       core: {
         link_state: "linked",
@@ -532,6 +576,7 @@ class MockBackend implements Backend {
         ...(os === "macos" ? [{ capability: "apps", scope: "messages.send:+79165550101", until: 0 }] : []),
       ],
       apps: offeredApps(os, settings),
+      look_support: lookSupport(os),
       // The vault is asked when the Logins page opens (`loginsRefresh`).
       logins: { ...stagedBrowsers(os), vault: { state: "unknown" } },
       prefs: {
@@ -975,7 +1020,10 @@ class MockBackend implements Backend {
   }
 
   applyPreset(preset: Exclude<Preset, "custom">) {
+    // A preset is a policy: the look the owner chose stays.
+    const look = this.state.core.settings.computer.look;
     this.state.core.settings = presetSettings(preset, this.state.core.settings.files.roots);
+    this.state.core.settings.computer.look = look;
     this.refreshApps();
     return this.changed();
   }
@@ -991,7 +1039,10 @@ class MockBackend implements Backend {
     );
     next.preset = "custom";
     for (const p of ["careful", "balanced", "full"] as const) {
-      if (JSON.stringify(presetSettings(p, next.files.roots)) === JSON.stringify({ ...next, preset: p })) next.preset = p;
+      // How it looks is not part of a preset.
+      const probe = presetSettings(p, next.files.roots);
+      probe.computer.look = next.computer.look;
+      if (JSON.stringify(probe) === JSON.stringify({ ...next, preset: p })) next.preset = p;
     }
     this.state.core.settings = next;
     this.refreshApps();

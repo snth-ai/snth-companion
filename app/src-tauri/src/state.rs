@@ -156,6 +156,9 @@ pub struct UiState {
     /// The owner's own apps this computer offers (no Mac app on
     /// Windows), with the owner's switches.
     pub apps: Vec<connect_core::apps::AppView>,
+    /// Which of the "how it looks" settings the helper follows on this
+    /// computer; the UI hides the rest.
+    pub look_support: connect_core::cua_look::Support,
     /// The Logins page: the browsers and what the synth's vault holds.
     pub logins: crate::logins::LoginsState,
     pub prefs: PrefsDto,
@@ -186,6 +189,7 @@ pub async fn build_state(ctx: &Ctx) -> UiState {
             .map(|(capability, scope, until)| GrantDto { capability, scope, until })
             .collect(),
         apps: ctx.core.apps_views(),
+        look_support: ctx.core.look_support(),
         logins: crate::logins::state(ctx),
         prefs: PrefsDto {
             onboarded: prefs.onboarded,
@@ -212,11 +216,14 @@ pub async fn build_state(ctx: &Ctx) -> UiState {
 }
 
 /// Which preset, if any, these settings are exactly (so the UI can show
-/// "Careful" again after the owner undoes a hand edit).
+/// "Careful" again after the owner undoes a hand edit). How computer
+/// control looks is not part of a preset: a cursor colour does not make
+/// the settings "custom".
 pub fn matching_preset(s: &Settings) -> Preset {
     for p in [Preset::Careful, Preset::Balanced, Preset::Full] {
         let mut probe = Settings::from_preset(p, s.files.roots.clone());
         probe.preset = s.preset;
+        probe.computer.look = s.computer.look.clone();
         if &probe == s {
             return p;
         }

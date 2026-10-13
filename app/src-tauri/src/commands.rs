@@ -223,6 +223,8 @@ pub async fn update_settings(ctx: Cx<'_>, settings: Settings) -> Result<UiState,
         (!a.is_empty() && a.len() <= 120).then(|| a.to_string())
     });
     next.computer.away_idle_minutes = next.computer.away_idle_minutes.clamp(1, 240);
+    // Only the choices the app offers for how computer control looks.
+    next.computer.look.normalize();
     // Only apps this build knows, and only the switches that differ from
     // the default, so equal choices compare equal to a preset.
     next.apps.normalize(connect_core::apps::APPS);
@@ -842,6 +844,17 @@ mod tests {
             clean_domain,
         );
         assert_eq!(got, ["a.com", "b.com"]);
+    }
+
+    #[test]
+    fn a_cursor_colour_does_not_make_the_settings_custom() {
+        let mut s = Settings::from_preset(Preset::Balanced, vec![]);
+        s.computer.look.color = connect_core::settings::CursorColor::Rose;
+        s.computer.look.screenshot_max = 1024;
+        assert!(matches!(matching_preset(&s), Preset::Balanced));
+        // A policy change still does.
+        s.computer.foreground = connect_core::settings::Foreground::Never;
+        assert!(matches!(matching_preset(&s), Preset::Custom));
     }
 
     #[test]

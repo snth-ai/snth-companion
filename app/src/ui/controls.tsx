@@ -38,9 +38,18 @@ export function SwitchRow(props: {
   onChange: (next: boolean) => void;
   strong?: boolean;
   disabled?: boolean;
+  /** A short mark after the title ("Experimental"). */
+  tag?: string;
 }) {
+  const title = props.tag ? (
+    <>
+      {props.title} <span className="tag">{props.tag}</span>
+    </>
+  ) : (
+    props.title
+  );
   return (
-    <Row title={props.title} desc={props.desc} strong={props.strong}>
+    <Row title={title} desc={props.desc} strong={props.strong}>
       <Switch checked={props.checked} onChange={props.onChange} label={props.title} disabled={props.disabled} />
     </Row>
   );
