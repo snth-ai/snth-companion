@@ -565,6 +565,7 @@ dependencies = [
  "aes",
  "base64 0.22.1",
  "cbc",
+ "connect-host",
  "directories",
  "futures",
  "hmac",
@@ -585,10 +586,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "connect-host"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
+ "tokio",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "connectd"
 version = "0.1.0"
 dependencies = [
  "connect-core",
+ "connect-host",
  "serde",
  "serde_json",
  "tokio",
