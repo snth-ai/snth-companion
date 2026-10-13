@@ -157,7 +157,12 @@ pub struct Shared {
     secret: Arc<dyn SecretStore>,
     hub: Arc<dyn HubClient>,
     pub(crate) app_version: String,
+    /// The driver binary of the pinned version (see `cua_bin_now` for the
+    /// one to run).
     pub(crate) cua_bin: String,
+    /// The binary our running daemon was started from, for the processes
+    /// that talk to it (`mcp::spawn_proxy`). None when none runs.
+    cua_daemon_bin: Mutex<Option<String>>,
     /// What every driver process we start gets in its environment.
     pub(crate) cua_env: DriverEnv,
     /// Set when the app keeps its own private copy of the driver.
@@ -468,6 +473,7 @@ impl Shared {
             scope: at.scope,
             look: at.look,
             started: at.started,
+            bin: at.bin,
             shared: self.clone(),
         })
     }
@@ -505,6 +511,7 @@ impl Shared {
                     scope: Arc::new(crate::cua_apps::Scope::of(&self.settings())),
                     look: None,
                     started: Instant::now(),
+                    bin: None,
                 })
             }
             CuaAttach::Private => {
@@ -513,9 +520,11 @@ impl Shared {
                 if guard.as_mut().is_some_and(|d| !d.is_alive()) {
                     if let Some(dead) = guard.take() {
                         dead.discard().await;
+                        self.daemon_gone();
                     }
                 }
                 let s = self.settings();
+                let bin = self.cua_bin_now();
                 // The look is the daemon's start flags, and the owner's
                 // choice of apps is its permission mode and manifest: a
                 // new look or a new choice needs a new daemon. So does a
@@ -531,6 +540,8 @@ impl Shared {
                             Some("the owner's choice of apps changed")
                         } else if lease_old(&d.scope, d.started) {
                             Some("its permissions are half a day old")
+                        } else if d.bin != bin {
+                            Some("a new version of the helper is in place")
                         } else {
                             None
                         }
@@ -538,12 +549,13 @@ impl Shared {
                     if let Some(why) = why {
                         crate::logln!("cua daemon: {why}, starting a new one");
                         if let Some(old) = guard.take() {
-                            old.stop(&self.cua_bin, &self.cua_env).await;
+                            old.stop(&self.cua_env).await;
+                            self.daemon_gone();
                         }
                     }
                 }
                 if guard.is_none() {
-                    if self.cua_installer.is_some() && !std::path::Path::new(&self.cua_bin).is_file() {
+                    if self.cua_installer.is_some() && !std::path::Path::new(&bin).is_file() {
                         return Err(Refusal::Failed(
                             "unavailable: the computer-control helper is not installed yet".into(),
                         ));
@@ -559,9 +571,15 @@ impl Shared {
                             )));
                         }
                     }
-                    match PrivateDaemon::start(&self.cua_bin, &s, &self.cua_env).await {
+                    match PrivateDaemon::start(&bin, &s, &self.cua_env).await {
                         Ok(d) => {
                             *self.cua_start_backoff.lock().unwrap() = StartBackoff::default();
+                            // A copy of the version before stays on disk
+                            // for as long as this daemon runs from it.
+                            if let Some(installer) = &self.cua_installer {
+                                installer.hold(std::path::Path::new(&d.bin));
+                            }
+                            *self.cua_daemon_bin.lock().unwrap() = Some(d.bin.clone());
                             *guard = Some(d);
                         }
                         Err(e) => {
@@ -584,6 +602,7 @@ impl Shared {
                     scope: d.scope.clone(),
                     look: Some(d.look.clone()),
                     started: d.started,
+                    bin: Some(d.bin.clone()),
                 })
             }
         }
@@ -648,7 +667,10 @@ impl Shared {
             let known = match installer.state() {
                 InstallState::Ready { version } => Some(Some(version)),
                 InstallState::Idle | InstallState::Checking => None,
-                _ => Some(None),
+                // The pinned version is not in place (still coming, or it
+                // could not be fetched): the copy of the version before,
+                // if there is one, is what runs meanwhile.
+                _ => Some(installer.usable_bin().map(|(version, _)| version)),
             };
             if let Some(version) = known {
                 return cua::Detect {
@@ -665,7 +687,7 @@ impl Shared {
                 }
             }
         }
-        let d = cua::detect(&self.cua_bin, &self.cua_env).await;
+        let d = cua::detect(&self.cua_bin_now(), &self.cua_env).await;
         *self.cua_probe.lock().unwrap() = Some((Instant::now(), d.clone()));
         d
     }
@@ -700,10 +722,41 @@ impl Shared {
     async fn stop_cua(&self) {
         let d = self.cua_daemon.lock().await.take();
         if let Some(d) = d {
-            d.stop(&self.cua_bin, &self.cua_env).await;
+            d.stop(&self.cua_env).await;
         }
+        self.daemon_gone();
         self.cua_dir.stop().await;
         self.clear_task();
+    }
+
+    /// Our daemon was stopped: nothing runs from a copy of an older
+    /// version any more, so that copy may go.
+    fn daemon_gone(&self) {
+        *self.cua_daemon_bin.lock().unwrap() = None;
+        if let Some(installer) = &self.cua_installer {
+            installer.release_old();
+        }
+    }
+
+    /// The driver binary to start now. The pinned copy when it is in
+    /// place. After an update of the app, while the new version is still
+    /// being fetched or could not be fetched, the copy of the version
+    /// before: computer control keeps working on the driver the owner
+    /// already had.
+    pub fn cua_bin_now(&self) -> String {
+        match &self.cua_installer {
+            Some(installer) => installer
+                .usable_bin()
+                .map(|(_, bin)| bin.to_string_lossy().to_string())
+                .unwrap_or_else(|| self.cua_bin.clone()),
+            None => self.cua_bin.clone(),
+        }
+    }
+
+    /// The binary for a process that talks to our running daemon: the one
+    /// the daemon itself runs.
+    pub(crate) fn cua_proxy_bin(&self) -> String {
+        self.cua_daemon_bin.lock().unwrap().clone().unwrap_or_else(|| self.cua_bin_now())
     }
 }
 
@@ -715,6 +768,8 @@ struct Endpoint {
     /// None for a daemon of the user's own: its look is not ours.
     look: Option<Vec<String>>,
     started: Instant,
+    /// The binary our daemon runs; None for a daemon of the user's own.
+    bin: Option<String>,
 }
 
 /// A bounded daemon lives a day (`cua_apps::LEASE`). After half of it, it
@@ -782,19 +837,23 @@ pub struct CuaSession {
     look: Option<Vec<String>>,
     /// When the daemon was started.
     started: Instant,
+    /// The driver binary our daemon runs; None for a daemon of the user's.
+    bin: Option<String>,
     shared: Arc<Shared>,
 }
 
 impl CuaSession {
     /// Would a session that starts now get another daemon than this one:
-    /// the owner changed the look or the choice of apps, or a bounded
-    /// daemon's day is half over? The pipe asks before a call that comes
+    /// the owner changed the look or the choice of apps, a bounded
+    /// daemon's day is half over, or a new version of the driver is in
+    /// place? The pipe asks before a call that comes
     /// after a quiet spell, and ends the session there so that the change
     /// applies (`mcp::handle`).
     pub fn outdated(&self) -> bool {
         let s = self.shared.settings();
         *self.scope != crate::cua_apps::Scope::of(&s)
             || (self.embedded && lease_old(&self.scope, self.started))
+            || self.bin.as_ref().is_some_and(|bin| *bin != self.shared.cua_bin_now())
             || self
                 .look
                 .as_ref()
@@ -898,7 +957,19 @@ impl Core {
             None => (cfg.cua_bin, DriverEnv::default(), None),
         };
 
-        let cua_dir = crate::cua_apps::Directory::driver(cua_bin.clone(), cua_env.clone());
+        // The app's own reading of the driver's lists runs whichever copy
+        // is usable when it is started.
+        let cua_dir = {
+            let (installer, pinned) = (cua_installer.clone(), cua_bin.clone());
+            let bin: crate::cua_apps::BinProvider = Arc::new(move || match &installer {
+                Some(installer) => installer
+                    .usable_bin()
+                    .map(|(_, bin)| bin.to_string_lossy().to_string())
+                    .unwrap_or_else(|| pinned.clone()),
+                None => pinned.clone(),
+            });
+            crate::cua_apps::Directory::driver(bin, cua_env.clone())
+        };
         let shared = Arc::new(Shared {
             persisted: RwLock::new(persisted),
             settings_path: cfg.settings_path,
@@ -911,6 +982,7 @@ impl Core {
             hub: cfg.hub,
             app_version: cfg.app_version,
             cua_bin,
+            cua_daemon_bin: Mutex::new(None),
             cua_env,
             cua_installer,
             cua_attach: cfg.cua_attach,
@@ -1024,7 +1096,7 @@ impl Core {
     /// synth's daemon, which may be limited to a few apps). Slow on a
     /// computer with many apps (a few seconds).
     pub async fn computer_apps(&self) -> Result<Vec<crate::cua_apps::AppChoice>, String> {
-        if self.shared.cua_installer.is_some() && !std::path::Path::new(&self.shared.cua_bin).is_file() {
+        if self.shared.cua_installer.is_some() && !std::path::Path::new(&self.shared.cua_bin_now()).is_file() {
             return Err("not_installed".into());
         }
         let rows = self.shared.cua_dir.apps_fresh().await;
@@ -1357,7 +1429,12 @@ impl Core {
         };
         let (state, installed) = installer.ensure().await;
         if installed {
-            self.shared.stop_cua().await;
+            // A daemon that runs from the copy of the version before is
+            // left alone while a session holds it: the session goes on,
+            // and the next one starts on the new copy (`cua_endpoint_at`).
+            if self.shared.cua_sessions_open() == 0 {
+                self.shared.stop_cua().await;
+            }
             *self.shared.cua_probe.lock().unwrap() = None;
             self.mutate_settings(|_| {});
         }
@@ -1888,6 +1965,7 @@ mod tests {
             scope: Arc::new(scope),
             look: None,
             started,
+            bin: None,
             shared: sh.clone(),
         };
         sh.cua_sessions.fetch_add(3, Ordering::AcqRel);
@@ -1957,6 +2035,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn after_an_update_the_copy_of_the_version_before_runs_until_the_new_one_is_in_place() {
+        let root = std::env::temp_dir().join(format!("connect-core-oldcopy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let bin_name = if cfg!(windows) { "cua-driver.exe" } else { "cua-driver" };
+        let old = root.join("releases").join("0.1.0").join(bin_name);
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, b"the copy the app version before installed").unwrap();
+        let core = Core::new(CoreConfig {
+            settings_path: None,
+            journal_path: None,
+            approver: Arc::new(AutoAllow),
+            cookies: Arc::new(MultiReader { chromium: vec![], firefox: vec![], keys: Arc::new(crate::cookies::fixtures::NoKey) }),
+            apps: Arc::new(crate::apps::stub::StubBackend::offering(&[])),
+            secret: Arc::new(MemSecretStore::new()),
+            hub: Arc::new(FakeHub),
+            app_version: "test".into(),
+            cua_bin: String::new(),
+            cua_private_root: Some(root.clone()),
+            cua_attach: CuaAttach::Private,
+        });
+        core.apply_preset(Preset::Full);
+        let sh = core.shared();
+        let pinned = root.join("releases").join(cua::PINNED_VERSION).join(bin_name);
+        assert_eq!(core.cua_bin(), pinned.to_string_lossy());
+        // The pinned version is not there yet: the old copy is what runs.
+        assert_eq!(sh.cua_bin_now(), old.to_string_lossy());
+        assert_eq!(sh.cua_proxy_bin(), old.to_string_lossy());
+        // A session on a daemon of the old copy is current for now.
+        let held = CuaSession {
+            socket: "s".into(),
+            embedded: true,
+            scope: Arc::new(crate::cua_apps::Scope::of(&core.settings())),
+            look: None,
+            started: Instant::now(),
+            bin: Some(old.to_string_lossy().to_string()),
+            shared: sh.clone(),
+        };
+        sh.cua_sessions.fetch_add(1, Ordering::AcqRel);
+        assert!(!held.outdated());
+        // The new version lands: new daemons get it, and the open session
+        // learns that it is on the old one.
+        std::fs::create_dir_all(pinned.parent().unwrap()).unwrap();
+        std::fs::write(&pinned, b"the pinned copy").unwrap();
+        assert_eq!(sh.cua_bin_now(), pinned.to_string_lossy());
+        assert!(held.outdated());
+        drop(held);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
     async fn a_session_holds_the_daemon_until_it_ends() {
         let (core, _) = test_core();
         let sh = core.shared();
@@ -1967,6 +2095,7 @@ mod tests {
             scope: Arc::new(crate::cua_apps::Scope::open()),
             look: None,
             started: Instant::now(),
+            bin: None,
             shared: sh.clone(),
         };
         let a = held("a");

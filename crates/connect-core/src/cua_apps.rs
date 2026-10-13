@@ -1,10 +1,11 @@
 //! Which apps the synth may use through computer control.
 //!
 //! The owner has three choices (`settings::AppsPolicy`): every app, every
-//! app except some, only some. What Cua Driver 0.33.1 can do about it was
+//! app except some, only some. What Cua Driver 0.34.1 can do about it was
 //! read in its source at the pinned tag (`cua-driver-core`:
-//! `session_manifest.rs`, `authorization.rs`, `tool.rs`) and checked on our
-//! own daemon (`connectd selftest cua`):
+//! `session_manifest.rs`, `authorization.rs`, `tool.rs`; none of the three
+//! changed between 0.33.1 and 0.34.1) and checked on our own daemon
+//! (`connectd selftest cua`):
 //!
 //!  - **Only these** is the driver's own business. Our daemon is started in
 //!    bounded permission mode with a capability manifest (`Scope::manifest`)
@@ -751,11 +752,16 @@ fn windows_answer(scope: &Scope, listed: &Value, rows: &[AppRow], pid: Option<i6
 
 // --- the directory: the app's own reading of the driver's lists ---
 
+/// Which driver binary to run, asked each time a runtime is started.
+pub type BinProvider = std::sync::Arc<dyn Fn() -> String + Send + Sync>;
+
 /// Where the rows come from.
 #[derive(Clone)]
 enum Source {
-    /// The pinned driver, in a runtime of the app's own.
-    Driver { bin: String, env: DriverEnv },
+    /// The driver, in a runtime of the app's own. `bin` says which binary
+    /// to run when the runtime is started (after an update of the app the
+    /// copy of the version before may be the one that is there).
+    Driver { bin: BinProvider, env: DriverEnv },
     /// Rows given by a test.
     Fixed,
 }
@@ -788,7 +794,7 @@ pub struct Directory {
 }
 
 impl Directory {
-    pub fn driver(bin: String, env: DriverEnv) -> Directory {
+    pub fn driver(bin: BinProvider, env: DriverEnv) -> Directory {
         Directory {
             source: std::sync::Mutex::new(Source::Driver { bin, env }),
             state: tokio::sync::Mutex::new(State::default()),
@@ -922,7 +928,7 @@ impl Directory {
         let mut last = String::new();
         for _ in 0..2 {
             if st.lister.is_none() {
-                match tokio::time::timeout(LISTER_TIMEOUT, Lister::start(&bin, &env)).await {
+                match tokio::time::timeout(LISTER_TIMEOUT, Lister::start(&bin(), &env)).await {
                     Ok(Ok(lister)) => st.lister = Some(lister),
                     Ok(Err(why)) => return Err(why),
                     Err(_) => return Err("the helper did not start in time".into()),

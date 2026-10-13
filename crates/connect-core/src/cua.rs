@@ -190,6 +190,10 @@ pub struct PrivateDaemon {
     /// When it was started: a bounded daemon's permissions run out a day
     /// later (`cua_apps::LEASE`).
     pub started: std::time::Instant,
+    /// The driver binary it runs. After an update of the app this can be
+    /// the copy of the version before, until the new one is in place and
+    /// nobody holds this daemon.
+    pub bin: String,
     /// Windows: the daemon's stdin, held open for as long as the app wants
     /// the daemon. The daemon was started with `--parent-liveness-stdio`,
     /// so the day this end closes (we stop it, or the app dies in any way)
@@ -384,6 +388,7 @@ impl PrivateDaemon {
             look,
             scope: std::sync::Arc::new(scope),
             started: std::time::Instant::now(),
+            bin: bin.to_string(),
             liveness,
         })
     }
@@ -394,7 +399,8 @@ impl PrivateDaemon {
     }
 
     /// Stop OUR daemon by its own pid (kill_on_drop also covers a crash).
-    pub async fn stop(mut self, bin: &str, env: &DriverEnv) {
+    pub async fn stop(mut self, env: &DriverEnv) {
+        let bin = self.bin.clone();
         if let Some(liveness) = self.liveness.take() {
             // Windows: closing its stdin is the daemon's signal to finish
             // cleanly (the driver SDK's way).
@@ -402,7 +408,7 @@ impl PrivateDaemon {
             let _ = tokio::time::timeout(Duration::from_secs(3), self.child.wait()).await;
         } else {
             // Polite stop on our socket first.
-            let mut cmd = crate::proc::command(bin);
+            let mut cmd = crate::proc::command(&bin);
             env.apply(&mut cmd);
             let _ = cmd
                 .args(["stop", "--socket", &self.socket])

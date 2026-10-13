@@ -70,7 +70,8 @@ const REOPEN: &str = "unavailable: SNTH Connect is restarting its helper so that
 /// ends when its stdin closes. The app's mcp streams and the self-test
 /// both start it here.
 pub fn spawn_proxy(shared: &Shared, socket: &str, embedded: bool) -> std::io::Result<Child> {
-    let argv = cua::mcp_argv(&shared.cua_bin, socket, embedded);
+    // The proxy of the same version as the daemon it talks to.
+    let argv = cua::mcp_argv(&shared.cua_proxy_bin(), socket, embedded);
     let mut cmd = crate::proc::command(&argv[0]);
     cmd.args(&argv[1..]);
     shared.cua_env.apply(&mut cmd);

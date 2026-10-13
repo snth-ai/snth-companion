@@ -33,7 +33,12 @@
 //! ```
 //!
 //! A new app version with a different pin looks for `releases/<new>`,
-//! does not find it, installs it, and removes the older release dirs.
+//! does not find it and installs it. Until that is done the copy of the
+//! older version stays where it is and stays usable (`usable_bin`): a
+//! download that fails leaves computer control working on the driver the
+//! owner already had. The older release dirs are removed once the new copy
+//! is in place, except one a daemon is still running from (`hold`), which
+//! goes when that daemon has stopped (`release_old`).
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -303,6 +308,9 @@ pub struct CuaInstaller {
     /// The app is quitting: no new run starts.
     stopped: AtomicBool,
     timeout: Duration,
+    /// A release dir of an older version that a running daemon was started
+    /// from: not removed until it is let go.
+    held: Mutex<Option<PathBuf>>,
 }
 
 impl CuaInstaller {
@@ -328,6 +336,7 @@ impl CuaInstaller {
             current: Mutex::new(Arc::new(AtomicBool::new(false))),
             stopped: AtomicBool::new(false),
             timeout: INSTALL_TIMEOUT,
+            held: Mutex::new(None),
         }
     }
 
@@ -345,6 +354,75 @@ impl CuaInstaller {
 
     fn releases_dir(&self) -> PathBuf {
         self.root.join("releases")
+    }
+
+    /// The copies of other versions that are still on disk, as (version,
+    /// binary), the one changed last first.
+    fn old_copies(&self) -> Vec<(String, PathBuf)> {
+        let mut found: Vec<(std::time::SystemTime, String, PathBuf)> = std::fs::read_dir(self.releases_dir())
+            .map(|rd| {
+                rd.flatten()
+                    .filter_map(|e| {
+                        let version = e.file_name().to_string_lossy().to_string();
+                        let bin = e.path().join(bin_name());
+                        if version == self.version || !bin.is_file() {
+                            return None;
+                        }
+                        let changed = e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+                        Some((changed, version, bin))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+        found.into_iter().map(|(_, version, bin)| (version, bin)).collect()
+    }
+
+    /// The binary to run right now, with its version: the pinned copy when
+    /// it is in place, else the copy of an older version that an earlier
+    /// app version installed (while the new one is being fetched, or after
+    /// a fetch that failed). None when there is no copy at all.
+    pub fn usable_bin(&self) -> Option<(String, PathBuf)> {
+        let pinned = self.bin_path();
+        if pinned.is_file() {
+            return Some((self.version.clone(), pinned));
+        }
+        self.old_copies().into_iter().next()
+    }
+
+    /// A daemon was started from this binary: if it is a copy of an older
+    /// version, its release dir stays until `release_old`.
+    pub fn hold(&self, bin: &Path) {
+        if bin != self.bin_path() {
+            *self.held.lock().unwrap() = bin.parent().map(Path::to_path_buf);
+        }
+    }
+
+    /// No daemon runs from an older copy any more: remove the older
+    /// release dirs (when the pinned copy is in place).
+    pub fn release_old(&self) {
+        *self.held.lock().unwrap() = None;
+        self.drop_old();
+    }
+
+    /// Remove the release dirs of other versions, once the pinned copy is
+    /// in place and except one that is held. Best effort: on Windows a
+    /// copy that still runs cannot be deleted; the next call tries again.
+    fn drop_old(&self) {
+        if !self.bin_path().is_file() {
+            return;
+        }
+        let target = self.release_dir();
+        let held = self.held.lock().unwrap().clone();
+        let Ok(entries) = std::fs::read_dir(self.releases_dir()) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            if dir != target && Some(&dir) != held.as_ref() {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
     }
 
     fn release_dir(&self) -> PathBuf {
@@ -393,6 +471,9 @@ impl CuaInstaller {
         self.set(InstallState::Checking);
         let bin = self.bin_path();
         if installed_version(&bin, &self.env()).await.as_deref() == Some(self.version.as_str()) {
+            // Leftovers of an older version (a copy that could not be
+            // deleted while it ran, for one).
+            self.drop_old();
             return (
                 self.set(InstallState::Ready {
                     version: self.version.clone(),
@@ -589,13 +670,11 @@ impl CuaInstaller {
             std::fs::remove_dir_all(&target).map_err(|e| disk("remove the broken copy", e))?;
         }
         std::fs::rename(&unpacked, &target).map_err(|e| disk("move the new copy into place", e))?;
-        // Older versions are of no use to this app version. Best effort:
-        // on Windows a still-running old copy cannot be deleted; the next
-        // install tries again.
+        // Older versions are of no use to this app version any more,
+        // except one a daemon still runs from: that one goes when the
+        // daemon has stopped.
         let updated = !others.is_empty();
-        for old in others {
-            let _ = std::fs::remove_dir_all(old);
-        }
+        self.drop_old();
 
         // One line in the activity journal: what, which version. Nothing else.
         self.journal.record(Entry::new(
@@ -1132,6 +1211,79 @@ mod tests {
                 .map(|e| e.action.clone())
                 .collect();
             assert_eq!(actions, ["helper.install", "helper.update"]);
+        }
+
+        #[tokio::test]
+        async fn a_failed_update_leaves_the_old_copy_usable_and_a_held_copy_stays_until_let_go() {
+            let rig = rig("update-fails");
+            let (old, old_sha) = make_archive(&rig.dir, "old.tar.gz", "1.0.0");
+            let inst = CuaInstaller::new(
+                rig.root.clone(),
+                Some(spec("1.0.0", "old.tar.gz", &old_sha)),
+                FileFetcher::new(old),
+                rig.journal.clone(),
+            );
+            assert!(inst.ensure().await.1);
+            let old_bin = rig.root.join("releases/1.0.0/cua-driver");
+            assert_eq!(inst.usable_bin(), Some(("1.0.0".to_string(), old_bin.clone())));
+
+            // The next app version pins 2.0.0, and the computer is offline.
+            let (new, new_sha) = make_archive(&rig.dir, "new.tar.gz", "2.0.0");
+            let fetcher = FileFetcher::new(new);
+            fetcher.offline_first.store(1, Ordering::SeqCst);
+            let inst = CuaInstaller::new(
+                rig.root.clone(),
+                Some(spec("2.0.0", "new.tar.gz", &new_sha)),
+                fetcher.clone(),
+                rig.journal.clone(),
+            );
+            // Before anything was tried, and after the failed try: the old
+            // copy is what there is, and it still runs.
+            assert_eq!(inst.usable_bin(), Some(("1.0.0".to_string(), old_bin.clone())));
+            let (state, installed) = inst.ensure().await;
+            assert!(matches!(state, InstallState::Failed { code: FailCode::Offline, .. }), "{state:?}");
+            assert!(!installed);
+            assert_eq!(inst.usable_bin(), Some(("1.0.0".to_string(), old_bin.clone())));
+            assert_eq!(installed_version(&old_bin, &inst.env()).await.as_deref(), Some("1.0.0"));
+            assert!(!rig.root.join("releases/2.0.0").exists());
+            assert!(!rig.root.join("tmp").exists(), "nothing of the failed try is left");
+
+            // A daemon runs from the old copy when the retry succeeds: the
+            // new copy is what a new daemon gets, the old one stays on disk
+            // for the daemon that runs.
+            inst.hold(&old_bin);
+            let (state, installed) = inst.ensure().await;
+            assert_eq!(state, InstallState::Ready { version: "2.0.0".into() });
+            assert!(installed);
+            let new_bin = rig.root.join("releases/2.0.0/cua-driver");
+            assert_eq!(inst.usable_bin(), Some(("2.0.0".to_string(), new_bin.clone())));
+            assert!(old_bin.is_file(), "the copy a daemon runs from was removed");
+            // A later check of the install does not remove it either.
+            assert!(!inst.ensure().await.1);
+            assert!(old_bin.is_file());
+            // The daemon stopped: the old copy goes.
+            inst.release_old();
+            assert!(!rig.root.join("releases/1.0.0").exists());
+            assert!(new_bin.is_file());
+            // Holding the pinned copy holds nothing.
+            inst.hold(&new_bin);
+            inst.release_old();
+            assert!(new_bin.is_file());
+        }
+
+        #[tokio::test]
+        async fn with_no_copy_at_all_nothing_is_usable() {
+            let rig = rig("nothing");
+            let (new, new_sha) = make_archive(&rig.dir, "new.tar.gz", "2.0.0");
+            let fetcher = FileFetcher::new(new);
+            fetcher.offline_first.store(1, Ordering::SeqCst);
+            let inst = CuaInstaller::new(rig.root.clone(), Some(spec("2.0.0", "new.tar.gz", &new_sha)), fetcher, rig.journal.clone());
+            assert_eq!(inst.usable_bin(), None);
+            assert!(!inst.ensure().await.1);
+            assert_eq!(inst.usable_bin(), None);
+            // A release dir without a driver in it is not a copy.
+            std::fs::create_dir_all(rig.root.join("releases/0.9.0")).unwrap();
+            assert_eq!(inst.usable_bin(), None);
         }
 
         #[tokio::test]
