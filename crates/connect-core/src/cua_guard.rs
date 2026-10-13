@@ -2,7 +2,7 @@
 //! the owner's settings say, and the one rule for where the driver may
 //! write a file.
 //!
-//! Cua Driver's catalog (58 tools at the pinned 0.33.1) is built for an
+//! Cua Driver's catalog (58 tools at the pinned 0.34.1) is built for an
 //! agent on its own machine. A few of its tools do things on the OWNER's
 //! computer that the owner has no switch for in this app: they install
 //! software, change the driver's own settings, keep pictures of the screen
@@ -55,7 +55,7 @@ pub const NEVER: &[Never] = &[
     },
     Never {
         tool: "set_config",
-        why: "changes the driver's own settings: its experimental_pip keys are written to ~/.cua-driver/config.json, which a driver the owner runs themselves reads too, and max_image_dimension would lift the owner's screenshot limit",
+        why: "changes the driver's own settings: its experimental_pip keys and (since 0.34) its cursor.motion defaults are written to ~/.cua-driver/config.json, which a driver the owner runs themselves reads too, and max_image_dimension would lift the owner's screenshot limit",
         tell: "the helper's settings on this computer are its owner's, in SNTH Connect under Computer control; for a smaller screenshot pass max_image_dimension on the call itself, and for anything else tell the owner where the setting is",
     },
     Never {
@@ -245,10 +245,13 @@ mod tests {
 
     #[test]
     fn the_pinned_catalog_is_fully_classified() {
-        // The tools of 0.33.1 whose names or arguments fall under the lists.
+        // The tools of 0.34.1 whose names or arguments fall under the lists
+        // (0.34 added no tool; its new arguments, `display_only` on
+        // `get_window_state`, `cursor_motion` on `start_session` and the
+        // `cursor.motion.*` keys of `set_config`, name no place on disk).
         let catalog = vec![
             tool("click", &["pid", "x", "y", "debug_image_out", "timeout_ms"]),
-            tool("get_window_state", &["pid", "screenshot_out_file", "max_image_dimension"]),
+            tool("get_window_state", &["pid", "screenshot_out_file", "max_image_dimension", "display_only"]),
             tool("get_desktop_state", &["screenshot_out_file"]),
             tool("clipboard_write", &["text", "file_path", "image_path"]),
             tool("browser_set_input_files", &["files", "ref"]),
@@ -267,7 +270,9 @@ mod tests {
             tool("check_for_update", &[]),
             tool("check_permissions", &["prompt"]),
             tool("get_config", &[]),
-            tool("set_config", &["key", "value"]),
+            tool("set_config", &["key", "value", "cursor.motion", "cursor.motion.style", "cursor.motion.effects.trail"]),
+            tool("start_session", &["session", "cursor_theme", "cursor_motion"]),
+            tool("set_agent_cursor_motion", &["session", "style", "timing", "effects", "glide_duration_ms"]),
             tool("escalate_session", &["reason"]),
             tool("get_browser_state", &["snapshot_format"]),
         ];

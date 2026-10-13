@@ -218,7 +218,7 @@ export const en = {
     speedRelaxed: "Relaxed",
     speedDesc: {
       fast: "Every move takes a quarter of a second.",
-      normal: "A short move is quick, a move across the screen takes a few seconds.",
+      normal: "The helper's own pace: a short move is quick, a move across the screen takes about a second.",
       relaxed: (n: string) => `Every move takes a second and a half, with a pause after each click. Easy to follow, and ${n} works a little slower.`,
     },
     idleHide: "Hide the pointer when nothing happens",

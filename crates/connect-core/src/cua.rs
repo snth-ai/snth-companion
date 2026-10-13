@@ -21,7 +21,7 @@ use tokio::process::{Child, ChildStdin, Command};
 use crate::settings::{ComputerMode, Foreground, Settings};
 
 /// The Cua Driver version the app pins and installs.
-pub const PINNED_VERSION: &str = "0.33.1";
+pub const PINNED_VERSION: &str = "0.34.1";
 
 /// Our host bundle id, passed as the embedded-mode advisory label.
 pub const HOST_BUNDLE_ID: &str = "ai.snth.connect";

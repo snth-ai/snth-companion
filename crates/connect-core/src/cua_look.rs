@@ -1,7 +1,7 @@
 //! How computer control looks on the owner's screen: the synth's cursor,
 //! how it moves, when it hides, and how large a screenshot the synth gets.
 //!
-//! What Cua Driver 0.33.1 offers, read from its source at the pinned tag
+//! What Cua Driver 0.34.1 offers, read from its source at the pinned tag
 //! (`libs/cua-driver/rust/crates/cursor-overlay`) and checked against the
 //! real binary by `connectd selftest cua`:
 //!
@@ -34,6 +34,25 @@
 //!    window is a start flag. For the same reason the synth's `set_config`
 //!    is never allowed (`cua_guard::NEVER`): one of its keys is written to
 //!    that shared file.
+//!
+//!  - Since 0.34 the cursor has six motion styles (`signature_arc`, the new
+//!    default, `spring_settle`, `magnetic`, `comet_swoop`, `adaptive`, and
+//!    `classic`, the glide every version before had), three timings and
+//!    five effects (`motion.rs`). They are chosen per session
+//!    (`set_agent_cursor_motion`, `start_session.cursor_motion`) or by a
+//!    saved default, `cursor.motion.*`, and that default is one more key
+//!    of the shared `~/.cua-driver/config.json` (`motion_defaults.rs`).
+//!    There is NO start flag for them. So the app offers no style: the
+//!    only place a default can be saved is a file it never writes, and a
+//!    per-session choice reads back as not applied before the session's
+//!    first action (checked on 0.33.1 and 0.34.1 alike). The synth may not
+//!    choose either: its `set_agent_cursor_motion` is refused and a
+//!    `cursor_motion` is taken out of its `start_session`. One consequence
+//!    stays, as with the preview window: a default the owner saved for
+//!    their own driver is followed by our daemon too.
+//!    `--glide-ms` still means what it meant: a fixed length for every
+//!    move, whatever the style (`trajectory.rs`, "a fixed glide_duration_ms
+//!    predates `timing`; keep honoring it").
 //!
 //! A change of look needs a new daemon. The daemon is replaced only when no
 //! computer-control session is open (`Shared::cua_session`), so a task in
@@ -94,8 +113,9 @@ pub fn theme_for(color: CursorColor) -> Option<&'static Theme> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Motion {
     /// Fixed length of one move in milliseconds; 0 = the driver's own
-    /// timing (about 490 points a second on average, so a short hop takes
-    /// a quarter of a second and a move across a large screen three).
+    /// timing. Since 0.34 that is the timing of its default style
+    /// (`signature_arc`): it grows with the distance, from about a fifth
+    /// of a second for a short hop to 1.4 seconds at most.
     pub glide_ms: u32,
     /// The pause after a click.
     pub dwell_ms: u32,
@@ -276,7 +296,8 @@ pub enum Gate {
 ///    synth looking for a fault that is not there.
 ///
 /// Changed:
-///  - `start_session`: a `cursor_theme` is taken out (the session starts).
+///  - `start_session`: a `cursor_theme` and a `cursor_motion` are taken
+///    out (the session starts).
 ///  - a screenshot tool, when the owner set a limit: `max_image_dimension`
 ///    is put on the call, or brought down to the limit.
 pub fn gate(tool: &str, msg: &mut Value, look: &LookSettings) -> Gate {
@@ -294,11 +315,17 @@ pub fn gate(tool: &str, msg: &mut Value, look: &LookSettings) -> Gate {
         return Gate::Pass;
     };
     if tool == "start_session" {
-        let removed = params
+        let (theme, motion) = params
             .get_mut("arguments")
             .and_then(Value::as_object_mut)
-            .is_some_and(|args| args.remove("cursor_theme").is_some());
-        return if removed { Gate::Changed("cursor_theme removed") } else { Gate::Pass };
+            .map(|args| (args.remove("cursor_theme").is_some(), args.remove("cursor_motion").is_some()))
+            .unwrap_or_default();
+        return match (theme, motion) {
+            (true, true) => Gate::Changed("cursor_theme and cursor_motion removed"),
+            (true, false) => Gate::Changed("cursor_theme removed"),
+            (false, true) => Gate::Changed("cursor_motion removed"),
+            (false, false) => Gate::Pass,
+        };
     }
     if look.screenshot_max > 0 && SCREENSHOT_TOOLS.contains(&tool) {
         let limit = u64::from(look.screenshot_max);
@@ -470,6 +497,13 @@ mod tests {
         assert_eq!(msg["params"]["arguments"], json!({"session": "task-a"}));
         let mut plain = call("start_session", json!({"session": "task-a"}));
         assert_eq!(gate("start_session", &mut plain, &look), Gate::Pass);
+        // 0.34: the motion style the synth would pick for its session.
+        let mut styled = call("start_session", json!({"session": "task-a", "cursor_motion": {"style": "comet_swoop", "effects": {"trail": true}}}));
+        assert_eq!(gate("start_session", &mut styled, &look), Gate::Changed("cursor_motion removed"));
+        assert_eq!(styled["params"]["arguments"], json!({"session": "task-a"}));
+        let mut both = call("start_session", json!({"session": "task-a", "cursor_theme": {"theme_id": "cua.default"}, "cursor_motion": {"style": "classic"}}));
+        assert_eq!(gate("start_session", &mut both, &look), Gate::Changed("cursor_theme and cursor_motion removed"));
+        assert_eq!(both["params"]["arguments"], json!({"session": "task-a"}));
     }
 
     #[test]

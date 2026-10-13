@@ -1,6 +1,6 @@
 //! "Check the helper": the driver's own health report, for the owner.
 //!
-//! Three diagnostics exist in Cua Driver 0.33.1. They were read in its
+//! Three diagnostics exist in Cua Driver 0.34.1. They were read in its
 //! source at the pinned tag (`cua-driver/src/doctor.rs`, `cli.rs`,
 //! `cua-driver-core/src/health_report.rs`, the three platform providers):
 //!
@@ -23,8 +23,9 @@
 //!    home folder. Not used.
 //!
 //! The driver's hints are written for its own app ("Grant Accessibility to
-//! CuaDriver.app"), which is wrong for a driver that runs under SNTH
-//! Connect. So the app keeps only each check's name and verdict for the
+//! CuaDriver.app"; since 0.34 they add "for an embedded or linked driver,
+//! follow the host's permission setup"), which is no help to the owner of
+//! a driver that runs under SNTH Connect. So the app keeps only each check's name and verdict for the
 //! owner (the host has its own words for them, in both languages) and puts
 //! the driver's message into the text for "copy details", after `scrub`.
 

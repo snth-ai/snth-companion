@@ -183,10 +183,10 @@ function healthReport(stage: string, state: UiState): HealthReport {
     details: [...header, `overall: ${overall}`, ...lines].join("\n"),
   });
   if (stage === "missing") {
-    return done("not_run", [item("installed", "fail", "not_installed", "0.33.1")], ["[fail] installed: no helper found (expected 0.33.1)"]);
+    return done("not_run", [item("installed", "fail", "not_installed", "0.34.1")], ["[fail] installed: no helper found (expected 0.34.1)"]);
   }
-  const installed = item("installed", "ok", "", "0.33.1");
-  const installedLine = "[ok] installed: cua-driver 0.33.1 (expected 0.33.1)";
+  const installed = item("installed", "ok", "", "0.34.1");
+  const installedLine = "[ok] installed: cua-driver 0.34.1 (expected 0.34.1)";
   if (stage === "off" || stage === "paused" || !state.core.settings.computer.enabled || state.core.paused) {
     const code = stage === "paused" || state.core.paused ? "paused" : "off";
     return done("not_run", [installed, item("daemon", "skip", code)], [installedLine, `[skip] daemon: not started (${code === "paused" ? "the app is paused" : "computer control is switched off"})`]);
@@ -204,8 +204,8 @@ function healthReport(stage: string, state: UiState): HealthReport {
   const lines = [
     installedLine,
     "daemon: the app's own, on a private endpoint",
-    "[ok] daemon: answers (driver 0.33.1, report ok, schema 1)",
-    "[pass] binary_version: cua-driver 0.33.1",
+    "[ok] daemon: answers (driver 0.34.1, report ok, schema 1)",
+    "[pass] binary_version: cua-driver 0.34.1",
     `[pass] platform_supported: ${mac ? "macOS 26.1 (arm64)" : state.app.os === "windows" ? "Windows 11 (x86_64)" : "Linux (x86_64)"}`,
     "[pass] session_active: MCP session is active.",
   ];
@@ -213,7 +213,7 @@ function healthReport(stage: string, state: UiState): HealthReport {
     items.push(item("bundle_identity", "ok"), item("tcc_accessibility", access ? "ok" : "fail"), item("tcc_screen_recording", screen ? "ok" : "fail"));
     lines.push(
       "[pass] bundle_identity: Embedded host ai.snth.connect.",
-      "       executable_path: <app-data>/cua/releases/0.33.1/cua-driver",
+      "       executable_path: <app-data>/cua/releases/0.34.1/cua-driver",
       `[${access ? "pass" : "fail"}] tcc_accessibility: Accessibility is ${access ? "granted" : "NOT granted for this process"}.`,
       `[${screen ? "pass" : "fail"}] tcc_screen_recording: Screen Recording is ${screen ? "granted" : "NOT granted for this process"}.`,
     );
@@ -712,7 +712,7 @@ class MockBackend implements Backend {
         metered: false,
         settings,
         settings_rev: 14,
-        cua_version: "0.33.1",
+        cua_version: "0.34.1",
         cua_status: "ok",
         computer_task: null,
         egress_month: new Date().toISOString().slice(0, 7),
@@ -721,7 +721,7 @@ class MockBackend implements Backend {
       link_detail: "linked to Mia",
       needs_repair: false,
       pending: null,
-      helper: { state: "ready", version: "0.33.1" },
+      helper: { state: "ready", version: "0.34.1" },
       helper_retry_at: null,
       update: { phase: "idle", auto: true, configured: true, blocked: null, last_checked: now() - 3600, updated_from: null },
       grants: [
@@ -755,8 +755,8 @@ class MockBackend implements Backend {
         updater_ready: true,
         metered_detection: false,
         secret_store: "system keychain",
-        cua_pinned_version: "0.33.1",
-        cua_path: `${HOME}/Library/Application Support/ai.snth.connect/cua/releases/0.33.1/cua-driver`,
+        cua_pinned_version: "0.34.1",
+        cua_path: `${HOME}/Library/Application Support/ai.snth.connect/cua/releases/0.34.1/cua-driver`,
       },
     };
     // The two permissions exist on macOS only.
@@ -1422,8 +1422,8 @@ class MockBackend implements Backend {
     at(5900, { state: "verifying" });
     this.installTimers.push(
       window.setTimeout(() => {
-        this.setHelper({ state: "ready", version: "0.33.1" });
-        this.record("computer", "helper.install", "0.33.1", "ok");
+        this.setHelper({ state: "ready", version: "0.34.1" });
+        this.record("computer", "helper.install", "0.34.1", "ok");
       }, startAfter + 6700),
     );
   }
@@ -1433,7 +1433,7 @@ class MockBackend implements Backend {
       {
         helper: structuredClone(this.state.helper),
         retry_at: this.state.helper_retry_at,
-        pinned_version: "0.33.1",
+        pinned_version: "0.34.1",
         ...this.permissions,
       },
       80,
@@ -1629,9 +1629,9 @@ class MockBackend implements Backend {
 const FAIL_DETAIL: Partial<Record<HelperFailCode, string>> = {
   offline: "github.com: Dns Failed: resolve dns name 'github.com:443'",
   download: "the server answered HTTP 503",
-  checksum: "cua-driver-rs-0.33.1-darwin-universal-binary.tar.gz has sha256 1f0c..., expected 8bb7...",
+  checksum: "cua-driver-rs-0.34.1-darwin-universal-binary.tar.gz has sha256 1f0c..., expected 52de...",
   disk: "move the new copy into place: No space left on device (os error 28)",
-  verify: 'the unpacked driver reports version "", expected 0.33.1',
+  verify: 'the unpacked driver reports version "", expected 0.34.1',
   unsupported: "no Cua Driver release for freebsd x86_64",
   timeout: "not finished after 900 s",
 };
