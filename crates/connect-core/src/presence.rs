@@ -50,6 +50,7 @@ mod imp {
             app: *const c_void,
             key_exists_and_is_valid: *mut u8,
         ) -> u8;
+        fn CFPreferencesAppSynchronize(app: *const c_void) -> u8;
     }
 
     /// System Settings > Accessibility > Display > Reduce motion: the
@@ -71,6 +72,9 @@ mod imp {
             let on = if key.is_null() || app.is_null() {
                 false
             } else {
+                // The app runs for days: without this the answer is the
+                // one from the first read.
+                CFPreferencesAppSynchronize(app);
                 CFPreferencesGetAppBooleanValue(key, app, &mut valid) != 0 && valid != 0
             };
             if !key.is_null() {
