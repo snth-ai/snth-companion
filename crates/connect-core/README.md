@@ -244,6 +244,29 @@ the helper of `connect-host`; each browser profile is one `Session`.
   linked, the vault's device id, last seen). Unlinking the computer clears
   every `linked` flag and tells connected extensions to drop their sites.
 
+The messages (JSON objects; the helper relays them unchanged and adds
+nothing but its own `host` / `host.open`):
+
+| Direction | Message | Meaning |
+|---|---|---|
+| helper -> app | `{"type":"host.open","v":1,"origin":"chrome-extension://<id>/"}` | first line of a connection: who the browser started the helper for |
+| helper -> ext | `{"type":"host","app":"not_running"\|"connected"}`, `{"type":"host","error":"malformed"\|"origin_not_allowed"}` | the helper's own words |
+| ext -> app | `hello{v:1, browser, ext_version, install, paired, device_id?, sites[]}` | who this browser is; never a token |
+| app -> ext | `hello_ack{v:1, app_version, linked, synth, known}` | whether the app has a synth, its name, whether this browser is linked here |
+| app -> ext | `status{linked, synth, known}` | the same, when it changes |
+| ext -> app | `pair.request{id}` | "link this browser" was clicked in the popup |
+| app -> ext | `pair.code{id, code, synth}` | the synth's pairing code (`id` 0 = the owner clicked in the app) |
+| app -> ext | `pair.linked{id, synth}` | the browser's existing pairing is with this synth: linked, no new code |
+| app -> ext | `pair.refused{id, error}` | `not_linked`, `paused`, `denied`, `busy`, `synth_offline`, `synth_outdated`, `other_synth`, `failed` |
+| ext -> app | `pair.done{id, ok, device_id?, error?}` | the hub took the code (or did not) |
+| ext -> app | `state{paired?, sites?}` | the pairing or the readable sites changed |
+| app -> ext | `cookies.get{id, site, synth, asked}` | hand over the cookies of this one site (`asked`: the owner just answered in the app) |
+| ext -> app | `cookies.result{id, ok, cookies[]?, error?}` | cookie = `{name, value, domain, path, expires, secure, http_only, same_site}`; `error`: `denied`, `bad_site`, `failed` |
+| app -> ext | `site.revoke{site}`, `sites.clear` | give back one site, or all of them |
+| app -> ext | `unpair` | forget the vault pairing (the owner unlinked this browser in the app) |
+
+Unknown types are ignored on both sides.
+
 **`cookies.get`** (`rpc.rs`), after the owner's settings allowed the site:
 where the files of the common browsers cannot be read (Chrome and Edge on
 Windows) the linked browser's extension is asked first and the files second;
