@@ -225,6 +225,12 @@ impl Shared {
     pub(crate) fn is_paired(&self) -> bool {
         self.identity.read().unwrap().is_some()
     }
+    /// This computer has a synth: a confirmed pairing, or (a host that
+    /// was handed a token and an address directly, like the CLI) a link
+    /// that has been up.
+    pub(crate) fn has_synth(&self) -> bool {
+        self.is_paired() || self.synth.read().unwrap().is_some()
+    }
     pub(crate) fn emit(&self, event: CoreEvent) {
         let _ = self.events.send(event);
     }

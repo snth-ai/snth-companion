@@ -319,3 +319,64 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn pipe(tag: &str) -> Endpoint {
+        Endpoint::at(format!(r"\\.\pipe\connect-host-test-{tag}-{}", std::process::id()))
+    }
+
+    #[tokio::test]
+    async fn a_helper_reaches_the_app_over_the_pipe() {
+        let ep = pipe("rt");
+        let mut listener = Listener::bind(&ep).unwrap();
+        let client = tokio::spawn({
+            let ep = ep.clone();
+            async move {
+                // The pipe was made by this user: the owner check passes.
+                let mut c = connect(&ep).await.unwrap();
+                c.writer.write_all(b"ping\n").await.unwrap();
+                let mut buf = [0u8; 5];
+                c.reader.read_exact(&mut buf).await.unwrap();
+                buf
+            }
+        });
+        let mut served = listener.accept().await.unwrap();
+        let mut buf = [0u8; 5];
+        served.reader.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"ping\n");
+        served.writer.write_all(b"pong\n").await.unwrap();
+        assert_eq!(&client.await.unwrap(), b"pong\n");
+
+        // A second helper while the first is still connected.
+        let second = tokio::spawn({
+            let ep = ep.clone();
+            async move { connect(&ep).await.is_ok() }
+        });
+        let kept = listener.accept().await;
+        assert!(kept.is_ok());
+        assert!(second.await.unwrap());
+        drop(kept);
+        drop(served);
+        drop(listener);
+        assert!(connect(&ep).await.is_err(), "no app, no connection");
+    }
+
+    #[tokio::test]
+    async fn a_second_app_cannot_take_the_pipe() {
+        let ep = pipe("dup");
+        let _first = Listener::bind(&ep).unwrap();
+        let err = Listener::bind(&ep).err().expect("second bind must fail");
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse, "{err}");
+    }
+
+    #[test]
+    fn the_current_user_has_a_sid() {
+        let sid = crate::win::user_sid_string().unwrap();
+        assert!(sid.starts_with("S-1-") && sid.len() > 8, "{sid}");
+        assert!(crate::win::PipeSecurity::for_current_user().is_ok());
+    }
+}

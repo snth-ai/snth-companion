@@ -276,7 +276,7 @@ async fn cookies_get(shared: &Arc<Shared>, req: &Request) -> Result<Value, Strin
     };
 
     if extension_first {
-        match shared.cookies_via_extension(&domain, left()).await {
+        match shared.cookies_via_extension(&domain, left(), need_ask).await {
             ExtensionRead::Cookies(r) if !r.cookies.is_empty() => return done(r),
             other => {
                 if let Some(why) = refused(other) {
@@ -300,7 +300,7 @@ async fn cookies_get(shared: &Arc<Shared>, req: &Request) -> Result<Value, Strin
     };
 
     if !extension_first {
-        match shared.cookies_via_extension(&domain, left()).await {
+        match shared.cookies_via_extension(&domain, left(), need_ask).await {
             ExtensionRead::Cookies(r) if !r.cookies.is_empty() => return done(r),
             other => {
                 if let Some(why) = refused(other) {

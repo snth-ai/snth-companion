@@ -410,3 +410,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 }
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    const ID: &str = "fmccidehlojeieenopnkfeggeghkhgpa";
+    // A host name of the test's own: the keys of an installed app are
+    // never touched.
+    const HOST: &str = "ai.snth.connect.unittest";
+
+    #[test]
+    fn the_registry_points_the_browser_at_one_manifest_file() {
+        let root = std::env::temp_dir().join(format!("connect-host-reg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let base = root.join("local");
+        let loc = Locations::custom(&base, root.join("manifest"), HOST);
+        let chrome = browser("chrome").unwrap();
+        std::fs::create_dir_all(loc.data_dir(&chrome)).unwrap();
+
+        let helper = root.join("app").join("snth-connect-host.exe");
+        let done = loc.install(&helper, &[ID]);
+        assert_eq!(done.len(), 1);
+        assert_eq!(*done[0].1.as_ref().unwrap(), Change::Written);
+        let key = format!(r"Software\Google\Chrome\NativeMessagingHosts\{HOST}");
+        let file = crate::win::reg_get_default(&key).unwrap().expect("the key was written");
+        assert_eq!(std::path::PathBuf::from(&file), root.join("manifest").join(format!("{HOST}.json")));
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(v["path"], helper.to_string_lossy().as_ref());
+        assert_eq!(v["allowed_origins"], json!([format!("chrome-extension://{ID}/")]));
+
+        assert_eq!(*loc.install(&helper, &[ID])[0].1.as_ref().unwrap(), Change::Unchanged);
+        let st = loc.status().into_iter().find(|s| s.browser.id == "chrome").unwrap();
+        assert_eq!(st.helper.as_deref(), Some(helper.as_path()));
+
+        let removed = loc.remove();
+        assert_eq!(removed.len(), 1);
+        assert!(removed[0].1.is_ok());
+        assert_eq!(crate::win::reg_get_default(&key).unwrap(), None);
+        assert!(loc.remove().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

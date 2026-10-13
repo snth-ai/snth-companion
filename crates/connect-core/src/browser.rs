@@ -531,7 +531,7 @@ impl Shared {
     /// What every extension is told about the app: linked to whom.
     fn status_for(&self, install: &str) -> Value {
         json!({
-            "linked": self.is_paired(),
+            "linked": self.has_synth(),
             "synth": self.synth_label(),
             "known": self.stored_browser(install).is_some_and(|b| b.linked),
         })
@@ -612,8 +612,10 @@ impl Shared {
 
     /// Read a site's cookies through a linked browser. `site` is a
     /// registrable domain; `wait` is how long the owner has to confirm in
-    /// the browser.
-    pub(crate) async fn cookies_via_extension(self: &Arc<Self>, site: &str, wait: Duration) -> ExtensionRead {
+    /// the browser; `asked` says the owner answered a question about this
+    /// site in the app a moment ago (the browser's window then reads as
+    /// the second step of the same question).
+    pub(crate) async fn cookies_via_extension(self: &Arc<Self>, site: &str, wait: Duration, asked: bool) -> ExtensionRead {
         if clean_site(site).as_deref() != Some(site) {
             return ExtensionRead::NoBrowser;
         }
@@ -622,7 +624,7 @@ impl Shared {
         };
         let st = session.snapshot();
         let name = browser_name(&st.browser);
-        let ask = json!({"type": "cookies.get", "site": site, "synth": self.synth_label()});
+        let ask = json!({"type": "cookies.get", "site": site, "synth": self.synth_label(), "asked": asked});
         let Some(reply) = self.browsers.ask(&session, ask, wait).await else {
             return ExtensionRead::NoAnswer(format!(
                 "no answer from the user ({name} is waiting for the owner to confirm {site}; try again once they did)"
@@ -649,7 +651,9 @@ impl Shared {
             session.state.lock().unwrap().sites.retain(|x| x != site);
         }
         self.emit(CoreEvent::Browsers);
-        ExtensionRead::Cookies(CookieRead { cookies, source: format!("{name} (extension)") })
+        // The synth keeps a source as a plain label (letters, digits,
+        // dots, dashes), so this one is written that way from the start.
+        ExtensionRead::Cookies(CookieRead { cookies, source: format!("{}-extension", st.browser) })
     }
 
     fn pair_refused(&self, session: &Session, id: u64, why: PairRefusal, journal: bool) {
@@ -693,7 +697,7 @@ impl Shared {
     async fn pair_inner(self: &Arc<Self>, session: &Arc<Session>, id: u64, ask: bool) -> Result<(), PairRefusal> {
         let st = session.snapshot();
         let name = browser_name(&st.browser);
-        if !self.is_paired() {
+        if !self.has_synth() {
             return Err(PairRefusal::NotLinked);
         }
         if self.paused() {

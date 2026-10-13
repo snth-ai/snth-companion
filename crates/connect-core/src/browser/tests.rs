@@ -506,7 +506,7 @@ fn cookie_reply(id: &Value) -> Value {
 async fn cookies_are_never_asked_of_a_browser_the_owner_did_not_link() {
     let (core, _owner) = linked_core().await;
     let (mut ext, _) = greet(&core, INSTALL).await;
-    let read = core.shared().cookies_via_extension("example.com", Duration::from_secs(2)).await;
+    let read = core.shared().cookies_via_extension("example.com", Duration::from_secs(2), true).await;
     assert!(matches!(read, ExtensionRead::NoBrowser));
     assert!(ext.silent().await, "an unlinked browser is not even asked");
 }
@@ -520,18 +520,19 @@ async fn a_linked_browser_hands_over_the_asked_site_and_only_that() {
 
     let reading = tokio::spawn({
         let shared = core.shared();
-        async move { shared.cookies_via_extension("example.com", Duration::from_secs(5)).await }
+        async move { shared.cookies_via_extension("example.com", Duration::from_secs(5), true).await }
     });
     let ask = ext.recv_type("cookies.get").await;
-    // The app names the site and the synth. Nothing else goes out.
-    assert_eq!((ask["site"].as_str(), ask["synth"].as_str()), (Some("example.com"), Some("mia")));
-    assert_eq!(ask.as_object().unwrap().len(), 4);
+    // The app names the site and the synth, and says whether the owner
+    // was just asked. Nothing else goes out.
+    assert_eq!((ask["site"].as_str(), ask["synth"].as_str(), ask["asked"].as_bool()), (Some("example.com"), Some("mia"), Some(true)));
+    assert_eq!(ask.as_object().unwrap().len(), 5);
     ext.send(cookie_reply(&ask["id"])).await;
 
     let ExtensionRead::Cookies(read) = reading.await.unwrap() else {
         panic!("expected cookies");
     };
-    assert_eq!(read.source, "Chrome (extension)");
+    assert_eq!(read.source, "chrome-extension");
     assert_eq!(read.cookies.len(), 1, "the cookie of another site was dropped");
     assert_eq!((read.cookies[0].name.as_str(), read.cookies[0].value.as_str()), ("SID", SECRET));
 
@@ -543,7 +544,7 @@ async fn a_linked_browser_hands_over_the_asked_site_and_only_that() {
     // A site that is not a registrable domain is never sent to a browser.
     for bad in ["www.example.com", "com", "127.0.0.1", "exa mple.com"] {
         assert!(matches!(
-            core.shared().cookies_via_extension(bad, Duration::from_millis(200)).await,
+            core.shared().cookies_via_extension(bad, Duration::from_millis(200), true).await,
             ExtensionRead::NoBrowser
         ));
     }
@@ -563,7 +564,7 @@ async fn a_standing_answer_keeps_the_site_readable_until_the_owner_takes_it_back
 
     let reading = tokio::spawn({
         let shared = core.shared();
-        async move { shared.cookies_via_extension("example.com", Duration::from_secs(5)).await }
+        async move { shared.cookies_via_extension("example.com", Duration::from_secs(5), true).await }
     });
     let ask = ext.recv_type("cookies.get").await;
     ext.send(cookie_reply(&ask["id"])).await;
@@ -587,7 +588,7 @@ async fn an_answer_is_taken_only_from_the_browser_that_was_asked() {
 
     let reading = tokio::spawn({
         let shared = core.shared();
-        async move { shared.cookies_via_extension("example.com", Duration::from_secs(5)).await }
+        async move { shared.cookies_via_extension("example.com", Duration::from_secs(5), true).await }
     });
     let ask = linked.recv_type("cookies.get").await;
     // It answers a question it was not asked, guessing the id.
@@ -613,7 +614,7 @@ async fn refused_or_unanswered_in_the_browser_is_the_owners_decision() {
 
     let reading = tokio::spawn({
         let shared = core.shared();
-        async move { shared.cookies_via_extension("example.com", Duration::from_secs(5)).await }
+        async move { shared.cookies_via_extension("example.com", Duration::from_secs(5), true).await }
     });
     let ask = ext.recv_type("cookies.get").await;
     ext.send(json!({"type": "cookies.result", "id": ask["id"], "ok": false, "error": "denied"})).await;
@@ -622,7 +623,7 @@ async fn refused_or_unanswered_in_the_browser_is_the_owners_decision() {
     };
     assert_eq!(why, "the owner did not confirm example.com in Chrome");
 
-    let read = core.shared().cookies_via_extension("example.com", Duration::from_millis(100)).await;
+    let read = core.shared().cookies_via_extension("example.com", Duration::from_millis(100), true).await;
     let ExtensionRead::NoAnswer(why) = read else {
         panic!("expected no answer");
     };
@@ -666,7 +667,7 @@ async fn unlinking_the_computer_clears_every_browser() {
     assert!(!core.browsers()[0].linked);
     // And no cookie is asked of it any more.
     assert!(matches!(
-        core.shared().cookies_via_extension("example.com", Duration::from_millis(100)).await,
+        core.shared().cookies_via_extension("example.com", Duration::from_millis(100), true).await,
         ExtensionRead::NoBrowser
     ));
 }
@@ -761,7 +762,7 @@ async fn cookies_get_goes_through_the_linked_browser_and_logs_no_value() {
     assert_eq!(ask["site"], "example.com", "the browser is asked about the site, not the host");
     ext.send(cookie_reply(&ask["id"])).await;
     let got = call.await.unwrap().unwrap();
-    assert_eq!(got["source"], "Chrome (extension)");
+    assert_eq!(got["source"], "chrome-extension");
     assert_eq!(got["cookies"].as_array().unwrap().len(), 1);
     assert_eq!(got["cookies"][0]["value"], SECRET);
 
@@ -774,7 +775,7 @@ async fn cookies_get_goes_through_the_linked_browser_and_logs_no_value() {
 
     // Journal: site, count, browser. Never a value.
     let journal = journal_text(&core);
-    assert!(journal.contains("example.com (1 from Chrome (extension))"), "{journal}");
+    assert!(journal.contains("example.com (1 from chrome-extension)"), "{journal}");
     assert!(!journal.contains(SECRET));
 }
 

@@ -86,6 +86,11 @@ Everything on `Core` is `Send + Sync`; clone the handle freely (it is an
 | `apps_views()` | the apps this computer offers (no Mac app on Windows), each with the owner's switch and its actions |
 | `apps_permissions(app)` / `apps_request_permission(app, kind)` | macOS: where an app's Automation / Full Disk Access permission stands (read-only, never prompts), and the call that makes macOS ask. Empty elsewhere |
 | `run_link(ws_url, shutdown).await` | the reconnect loop; spawn it. `ws_url` None = the paired synth url |
+| `run_browser_link(endpoint, shutdown).await` | serve the SNTH Vault extension's helper on a per-user endpoint (see "The browser link"); returns an error at once when the endpoint cannot be bound |
+| `browsers()` | the browsers whose extension has talked to the app: connected or not, linked or not, which sites each may hand a sign-in for |
+| `browser_link(install).await` / `browser_unlink(install).await` / `browser_forget(install)` | link a connected browser to the synth's vault (the owner's click in the host is the confirmation), unlink one (its extension forgets the pairing and its sites, the synth removes the pairing at the vault), drop one that is gone |
+| `vault_list().await` / `vault_forget(site).await` | which sites the synth's vault holds a login for (names and dates only), and deleting one |
+| `set_cookies_extension_first(bool)` | which cookie source goes first: a linked browser's extension, or the browsers' files (default: the extension on Windows, the files elsewhere) |
 | `snapshot().await -> Snapshot` | the state snapshot below |
 
 ## Child processes
@@ -106,7 +111,9 @@ it is started on.
 ## Events
 
 - `subscribe() -> broadcast::Receiver<CoreEvent>`: `Link{state,detail}`,
-  `Settings{rev}`, `Paired{synth_id}`, `Unpaired`, `Paused{paused}`.
+  `Settings{rev}`, `Paired{synth_id}`, `Unpaired`, `Paused{paused}`,
+  `Browsers` (an extension connected, left, was linked or unlinked, or the
+  sites it may read changed).
 - `subscribe_journal() -> broadcast::Receiver<Entry>` and
   `recent_journal() -> Vec<Entry>`: the action journal (time, capability,
   action, target, outcome, bytes, count). No content, no cookie values, no
@@ -169,8 +176,10 @@ writes are atomic.
 - **files**: list / stat / read / write (create / replace / append),
   read-only vs read-write roots, canonicalize-after-symlink confinement on
   read AND create, no delete. See the TOCTOU note in `files.rs`.
-- **cookies**: per-domain grant (mode ask / ask-new / auto), read from a copy
-  of the browser DB, values never logged or journaled.
+- **cookies**: per-domain grant (mode ask / ask-new / auto); one site at a
+  time (a public suffix such as `com` is refused); two sources, a copy of the
+  browser DB and the extension of a browser the owner linked; values never
+  logged or journaled.
 - **computer**: open gate (catalog free, `ask` needs a grant, `away` needs
   idle), and a per-`tools/call` gate in the mcp pipe (tool denylist, app
   blocklist, foreground delivery per `never/idle/ask/always`). Our own
@@ -185,6 +194,67 @@ writes are atomic.
   apps".
 
 The synth has no message that changes settings or grants.
+
+## Logins: requests to the synth and the browser link
+
+THE RULE: a password is for the synth's cloud browser only (the hub types
+it; this app never holds one). A cookie is for requests made from this
+computer only. Nothing in the core sends a cookie anywhere but back to the
+synth's `cookies.get` on the device link, and nothing in it ever holds a
+password.
+
+**Requests to the synth** (`requests.rs`). Protocol v1 let only the synth
+ask. The control stream now also carries the app's questions:
+`{"type":"request","id","method","params"}` answered by
+`{"type":"response","id","result"|"error"}`. Sent only to a synth whose
+`hello_ack` had `"requests"` in `features`; otherwise the call fails at once
+with `unavailable: the synth does not answer this yet (it needs an update)`.
+Bounded at 30 s, at most 16 waiting, all failed when the link drops. Used
+for `vault.pair_code`, `vault.list`, `vault.forget`, `vault.revoke_device`
+and nothing else. The answer is the synth's word and is cut to shape before
+use (`parse_vault_list`, `clean_code`).
+
+**The browser link** (`browser.rs`). The extension reaches the app through
+the helper of `connect-host`; each browser profile is one `Session`.
+
+- A connection is served only when the helper's first line names one of our
+  extension origins, and nothing is heard from it before a well-formed
+  `hello` (browser, extension version, a random profile id, whether it holds
+  a vault pairing, which sites it may read).
+- Pairing: `pair.request` from the extension makes the core ask the owner
+  (`Approver`, capability `vault`, scope = the browser's name, never
+  remembered). On yes it asks the synth for a code and sends
+  `pair.code`; the extension redeems it at the hub and answers `pair.done`,
+  and only then is the browser `linked`. An extension that already holds a
+  pairing is linked only when the synth's vault lists its device
+  (`other_synth` otherwise). `Core::browser_link` is the same without the
+  question: the owner clicked in the app. One pairing at a time per browser;
+  a `pair.done` nobody asked for links nothing.
+- Cookies: `cookies.get{site, synth, asked}` goes only to a connected,
+  LINKED browser, only for a registrable domain, and the answer is taken
+  only from the session that was asked. `clean_cookies` drops every cookie
+  that is not of that site, is malformed or is past 400. Unless the owner's
+  answer for the site is a standing one (`ask_new` with a grant, or `auto`),
+  the core tells the browser to give the site back right after the read
+  (`site.revoke`); revoking a site in the host does the same; a browser that
+  says hello with sites the owner no longer allows is told to drop them.
+- The app tells an extension: who it is linked to, a pairing code after the
+  owner's click, the name of a site. Never a cookie, a token or a setting.
+- What survives a restart: `settings.json` `browsers` (profile id, browser,
+  linked, the vault's device id, last seen). Unlinking the computer clears
+  every `linked` flag and tells connected extensions to drop their sites.
+
+**`cookies.get`** (`rpc.rs`), after the owner's settings allowed the site:
+where the files of the common browsers cannot be read (Chrome and Edge on
+Windows) the linked browser's extension is asked first and the files second;
+elsewhere the files first and the extension when they gave nothing. When the
+extension goes first and that browser has not confirmed the site yet, the
+approval request carries the detail `browser_step` = the browser's name, so
+the host's window can say "step 1 of 2". The whole call stays inside 55 s:
+a browser that is still waiting for the owner is answered with
+`denied: no answer from the user (...)`, and the confirmation given later
+serves the next attempt. `source` is the browser's name for a file read and
+`<browser id>-extension` for a read through the extension.
 
 ## The owner's apps (`src/apps/`)
 
