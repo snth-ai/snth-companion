@@ -14,6 +14,7 @@ mod logins;
 #[cfg(target_os = "macos")]
 mod menu;
 mod prefs;
+mod safari;
 mod state;
 mod tray;
 mod ui;
@@ -142,6 +143,7 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
         data_dir: data_dir.clone(),
         browser_link: Mutex::new(None),
         vault: logins::VaultCache::default(),
+        safari: safari::Safari::detect(|exe| logins::stays_put(exe, false)),
     });
     app.manage(ctx.clone());
 
@@ -159,6 +161,9 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
     // browsers where that helper is (only while linked to a synth; this
     // also follows the app after an update or a move).
     logins::spawn_link(ctx.clone(), shutdown_rx.clone());
+    // Safari's own way in (macOS, when this copy of the app carries the
+    // Safari extension).
+    logins::spawn_safari_door(ctx.clone(), shutdown_rx.clone());
     logins::sync(&ctx);
     updates::spawn(ctx.clone(), shutdown_rx);
 
@@ -395,6 +400,7 @@ fn main() {
             commands::apps_check,
             commands::apps_request_permission,
             commands::logins_refresh,
+            commands::safari_check,
             commands::vault_forget,
             commands::browser_link,
             commands::browser_unlink,

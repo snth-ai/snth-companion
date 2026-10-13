@@ -13,6 +13,13 @@
 //! app when it was updated or moved (it runs at every start), and takes
 //! them away when the computer is unlinked. Per-user places only, and only
 //! for browsers that are installed.
+//!
+//! Safari (macOS) needs no registration: its extension ships inside the
+//! app and macOS shows it in Safari's settings. Its native handler reaches
+//! the app through a second endpoint, in the folder of the app group the
+//! two share (`spawn_link` serves it when this copy of the app carries the
+//! extension), and `safari.rs` tells the page where the owner stands with
+//! switching it on.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -24,6 +31,7 @@ use connect_host::install::{Locations, BROWSERS};
 use serde::Serialize;
 use tokio::sync::watch;
 
+use crate::safari::SafariInfo;
 use crate::state::Ctx;
 use crate::ui::{self, UiEvent};
 
@@ -50,7 +58,7 @@ fn bundled_helper() -> Option<PathBuf> {
 /// Will the app still be at this path after it quits? Not when it runs
 /// from an AppImage (mounted for the run) or from a copy macOS made
 /// because the app was opened outside Applications.
-fn stays_put(path: &Path, appimage: bool) -> bool {
+pub fn stays_put(path: &Path, appimage: bool) -> bool {
     !appimage && !path.to_string_lossy().contains("/AppTranslocation/")
 }
 
@@ -125,13 +133,39 @@ pub fn spawn_link(ctx: std::sync::Arc<Ctx>, shutdown: watch::Receiver<bool>) {
     });
 }
 
+/// Serve the Safari extension's native handler: the second door, in the
+/// folder of the app group the app and its extension share. Only a copy of
+/// the app that carries the extension and stays where it is opens it (a
+/// debug build is not signed into the group, and macOS would ask the owner
+/// whether it may open that folder).
+#[cfg(target_os = "macos")]
+pub fn spawn_safari_door(ctx: std::sync::Arc<Ctx>, shutdown: watch::Receiver<bool>) {
+    if !ctx.safari.usable() {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        let served = match Endpoint::safari() {
+            Ok(endpoint) => ctx.core.run_browser_door(&endpoint, connect_host::Door::Safari, shutdown).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = served {
+            connect_core::logln!("browser link (Safari): {e}");
+            *ctx.safari.door.lock().unwrap() = Some(e.to_string());
+            ui::emit(&ctx.app, UiEvent::State);
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn spawn_safari_door(_ctx: std::sync::Arc<Ctx>, _shutdown: watch::Receiver<bool>) {}
+
 // --- what the page shows ---
 
 /// One browser on the Logins page.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct BrowserRow {
-    /// "chrome", "edge", "brave", "chromium", or "browser" (one this app
-    /// does not know by name).
+    /// "chrome", "edge", "brave", "chromium", "safari", or "browser" (one
+    /// this app does not know by name).
     pub browser: String,
     pub name: String,
     /// The extension's id for its browser profile. None = no extension
@@ -145,12 +179,23 @@ pub struct BrowserRow {
     pub ext_version: String,
     /// The sites it may hand a sign-in for.
     pub sites: Vec<String>,
+    /// The owner let the extension read every site in the browser's own
+    /// settings: that browser asks nothing per site any more.
+    pub all_sites: bool,
     pub last_seen: i64,
+    /// Safari only: where the extension that ships in this app stands in
+    /// Safari, and whether the stand-alone one is installed too. For a
+    /// "missing" row it says what the owner has to do next.
+    pub safari: Option<SafariInfo>,
 }
 
-/// The rows: every extension that has talked to the app, and one "missing"
-/// row for each installed browser none has talked from.
-pub fn browser_rows(views: Vec<BrowserView>, installed: &[&str]) -> Vec<BrowserRow> {
+const SAFARI: &str = connect_host::safari::BROWSER_ID;
+
+/// The rows: every extension that has talked to the app, one "missing"
+/// row for each installed browser none has talked from, and Safari's (on
+/// a Mac whose copy of the app carries the Safari extension) whether or
+/// not its extension has talked yet.
+pub fn browser_rows(views: Vec<BrowserView>, installed: &[&str], safari: Option<SafariInfo>) -> Vec<BrowserRow> {
     let mut rows: Vec<BrowserRow> = views
         .into_iter()
         .map(|v| BrowserRow {
@@ -160,27 +205,37 @@ pub fn browser_rows(views: Vec<BrowserView>, installed: &[&str]) -> Vec<BrowserR
             connected: v.connected,
             ext_version: v.ext_version,
             sites: v.sites,
+            all_sites: v.all_sites,
             last_seen: v.last_seen,
+            safari: safari.filter(|_| v.browser == SAFARI),
             browser: v.browser,
         })
         .collect();
+    let missing = |id: &str, safari: Option<SafariInfo>| BrowserRow {
+        browser: id.to_string(),
+        name: browser_name(id).to_string(),
+        install: None,
+        state: "missing",
+        connected: false,
+        ext_version: String::new(),
+        sites: Vec::new(),
+        all_sites: false,
+        last_seen: 0,
+        safari,
+    };
     for id in installed {
         if !rows.iter().any(|r| r.browser == *id) {
-            rows.push(BrowserRow {
-                browser: id.to_string(),
-                name: browser_name(id).to_string(),
-                install: None,
-                state: "missing",
-                connected: false,
-                ext_version: String::new(),
-                sites: Vec::new(),
-                last_seen: 0,
-            });
+            rows.push(missing(id, None));
         }
     }
-    // The order of the known browsers, then the rest; linked first inside
-    // one browser.
-    let rank = |r: &BrowserRow| BROWSERS.iter().position(|b| b.id == r.browser).unwrap_or(BROWSERS.len());
+    if safari.is_some() && !rows.iter().any(|r| r.browser == SAFARI) {
+        rows.push(missing(SAFARI, safari));
+    }
+    // The order of the known browsers, then Safari, then the rest; linked
+    // first inside one browser.
+    let rank = |r: &BrowserRow| {
+        BROWSERS.iter().position(|b| b.id == r.browser).unwrap_or(if r.browser == SAFARI { BROWSERS.len() } else { BROWSERS.len() + 1 })
+    };
     rows.sort_by(|a, b| (rank(a), a.state != "linked", &a.install).cmp(&(rank(b), b.state != "linked", &b.install)));
     rows
 }
@@ -259,9 +314,16 @@ pub struct LoginsState {
 }
 
 pub fn state(ctx: &Ctx) -> LoginsState {
+    let views = ctx.core.browsers();
+    // An extension that is talking to the app is switched on, whatever
+    // Safari last said.
+    if views.iter().any(|v| v.browser == SAFARI && v.connected) {
+        ctx.safari.heard_from();
+    }
     LoginsState {
-        browsers: browser_rows(ctx.core.browsers(), &installed_browsers(&ctx.data_dir)),
-        link_ready: ctx.browser_link.lock().unwrap().is_none(),
+        browsers: browser_rows(views, &installed_browsers(&ctx.data_dir), ctx.safari.info()),
+        // Both doors: the one the Chromium helper uses and Safari's.
+        link_ready: ctx.browser_link.lock().unwrap().is_none() && ctx.safari.door.lock().unwrap().is_none(),
         vault: ctx.vault.get(),
     }
 }
@@ -278,8 +340,37 @@ mod tests {
             linked,
             ext_version: "0.2.0".into(),
             sites: vec![],
+            all_sites: false,
             last_seen: 5,
         }
+    }
+
+    #[test]
+    fn safari_has_a_row_before_its_extension_ever_talked_and_one_row_after() {
+        use crate::safari::Enabled;
+        let off = SafariInfo { enabled: Enabled::Off, standalone: true };
+        // Shipped in the app, never heard from: the row says where it stands.
+        let rows = browser_rows(vec![view("aa", "chrome", true, true)], &["chrome"], Some(off));
+        let got: Vec<(&str, &str, Option<SafariInfo>)> = rows.iter().map(|r| (r.browser.as_str(), r.state, r.safari)).collect();
+        assert_eq!(got, [("chrome", "linked", None), ("safari", "missing", Some(off))]);
+        assert_eq!(rows[1].name, "Safari");
+        assert_eq!(rows[1].install, None);
+
+        // Heard from: its own row carries the same facts, and there is no second one.
+        let on = SafariInfo { enabled: Enabled::On, standalone: false };
+        let rows = browser_rows(
+            vec![view("bb", "safari", false, true), view("cc", "browser", false, true), view("aa", "chrome", true, true)],
+            &["chrome"],
+            Some(on),
+        );
+        let got: Vec<(&str, &str, Option<SafariInfo>)> = rows.iter().map(|r| (r.browser.as_str(), r.state, r.safari)).collect();
+        // Chromium browsers, then Safari, then one the app has no name for.
+        assert_eq!(got, [("chrome", "linked", None), ("safari", "installed", Some(on)), ("browser", "installed", None)]);
+
+        // A copy of the app without the extension (a debug build, Windows,
+        // Linux) shows no Safari at all.
+        assert!(browser_rows(vec![], &[], None).is_empty());
+        assert!(browser_rows(vec![view("aa", "chrome", true, true)], &["chrome"], None).iter().all(|r| r.browser != "safari"));
     }
 
     #[test]
@@ -287,6 +378,7 @@ mod tests {
         let rows = browser_rows(
             vec![view("bb", "chrome", false, true), view("aa", "chrome", true, false), view("cc", "browser", false, true)],
             &["chrome", "edge"],
+            None,
         );
         let got: Vec<(&str, &str, Option<&str>)> = rows.iter().map(|r| (r.browser.as_str(), r.state, r.install.as_deref())).collect();
         assert_eq!(
@@ -304,7 +396,7 @@ mod tests {
         assert_eq!(rows[2].name, "Microsoft Edge");
         assert_eq!(rows[3].name, "Browser");
         // No browser installed and nothing heard: nothing to show.
-        assert!(browser_rows(vec![], &[]).is_empty());
+        assert!(browser_rows(vec![], &[], None).is_empty());
     }
 
     #[test]

@@ -39,6 +39,7 @@ const COMMANDS: &[&str] = &[
     "apps_request_permission",
     // logins: the vault list and the browsers
     "logins_refresh",
+    "safari_check",
     "vault_forget",
     "browser_link",
     "browser_unlink",

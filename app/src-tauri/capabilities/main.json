@@ -32,6 +32,7 @@
     "allow-apps-check",
     "allow-apps-request-permission",
     "allow-logins-refresh",
+    "allow-safari-check",
     "allow-vault-forget",
     "allow-browser-link",
     "allow-browser-unlink",

@@ -41,6 +41,7 @@ export const tauriBackend: Backend = {
   appsRequestPermission: (app) => invoke("apps_request_permission", { app }),
 
   loginsRefresh: () => invoke("logins_refresh"),
+  safariCheck: () => invoke("safari_check"),
   vaultForget: (site) => invoke("vault_forget", { site }),
   browserLink: (install) => invoke("browser_link", { install }),
   browserUnlink: (install) => invoke("browser_unlink", { install }),

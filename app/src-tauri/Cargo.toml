@@ -43,3 +43,10 @@ directories.workspace = true
 [target.'cfg(unix)'.dependencies]
 # access(2): can the app replace itself where it runs (updates.rs)?
 libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Two calls of SafariServices about the app's own Safari extension: is it
+# switched on, and open Safari's settings at it (safari.rs). Both crates are
+# in the build already (Tauri's window layer uses them).
+objc2 = "0.6"
+block2 = "0.6"

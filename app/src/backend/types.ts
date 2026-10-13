@@ -128,7 +128,18 @@ export interface Pending {
 }
 
 /** A browser we know by name, or "browser" for one we do not. */
-export type BrowserId = "chrome" | "edge" | "brave" | "chromium" | "browser";
+export type BrowserId = "chrome" | "edge" | "brave" | "chromium" | "safari" | "browser";
+
+/** Safari (macOS): where the extension that ships inside this app stands.
+ * on / off: switched on or off in Safari's settings. unknown: Safari did
+ * not say. translocated: the app runs from the disk image, and Safari
+ * cannot keep an extension from there. */
+export interface SafariInfo {
+  enabled: "on" | "off" | "unknown" | "translocated";
+  /** The stand-alone "SNTH Vault" app for Safari is installed too: Safari
+   * lists two extensions. */
+  standalone: boolean;
+}
 
 /** One browser on the Logins page. */
 export interface BrowserRow {
@@ -145,8 +156,13 @@ export interface BrowserRow {
   ext_version: string;
   /** The sites it may hand a sign-in for. */
   sites: string[];
+  /** The owner let the extension read every site in the browser's own
+   * settings: that browser asks nothing per site any more. */
+  all_sites: boolean;
   /** Unix seconds of its last hello. */
   last_seen: number;
+  /** Safari's row only. For a "missing" row it says what is left to do. */
+  safari: SafariInfo | null;
 }
 
 /** One login the synth's vault holds. Never the login itself. */
@@ -297,6 +313,8 @@ export type ExternalTarget =
   | "privacy_full_disk"
   | "helper"
   | "vault_extension"
+  /** Safari's settings, at the extension that ships in this app. */
+  | "safari_extension"
   | "releases";
 
 export type UiEvent =
@@ -351,6 +369,8 @@ export interface Backend {
 
   /** Ask the synth which sites its vault holds a login for. */
   loginsRefresh(): Promise<UiState>;
+  /** Ask Safari again whether the owner switched the extension on. */
+  safariCheck(): Promise<UiState>;
   /** Remove one saved login from the synth's vault. */
   vaultForget(site: string): Promise<UiState>;
   /** Link a browser whose extension is connected. The click is the

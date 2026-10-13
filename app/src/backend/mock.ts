@@ -9,6 +9,14 @@
 //   &ext=mixed|none|installed|linked|closed|nobrowser|busy
 //        (the SNTH Vault extension in the browsers: mixed = one linked,
 //         one connected but not linked, one never heard from)
+//   &safari=off|unknown|on|moved|installed|away|linked|closed|allsites|both|none
+//        (macOS: the Safari extension that ships inside the app. off = not
+//         switched on in Safari yet (the default); on = switched on, not heard
+//         from; moved = the app runs from the disk image; installed / away =
+//         heard from, not linked; linked / closed = linked; allsites = Safari
+//         lets it read every site; both = the stand-alone SNTH Vault app is
+//         installed too; none = this copy of the app has no extension.
+//         "Open Safari settings" plays the rest: on, then connected.)
 //   &link=ok|synth_offline|synth_outdated|other_synth|busy|failed
 //        (what "Link this browser" does)
 //   &state=linked|paused|connecting|offline|repair|working|empty
@@ -382,8 +390,41 @@ function stagedVault(): VaultView {
   }
 }
 
-/** `ext=`: the SNTH Vault extension in the browsers of this computer. */
+const SAFARI_INSTALL = "5afa5afa5afa5afa5afa5afa5afa5afa";
+
+/** `safari=`: the Safari extension that ships inside the app (macOS). */
+function stagedSafari(os: string): BrowserRow | null {
+  const stage = params.get("safari") ?? "off";
+  if (os !== "macos" || stage === "none") return null;
+  const heard = ["installed", "away", "linked", "closed", "allsites", "both"].includes(stage);
+  const linked = ["linked", "closed", "allsites"].includes(stage);
+  const connected = ["installed", "linked", "allsites", "both"].includes(stage);
+  return {
+    browser: "safari",
+    name: "Safari",
+    install: heard ? SAFARI_INSTALL : null,
+    state: linked ? "linked" : heard ? "installed" : "missing",
+    connected,
+    ext_version: heard ? "0.3.0" : "",
+    sites: stage === "linked" ? ["github.com"] : [],
+    all_sites: stage === "allsites",
+    last_seen: heard ? now() - 90 : 0,
+    safari: {
+      enabled: heard || stage === "on" ? "on" : stage === "moved" ? "translocated" : stage === "unknown" ? "unknown" : "off",
+      standalone: stage === "both",
+    },
+  };
+}
+
+/** `ext=`: the SNTH Vault extension in the browsers of this computer,
+ * and Safari's row after them. */
 function stagedBrowsers(os: string): Pick<LoginsState, "browsers" | "link_ready"> {
+  const staged = stagedChromium(os);
+  const safari = stagedSafari(os);
+  return safari ? { ...staged, browsers: [...staged.browsers, safari] } : staged;
+}
+
+function stagedChromium(os: string): Pick<LoginsState, "browsers" | "link_ready"> {
   const row = (browser: BrowserRow["browser"], name: string, state: BrowserRow["state"], connected: boolean, sites: string[] = []): BrowserRow => ({
     browser,
     name,
@@ -392,7 +433,9 @@ function stagedBrowsers(os: string): Pick<LoginsState, "browsers" | "link_ready"
     connected,
     ext_version: state === "missing" ? "" : "0.2.0",
     sites,
+    all_sites: false,
     last_seen: state === "missing" ? 0 : now() - 120,
+    safari: null,
   });
   const edge = os === "linux" ? [] : ["edge"];
   switch (params.get("ext")) {
@@ -435,6 +478,9 @@ class MockBackend implements Backend {
   private installTimers: number[] = [];
   /** The feed has this newer version to offer (mock scenarios). */
   private offered: string | null = null;
+  /** The owner was sent to Safari's settings: the next checks play them
+   * switching the extension on, then the extension saying hello. */
+  private safariSteps = 0;
   private updateTimers: number[] = [];
   private workTimer: number | undefined;
 
@@ -1008,6 +1054,24 @@ class MockBackend implements Backend {
     return this.reply(this.snapshot(), 450);
   }
 
+  /** Safari is asked again. After "Open Safari settings" the story moves
+   * one step per question: switched on, then the extension connects. */
+  safariCheck() {
+    const row = this.state.logins.browsers.find((b) => b.browser === "safari");
+    if (row && row.safari && this.safariSteps > 0 && row.state === "missing" && row.safari.enabled !== "translocated") {
+      this.safariSteps += 1;
+      if (this.safariSteps === 3) row.safari.enabled = "on";
+      if (this.safariSteps >= 5) {
+        row.state = "installed";
+        row.install = SAFARI_INSTALL;
+        row.connected = true;
+        row.ext_version = "0.3.0";
+        row.last_seen = now();
+      }
+    }
+    return this.reply(this.snapshot(), 120);
+  }
+
   vaultForget(site: string) {
     const vault = this.state.logins.vault;
     if (vault.state === "ready") vault.sites = vault.sites.filter((s) => s.site !== site);
@@ -1326,6 +1390,7 @@ class MockBackend implements Backend {
 
   openExternal(target: string) {
     console.info(`[mock] would open: ${target}`);
+    if (target === "safari_extension") this.safariSteps = Math.max(this.safariSteps, 1);
     return this.reply(undefined);
   }
 }

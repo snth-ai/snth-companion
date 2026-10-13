@@ -69,6 +69,9 @@ pub struct Ctx {
     pub browser_link: Mutex<Option<String>>,
     /// What the synth's vault holds, as last asked (Logins page).
     pub vault: crate::logins::VaultCache,
+    /// The Safari extension that ships inside this app (macOS): whether
+    /// this copy carries it, whether the owner switched it on.
+    pub safari: crate::safari::Safari,
 }
 
 impl Ctx {

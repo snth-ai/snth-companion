@@ -529,6 +529,7 @@ pub async fn apps_request_permission(ctx: Cx<'_>, app: String) -> Result<(), Str
 /// dates only; there is no request that returns a login).
 #[tauri::command]
 pub async fn logins_refresh(ctx: Cx<'_>) -> Result<UiState, String> {
+    ask_safari(&ctx).await;
     if ctx.core.is_paired() {
         match ctx.core.vault_list().await {
             Ok(list) => ctx.vault.ready(list),
@@ -537,6 +538,26 @@ pub async fn logins_refresh(ctx: Cx<'_>) -> Result<UiState, String> {
     } else {
         ctx.vault.set(logins::VaultView::Unknown);
     }
+    Ok(build_state(&ctx).await)
+}
+
+/// Ask Safari whether the owner switched the app's extension on. Safari
+/// answers within a moment or not at all; either way the page is not held
+/// for more than two seconds. Nothing is asked when this copy of the app
+/// carries no Safari extension.
+async fn ask_safari(ctx: &std::sync::Arc<crate::state::Ctx>) {
+    if !ctx.safari.usable() {
+        return;
+    }
+    let ctx = ctx.clone();
+    let _ = tauri::async_runtime::spawn_blocking(move || ctx.safari.refresh()).await;
+}
+
+/// The Logins page asks again where Safari stands: while the owner is on
+/// their way through Safari's settings, and when the window comes back.
+#[tauri::command]
+pub async fn safari_check(ctx: Cx<'_>) -> Result<UiState, String> {
+    ask_safari(&ctx).await;
     Ok(build_state(&ctx).await)
 }
 
@@ -704,6 +725,18 @@ pub async fn diagnostics(ctx: Cx<'_>) -> Result<String, String> {
             if st.logins.browsers.is_empty() { "none".to_string() } else {
                 st.logins.browsers.iter().map(|b| format!("{} {}{}", b.browser, b.state, if b.connected { " (connected)" } else { "" })).collect::<Vec<_>>().join(", ")
             }),
+        // The Safari extension inside this copy of the app, and its door.
+        format!("safari: {}", match ctx.safari.info() {
+            None => "no extension in this copy of the app".to_string(),
+            Some(info) => format!("extension {:?}{}; door {}",
+                info.enabled,
+                if info.standalone { ", the stand-alone SNTH Vault app is installed too" } else { "" },
+                match ctx.safari.door.lock().unwrap().as_deref() {
+                    None if ctx.safari.usable() => "served".to_string(),
+                    None => "not opened".to_string(),
+                    Some(why) => format!("not served ({})", without_home(why)),
+                }),
+        }),
         format!("computer control: {} (mode {:?}, screen {:?}, away after {} min, {} blocked apps)",
             on(s.computer.enabled), s.computer.mode, s.computer.foreground, s.computer.away_idle_minutes, s.computer.app_blocklist.len()),
         format!("files: {} ({} folders, ask before writing {})", on(s.files.enabled), s.files.roots.len(), on(s.files.ask_on_write)),
@@ -745,7 +778,18 @@ fn on(b: bool) -> &'static str {
 /// Open one of a fixed set of places outside the app. The webview names
 /// the place; it never supplies a URL.
 #[tauri::command]
-pub fn open_external(target: String) -> Result<(), String> {
+pub fn open_external(ctx: Cx<'_>, target: String) -> Result<(), String> {
+    // Safari's settings, at the extension that ships in this app. Safari
+    // is asked to show it; if that cannot be done, Safari is just opened.
+    if target == "safari_extension" {
+        if !ctx.safari.present() {
+            return Err("unknown_target".into());
+        }
+        if ctx.safari.show_settings() {
+            return Ok(());
+        }
+        return run_detached(vec!["/usr/bin/open".into(), "-a".into(), "Safari".into()]);
+    }
     let extension = logins::extension_url(HUB_URL);
     let url = match target.as_str() {
         "privacy_accessibility" => {

@@ -315,7 +315,7 @@ export const en = {
     keychainNote:
       "The first time, macOS asks for your password so SNTH Connect can read the sign-ins your browser saved. That is expected.",
     browsers:
-      "Sign-ins are read from Chrome, Arc, Brave, Edge, Vivaldi and Firefox on this computer. A linked browser is asked through its extension when that gives nothing. Safari is not supported.",
+      "Sign-ins are read from Chrome, Arc, Brave, Edge, Vivaldi and Firefox on this computer. A linked browser is asked through its extension when that gives nothing. Safari's are read only that way, through its extension.",
     browsersWindows:
       "On Windows, Chrome and Edge keep sign-ins locked to the browser itself, so they are read through the SNTH Vault extension of a linked browser. Firefox is read directly.",
   },
@@ -364,6 +364,23 @@ export const en = {
     linkedAway: (n: string) => `Linked to ${n}. The browser is closed.`,
     linkedNoSites: "Shares passwords. No sign-in confirmed in it yet.",
     linkedSites: (sites: string) => `Shares passwords. May hand over your sign-in for: ${sites}.`,
+    linkedAllSites: "Shares passwords. May hand over your sign-in for any site you allowed here.",
+    allSites: (browser: string, n: string) =>
+      `${browser} is set to let this extension read every website, so it no longer asks you site by site. What ${n} gets is decided by your answers here alone. To have ${browser} ask again, change the extension's website access in ${browser}'s settings.`,
+    safariOff: "Its extension comes with SNTH Connect and is switched off in Safari, as every new extension is.",
+    safariOffHint: 'In Safari, open Settings, then Extensions, and tick "SNTH Vault (Connect)". This page follows along.',
+    safariOn: "Switched on in Safari. The extension has not connected yet.",
+    safariOnHint: "Open Safari and click the SNTH Vault button in its toolbar once.",
+    safariMoved: "Safari cannot use the extension while SNTH Connect runs from the disk image.",
+    safariMovedHint: "Move SNTH Connect to the Applications folder, open it from there, and come back to this page.",
+    safariSettings: "Open Safari settings",
+    safariInstalledAway: "The extension connected earlier. Open Safari and click the SNTH Vault button in its toolbar to link it.",
+    safariLinkedAway: (n: string) =>
+      `Linked to ${n}. Not connected right now: Safari rests an extension it is not using. It connects when Safari is open; if it stays like this, click the SNTH Vault button in Safari's toolbar.`,
+    safariStandalone:
+      'The separate "SNTH Vault" app for Safari is installed too, so Safari lists two extensions. The one that works with this app is "SNTH Vault (Connect)"; the other can be switched off.',
+    safariAsks: (n: string) =>
+      `Safari asks you once per site too, after you allowed the site here: whether the extension may access that site. If you choose a one-day permission, Safari asks again the next time ${n} needs that sign-in.`,
     unlink: "Unlink",
     forget: "Forget",
     unlinkTitle: (browser: string) => `Unlink ${browser}?`,
@@ -397,6 +414,7 @@ export const en = {
       edge: "Microsoft Edge",
       brave: "Brave",
       chromium: "Chromium",
+      safari: "Safari",
       browser: "the browser",
     } as Record<string, string>,
   },

@@ -66,6 +66,25 @@ export function Logins() {
     void refresh();
   }, [refresh, linked]);
 
+  // Safari's extension ships inside the app, and only the owner can
+  // switch it on (in Safari's settings). While that is still to do, Safari
+  // is asked now and then, and when the window comes back, so the row
+  // follows them through it without a button to press.
+  const safariPending = browsers.some((b) => b.browser === "safari" && b.state === "missing" && b.safari?.enabled !== "translocated");
+  useEffect(() => {
+    if (!safariPending) return;
+    const check = () => {
+      if (document.visibilityState !== "visible") return;
+      backend.safariCheck().then(set, () => undefined);
+    };
+    const timer = window.setInterval(check, 3000);
+    window.addEventListener("focus", check);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", check);
+    };
+  }, [safariPending, set]);
+
   const sessions = state.grants.filter((g) => g.capability === "cookies");
   const rows = bySite(vault.state === "ready" ? vault.sites : [], sessions);
 
@@ -163,20 +182,32 @@ export function Logins() {
                 <div className="row-text">
                   <div className="row-title">{b.name}</div>
                   <div className="row-desc">{browserLine(b, t, name)}</div>
-                  {b.state === "missing" ? <div className="row-desc">{t.missingHint}</div> : null}
+                  {b.state === "missing" ? <div className="row-desc">{missingHint(b, t)}</div> : null}
                   {b.state === "linked" ? (
                     <div className="app-perm yes">
                       <IconCheck />
-                      <span>{b.sites.length > 0 ? t.linkedSites(b.sites.join(", ")) : t.linkedNoSites}</span>
+                      <span>{b.all_sites ? t.linkedAllSites : b.sites.length > 0 ? t.linkedSites(b.sites.join(", ")) : t.linkedNoSites}</span>
                     </div>
                   ) : null}
+                  {b.all_sites ? <div className="row-desc">{t.allSites(b.name, name)}</div> : null}
+                  {b.safari?.standalone ? <div className="row-desc">{t.safariStandalone}</div> : null}
                   {linkError && linkError.install === b.install ? (
                     <p className="error-text" role="alert">
                       {t.linkError(linkError.code, name)}
                     </p>
                   ) : null}
                 </div>
-                {b.state === "missing" ? (
+                {b.state === "missing" && b.safari ? (
+                  b.safari.enabled === "translocated" ? null : (
+                    <button
+                      type="button"
+                      className={b.safari.enabled === "on" ? "btn small" : "btn small strong"}
+                      onClick={() => void backend.openExternal("safari_extension")}
+                    >
+                      {t.safariSettings}
+                    </button>
+                  )
+                ) : b.state === "missing" ? (
                   <button type="button" className="btn small" onClick={() => void backend.openExternal("vault_extension")}>
                     {t.getExtension}
                   </button>
@@ -226,6 +257,7 @@ export function Logins() {
       <More label={s.common.details}>
         <div>{state.app.os === "windows" ? s.cookies.browsersWindows : s.cookies.browsers}</div>
         <div style={{ marginTop: 4 }}>{t.browserAsks}</div>
+        {browsers.some((b) => b.browser === "safari") ? <div style={{ marginTop: 4 }}>{t.safariAsks(name)}</div> : null}
         {state.app.os === "macos" ? <div style={{ marginTop: 4 }}>{s.cookies.keychainNote}</div> : null}
       </More>
 
@@ -297,7 +329,21 @@ function passwordFacts(p: VaultSite, t: T, lang: ReturnType<typeof useStore>["la
 }
 
 function browserLine(b: BrowserRow, t: T, name: string): string {
-  if (b.state === "missing") return t.missing;
-  if (b.state === "linked") return b.connected ? t.linked(name) : t.linkedAway(name);
-  return b.connected ? t.installed(b.ext_version || "?") : t.installedAway;
+  if (b.state === "missing") {
+    if (!b.safari) return t.missing;
+    // Safari's extension is already on the computer (inside the app):
+    // what is missing is the owner switching it on.
+    if (b.safari.enabled === "translocated") return t.safariMoved;
+    return b.safari.enabled === "on" ? t.safariOn : t.safariOff;
+  }
+  // Safari stops an extension it finds idle, so "not connected" does not
+  // mean that Safari is closed.
+  if (b.state === "linked") return b.connected ? t.linked(name) : b.safari ? t.safariLinkedAway(name) : t.linkedAway(name);
+  return b.connected ? t.installed(b.ext_version || "?") : b.safari ? t.safariInstalledAway : t.installedAway;
+}
+
+function missingHint(b: BrowserRow, t: T): string {
+  if (!b.safari) return t.missingHint;
+  if (b.safari.enabled === "translocated") return t.safariMovedHint;
+  return b.safari.enabled === "on" ? t.safariOnHint : t.safariOffHint;
 }
