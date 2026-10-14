@@ -264,7 +264,8 @@ limited, and fails the self-test):
   clipboard under any manifest), not limited in `except`.
 
 Refusals start with `denied: ` and tell the synth what to say to the owner;
-they never name an app. The journal gets a fixed reason, never an app or a
+they never name an app. Each carries a class and a code in `error.data` (see
+"How a refusal of the pipe reads"). The journal gets a fixed reason, never an app or a
 window.
 
 `Directory` is the app's own reading of the driver's lists: a second runtime
@@ -490,6 +491,70 @@ escalate, replay, telemetry, autostart, skill, grant or revoke in it, or an
 argument whose name has file, path, dir, out, output, destination, save or
 folder in it, that no list mentions fails the self-test. A new pin cannot
 bring one in unseen.
+
+## How a refusal of the pipe reads (`error.data`)
+
+Every `tools/call` the mcp pipe refuses instead of handing it to the driver
+is answered with a JSON-RPC error whose `message` is the sentence for the
+synth (it starts with `denied: `, or `unavailable: ` when the list of apps
+could not be read; unchanged, older synths read only that) and whose `data`
+says what kind of refusal it is:
+
+```json
+{"jsonrpc":"2.0","id":7,"error":{"code":-32001,"message":"denied: ...","data":{"class":"owner_policy","code":"app_excluded"}}}
+```
+
+- `class` is `owner_policy` or `bad_argument`.
+  - `owner_policy`: the owner's settings forbid this action or this target.
+    The synth stops and tells the owner (the sentence says what to say). It
+    never retries the call and never routes around it (another tool, another
+    window, the whole screen).
+  - `bad_argument`: the call's arguments are wrong in a way the synth can
+    correct without going around any choice of the owner's: leave an
+    argument out, pass `pid` and `window_id`, take a `bundle_id` from
+    `list_apps`, go on without the call. The sentence says how. It may call
+    again, corrected.
+- Anything ambiguous is `owner_policy`, and so is the default: `jsonrpc_error`
+  in `mcp.rs` cannot be called without a `cua_guard::RefusalKind`, and
+  `RefusalKind::default()` is `owner_policy` with the code `refused`.
+- `code` is stable, short, snake_case and unique per place a refusal is
+  raised. The journal lines are unchanged.
+
+| Code | Class | Raised in | When |
+|---|---|---|---|
+| `catalog_stream` | owner_policy | `mcp::filter_scoped` | a catalog stream calls a tool |
+| `never_allowed` | owner_policy | `mcp::filter_scoped` (`cua_guard::NEVER`) | a tool the synth may never call |
+| `tool_denylist` | owner_policy | `mcp::filter_scoped` | the tool is on the owner's denylist |
+| `foreground_off` | owner_policy | `mcp::filter_scoped` | foreground delivery, `foreground = never` |
+| `foreground_away_only` | owner_policy | `mcp::filter_scoped` | foreground delivery, `foreground = idle`, the owner is active |
+| `foreground_not_allowed` | owner_policy | `mcp::filter_scoped` | foreground delivery, the owner was asked and said no |
+| `app_not_chosen` | owner_policy | `cua_apps` | apps `only`: not one of the chosen apps |
+| `app_excluded` | owner_policy | `cua_apps` | apps `except`: an app the owner excluded |
+| `apps_list_unreadable` | owner_policy | `cua_apps` | the list of apps could not be read (`unavailable: `) |
+| `tool_unplaced` | owner_policy | `cua_apps` | apps limited: a tool the app cannot place |
+| `clipboard_not_chosen` | owner_policy | `cua_apps` | apps `only`: the clipboard |
+| `page_tools_while_limited` | owner_policy | `cua_apps` | apps `only`: the page tools |
+| `whole_screen_while_limited` | bad_argument | `cua_apps` | apps limited: the whole screen or a screen position; work window by window |
+| `window_not_named` | bad_argument | `cua_apps` | apps limited: no `pid` / `window_id` (or `launch_app` naming no app) |
+| `window_app_unknown` | bad_argument | `cua_apps` | apps limited: a window or process of no known app; take them from a fresh `list_windows` |
+| `browser_unnamed` | bad_argument | `cua_apps` | `browser_prepare` would start Chrome or Edge while one is excluded; name the window |
+| `app_unplaced` | bad_argument | `cua_apps` | `launch_app` names an app not in the helper's list; take `bundle_id` or the path from `list_apps` |
+| `write_arg_not_path` | bad_argument | `cua_guard::confine_paths` | a write argument that is not a string |
+| `write_arg_files_off` | bad_argument | `cua_guard::confine_paths` | a write argument while files are off |
+| `write_arg_ask_on_write` | bad_argument | `cua_guard::confine_paths` | a write argument while the owner is asked before every write |
+| `write_arg_outside_shared` | bad_argument | `cua_guard::confine_paths` | a write argument outside the folders shared for writing |
+| `cursor_look_is_owners` | bad_argument | `cua_look::gate` | `set_agent_cursor_*` |
+| `agent_cursor_off` | bad_argument | `cua_look::gate` | `move_cursor` while the owner switched the cursor off |
+
+The write arguments are `bad_argument` because leaving them out complies
+with the owner's settings: the picture comes back in the answer.
+
+Not refusals, and without `data`: the answer `unavailable: SNTH Connect is
+restarting its helper ...; call again` when a stream is closed between tasks
+so new settings apply (nothing was decided about the call). Not JSON-RPC
+either, and not classified: the stream-open refusals of the mux protocol
+(`{"error":"denied: ..."}`, `proto.rs`), the files, cookies and device-apps
+rpc errors.
 
 ## Logins: requests to the synth and the browser link
 
