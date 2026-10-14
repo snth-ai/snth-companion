@@ -65,6 +65,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::cua::DriverEnv;
+use crate::cua_guard::RefusalKind;
 use crate::settings::{CursorColor, CursorSpeed, LookSettings, ReducedMotion};
 
 /// One fixed cursor colour: a compiled theme the app carries.
@@ -278,8 +279,8 @@ pub enum Gate {
     Pass,
     /// Forward; the arguments were changed (the journal says how).
     Changed(&'static str),
-    /// Do not forward; answer the synth with this.
-    Refuse(&'static str),
+    /// Do not forward; answer the synth with this, of this kind.
+    Refuse(&'static str, RefusalKind),
 }
 
 /// Keep the owner's look the owner's: decide one `tools/call` (already
@@ -302,13 +303,17 @@ pub enum Gate {
 ///    is put on the call, or brought down to the limit.
 pub fn gate(tool: &str, msg: &mut Value, look: &LookSettings) -> Gate {
     if CURSOR_SETTERS.contains(&tool) {
+        // Corrected by going on without the call: nothing of the owner's
+        // is gone around.
         return Gate::Refuse(
             "the cursor's look on this computer is its owner's choice, in SNTH Connect under Computer control; go on without changing it, and tell the owner where the setting is if they asked for another look",
+            RefusalKind::bad_argument("cursor_look_is_owners"),
         );
     }
     if tool == "move_cursor" && !look.cursor {
         return Gate::Refuse(
             "the owner of this computer switched the agent cursor off, in SNTH Connect under Computer control; nothing is wrong, go on without it, and tell the owner where the switch is if they miss the cursor",
+            RefusalKind::bad_argument("agent_cursor_off"),
         );
     }
     let Some(params) = msg.get_mut("params").and_then(Value::as_object_mut) else {
@@ -473,13 +478,19 @@ mod tests {
         let look = LookSettings::default();
         for tool in ["set_agent_cursor_enabled", "set_agent_cursor_motion", "set_agent_cursor_theme"] {
             let mut msg = call(tool, json!({"session": "task-a", "enabled": false}));
-            assert!(matches!(gate(tool, &mut msg, &look), Gate::Refuse(_)), "{tool}");
+            match gate(tool, &mut msg, &look) {
+                Gate::Refuse(_, kind) => assert_eq!(kind, RefusalKind::bad_argument("cursor_look_is_owners"), "{tool}"),
+                other => panic!("{tool}: {other:?}"),
+            }
         }
         // Moving the cursor is the synth's own business while there is one.
         let mut moved = call("move_cursor", json!({"session": "task-a", "x": 10, "y": 10}));
         assert_eq!(gate("move_cursor", &mut moved, &look), Gate::Pass);
         let hidden = LookSettings { cursor: false, ..LookSettings::default() };
-        assert!(matches!(gate("move_cursor", &mut moved, &hidden), Gate::Refuse(_)));
+        assert!(matches!(
+            gate("move_cursor", &mut moved, &hidden),
+            Gate::Refuse(_, kind) if kind == RefusalKind::bad_argument("agent_cursor_off")
+        ));
         let mut click = call("click", json!({"session": "task-a", "x": 10, "y": 10}));
         assert_eq!(gate("click", &mut click, &hidden), Gate::Pass);
         // Reading is free.

@@ -713,9 +713,16 @@ async fn piped(shared: &Arc<Shared>, scope: Option<&connect_core::cua_apps::Scop
             .map(Piped::Driver)
             .map_err(|e| format!("the filter forwarded something that is not JSON: {e}")),
         connect_core::mcp::Gate::Answer(answer) => Ok(Piped::App(answer.get("result").cloned().unwrap_or(Value::Null))),
-        connect_core::mcp::Gate::Refuse(error) => Ok(Piped::Refused(
-            error.pointer("/error/message").and_then(Value::as_str).unwrap_or("").to_string(),
-        )),
+        connect_core::mcp::Gate::Refuse(error) => {
+            // Every refusal says what it asks of the synth: the owner's
+            // policy, or an argument it can correct; and which refusal.
+            let class = error.pointer("/error/data/class").and_then(Value::as_str).unwrap_or("");
+            let code = error.pointer("/error/data/code").and_then(Value::as_str).unwrap_or("");
+            if !matches!(class, "owner_policy" | "bad_argument") || code.is_empty() {
+                return Err(format!("a refusal without a class and a code in error.data: {error}"));
+            }
+            Ok(Piped::Refused(error.pointer("/error/message").and_then(Value::as_str).unwrap_or("").to_string()))
+        }
         connect_core::mcp::Gate::Drop(why) => Err(format!("the filter dropped a well-formed call: {why}")),
     }
 }

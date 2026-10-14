@@ -48,6 +48,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 
 use crate::cua::DriverEnv;
+use crate::cua_guard::RefusalKind;
 use crate::settings::{AppRef, AppsPolicy, Settings};
 
 /// How long a bounded daemon may live: the driver's maximum for
@@ -429,14 +430,15 @@ pub enum Verdict {
     Answer(Value),
     /// Do not hand it over. `tell` is for the synth (it starts with
     /// `denied: ` or `unavailable: `), `journal` for the owner's activity
-    /// list (never an app's or a window's name).
-    Refuse { tell: String, journal: &'static str },
+    /// list (never an app's or a window's name), `kind` for the synth to
+    /// act on without reading `tell` (`error.data` of the answer).
+    Refuse { tell: String, journal: &'static str, kind: RefusalKind },
 }
 
 const WHERE: &str = "in SNTH Connect under Computer control";
 
-fn refuse(tell: String, journal: &'static str) -> Verdict {
-    Verdict::Refuse { tell, journal }
+fn refuse(tell: String, journal: &'static str, kind: RefusalKind) -> Verdict {
+    Verdict::Refuse { tell, journal, kind }
 }
 
 fn not_allowed(scope: &Scope) -> Verdict {
@@ -444,10 +446,12 @@ fn not_allowed(scope: &Scope) -> Verdict {
         AppsPolicy::Only => refuse(
             format!("denied: the owner of this computer lets you use only the apps they chose {WHERE}, and this one is not among them; list_apps shows the ones you may use; if the task needs another app, tell the owner they can add it there"),
             "denied: not one of the apps the owner chose",
+            RefusalKind::owner_policy("app_not_chosen"),
         ),
         _ => refuse(
             format!("denied: the owner of this computer does not let you use this app through SNTH Connect; leave it alone, and if the task needs it tell the owner they can change that {WHERE}"),
             "denied: an app the owner excluded",
+            RefusalKind::owner_policy("app_excluded"),
         ),
     }
 }
@@ -456,6 +460,7 @@ fn whole_screen() -> Verdict {
     refuse(
         format!("denied: while the owner limits which apps you may use, you work window by window: there is no picture of the whole screen and no action by screen position, because they would reach every app; use list_windows, then get_window_state and the window actions with pid and window_id; if the task cannot be done that way, tell the owner they can change the app setting {WHERE}"),
         "denied: the whole screen, while apps are limited",
+        RefusalKind::bad_argument("whole_screen_while_limited"),
     )
 }
 
@@ -463,6 +468,7 @@ fn no_window() -> Verdict {
     refuse(
         format!("denied: this call does not say which window it is for; while the owner limits which apps you may use, pass pid and window_id (from list_windows) on every call, also next to an element_token; the owner's setting is {WHERE}"),
         "denied: no window named, while apps are limited",
+        RefusalKind::bad_argument("window_not_named"),
     )
 }
 
@@ -470,6 +476,7 @@ fn unknown_owner() -> Verdict {
     refuse(
         format!("denied: SNTH Connect could not tell which app this window or process belongs to, so it is not allowed while the owner limits which apps you may use; take pid and window_id from a fresh list_windows, and tell the owner if the window you need is not there (the setting is {WHERE})"),
         "denied: a window of no known app, while apps are limited",
+        RefusalKind::bad_argument("window_app_unknown"),
     )
 }
 
@@ -477,6 +484,7 @@ fn unavailable(why: &str) -> Verdict {
     refuse(
         format!("unavailable: SNTH Connect could not read the list of apps on this computer ({why}), and without it no app may be used while the owner limits them; try again in a moment, and tell the owner if it keeps failing"),
         "failed: the list of apps could not be read",
+        RefusalKind::owner_policy("apps_list_unreadable"),
     )
 }
 
@@ -535,6 +543,7 @@ pub async fn decide(scope: &Scope, tool: &str, msg: &Value, dir: &Directory) -> 
         return refuse(
             format!("denied: SNTH Connect does not know the tool {tool:?} well enough to tell which app it touches, so it is not available while the owner limits which apps you may use; tell the owner, the setting is {WHERE}"),
             "denied: a tool the app cannot place, while apps are limited",
+            RefusalKind::owner_policy("tool_unplaced"),
         );
     };
     let args = arguments(msg);
@@ -547,6 +556,7 @@ pub async fn decide(scope: &Scope, tool: &str, msg: &Value, dir: &Directory) -> 
             AppsPolicy::Only => refuse(
                 format!("denied: the clipboard is not one of the apps the owner chose for computer control; if the owner switched the clipboard on for you, device_apps has it; otherwise tell the owner (the app setting is {WHERE})"),
                 "denied: the clipboard, while only chosen apps are allowed",
+                RefusalKind::owner_policy("clipboard_not_chosen"),
             ),
             _ => Verdict::Pass,
         },
@@ -601,6 +611,7 @@ pub async fn decide(scope: &Scope, tool: &str, msg: &Value, dir: &Directory) -> 
                 return refuse(
                     format!("denied: the helper's page tools (get_browser_state, browser_*) do not work while the owner limits you to chosen apps; if the browser is one of them, work in its window with get_window_state and the window actions; otherwise tell the owner they can change the app setting {WHERE}"),
                     "denied: the page tools, while only chosen apps are allowed",
+                    RefusalKind::owner_policy("page_tools_while_limited"),
                 );
             }
             if !target.pids.is_empty() || !target.windows.is_empty() {
@@ -627,6 +638,7 @@ pub async fn decide(scope: &Scope, tool: &str, msg: &Value, dir: &Directory) -> 
                     return refuse(
                         format!("denied: the helper would start Chrome or Edge for this, and SNTH Connect cannot tell which, while the owner excludes one of them; name the browser window you mean with pid and window_id, or tell the owner (the setting is {WHERE})"),
                         "denied: starting a browser, while one is excluded",
+                        RefusalKind::bad_argument("browser_unnamed"),
                     );
                 }
                 return Verdict::Pass;
@@ -692,6 +704,7 @@ async fn launch(scope: &Scope, args: Option<&serde_json::Map<String, Value>>, di
         return refuse(
             format!("denied: SNTH Connect does not find this app in the helper's list of apps, so it cannot tell whether you may start it while the owner limits which apps you may use; take bundle_id or the path from list_apps, and tell the owner if the app you need is not there (the setting is {WHERE})"),
             "denied: starting an app the app cannot place",
+            RefusalKind::bad_argument("app_unplaced"),
         );
     }
     // A name can belong to more than one app: all of them must be allowed.
@@ -1456,6 +1469,56 @@ mod tests {
         assert!(told(&verdict(&only, "move_cursor", json!({"x": 1, "y": 1})).await).contains("does not say which window"));
         assert_eq!(verdict(&only, "move_cursor", json!({"x": 1, "y": 1, "target": {"kind": "window", "pid": 200, "window_id": 21}})).await, Verdict::Pass);
         assert_eq!(verdict(&only, "start_session", json!({"session": "Mia: flights"})).await, Verdict::Pass);
+    }
+
+    fn kind(v: &Verdict) -> RefusalKind {
+        match v {
+            Verdict::Refuse { kind, .. } => *kind,
+            other => panic!("not refused: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn every_refusal_says_its_class_and_code() {
+        use crate::cua_guard::Class;
+        let except = scope(AppsPolicy::Except, &["com.1password.1password"]);
+        let only = scope(AppsPolicy::Only, &["com.apple.Safari"]);
+        let no_chrome = scope(AppsPolicy::Except, &["com.google.Chrome"]);
+        let owner = RefusalKind::owner_policy;
+        let bad = RefusalKind::bad_argument;
+        let cases = [
+            (&only, "get_window_state", json!({"pid": 300, "window_id": 31}), owner("app_not_chosen")),
+            (&only, "launch_app", json!({"name": "Mail"}), owner("app_not_chosen")),
+            (&except, "get_window_state", json!({"pid": 300, "window_id": 31}), owner("app_excluded")),
+            (&except, "kill_app", json!({"pid": 300}), owner("app_excluded")),
+            (&except, "get_desktop_state", json!({}), bad("whole_screen_while_limited")),
+            (&only, "click", json!({"x": 1, "y": 1, "scope": "desktop"}), bad("whole_screen_while_limited")),
+            (&except, "type_text", json!({"text": "secret"}), bad("window_not_named")),
+            (&only, "move_cursor", json!({"x": 1, "y": 1}), bad("window_not_named")),
+            (&except, "launch_app", json!({"urls": ["https://example.com"]}), bad("window_not_named")),
+            (&except, "get_window_state", json!({"pid": 900, "window_id": 91}), bad("window_app_unknown")),
+            (&only, "get_window_state", json!({"pid": 4242}), bad("window_app_unknown")),
+            (&except, "a_tool_of_tomorrow", json!({"pid": 200}), owner("tool_unplaced")),
+            (&only, "clipboard_read", json!({}), owner("clipboard_not_chosen")),
+            (&only, "browser_click", json!({"target_id": "t1", "tab_id": "tab1"}), owner("page_tools_while_limited")),
+            (&no_chrome, "browser_prepare", json!({"allow_launch": true}), bad("browser_unnamed")),
+            (&except, "launch_app", json!({"name": "Nonesuch"}), bad("app_unplaced")),
+        ];
+        for (scope, tool, args, want) in cases {
+            let v = verdict(scope, tool, args.clone()).await;
+            assert_eq!(kind(&v), want, "{tool} {args}: {}", told(&v));
+        }
+        // The list of apps could not be read: the owner's to look into.
+        let v = unavailable("timed out");
+        assert!(told(&v).starts_with("unavailable: "));
+        assert_eq!(kind(&v), owner("apps_list_unreadable"));
+        // What is the owner's choice is never told as something to correct.
+        for v in [not_allowed(&only), not_allowed(&except)] {
+            assert_eq!(kind(&v).class, Class::OwnerPolicy);
+        }
+        for v in [whole_screen(), no_window(), unknown_owner()] {
+            assert_eq!(kind(&v).class, Class::BadArgument);
+        }
     }
 
     #[tokio::test]

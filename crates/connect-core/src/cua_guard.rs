@@ -16,9 +16,82 @@
 //! argument that looks like a place to write, that is not classified here
 //! fails the self-test. So a new pin cannot bring one in unseen.
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::settings::FilesSettings;
+
+/// What a refusal of the pipe asks of the synth, for a synth that acts on
+/// it without reading the sentence. Sent as `error.data.class` of the
+/// JSON-RPC error (`mcp::jsonrpc_error`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Class {
+    /// The owner's settings forbid this action or this target. The synth
+    /// stops and tells the owner; it never retries or routes around it.
+    /// Also the class of anything ambiguous, and the default.
+    #[default]
+    OwnerPolicy,
+    /// The call's arguments are wrong in a way the synth can correct
+    /// without going around any choice of the owner's (leave an argument
+    /// out, pass pid and window_id, take a bundle_id from list_apps).
+    BadArgument,
+}
+
+impl Class {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Class::OwnerPolicy => "owner_policy",
+            Class::BadArgument => "bad_argument",
+        }
+    }
+}
+
+/// The machine-readable side of one refusal: its class and a stable short
+/// snake_case code, unique per place a refusal is raised. The default is
+/// `owner_policy`, so a refusal nobody classified is never read as
+/// something the synth may correct and try again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefusalKind {
+    pub class: Class,
+    pub code: &'static str,
+}
+
+impl RefusalKind {
+    /// The code of a refusal that was not given one.
+    pub const UNCLASSIFIED: &'static str = "refused";
+
+    pub const fn owner_policy(code: &'static str) -> RefusalKind {
+        RefusalKind { class: Class::OwnerPolicy, code }
+    }
+
+    pub const fn bad_argument(code: &'static str) -> RefusalKind {
+        RefusalKind { class: Class::BadArgument, code }
+    }
+
+    /// `error.data` of the JSON-RPC error: `{"class": ..., "code": ...}`.
+    pub fn data(self) -> Value {
+        json!({"class": self.class.as_str(), "code": self.code})
+    }
+}
+
+impl Default for RefusalKind {
+    fn default() -> RefusalKind {
+        RefusalKind::owner_policy(RefusalKind::UNCLASSIFIED)
+    }
+}
+
+/// One refusal: the sentence for the synth (it starts with `denied: `) and
+/// its kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    pub tell: String,
+    pub kind: RefusalKind,
+}
+
+impl Refusal {
+    pub fn new(tell: String, kind: RefusalKind) -> Refusal {
+        Refusal { tell, kind }
+    }
+}
 
 /// One tool the synth may never call.
 pub struct Never {
@@ -168,7 +241,7 @@ pub fn unclassified(tools: &[Value]) -> Vec<String> {
 /// cannot ask.
 ///
 /// Ok(true) = an argument was checked and put in its resolved form.
-pub async fn confine_paths(msg: &mut Value, files: &FilesSettings) -> Result<bool, String> {
+pub async fn confine_paths(msg: &mut Value, files: &FilesSettings) -> Result<bool, Refusal> {
     let Some(args) = msg
         .get_mut("params")
         .and_then(|p| p.get_mut("arguments"))
@@ -184,23 +257,37 @@ pub async fn confine_paths(msg: &mut Value, files: &FilesSettings) -> Result<boo
         if value.is_null() {
             continue;
         }
+        // Every refusal here is corrected by leaving the argument out: the
+        // picture then comes back in the answer.
         let hint = "leave the argument out to get the picture in the answer, or tell the owner which folder to share for writing in SNTH Connect under Files";
         let Some(path) = value.as_str() else {
-            return Err(format!("denied: {name} must be a path; {hint}"));
+            return Err(Refusal::new(
+                format!("denied: {name} must be a path; {hint}"),
+                RefusalKind::bad_argument("write_arg_not_path"),
+            ));
         };
         if !files.enabled {
-            return Err(format!(
-                "denied: {name}: files are turned off on this computer, so nothing may be written to its disk; {hint}"
+            return Err(Refusal::new(
+                format!(
+                    "denied: {name}: files are turned off on this computer, so nothing may be written to its disk; {hint}"
+                ),
+                RefusalKind::bad_argument("write_arg_files_off"),
             ));
         }
         if files.ask_on_write {
-            return Err(format!(
-                "denied: {name}: the owner is asked before every file written on this computer, and the helper cannot ask; write the file with the files tool instead, or {hint}"
+            return Err(Refusal::new(
+                format!(
+                    "denied: {name}: the owner is asked before every file written on this computer, and the helper cannot ask; write the file with the files tool instead, or {hint}"
+                ),
+                RefusalKind::bad_argument("write_arg_ask_on_write"),
             ));
         }
-        let resolved = crate::files::resolve_write(path, &files.roots)
-            .await
-            .map_err(|why| format!("{why}; {name} may only point into a folder shared for writing; {hint}"))?;
+        let resolved = crate::files::resolve_write(path, &files.roots).await.map_err(|why| {
+            Refusal::new(
+                format!("{why}; {name} may only point into a folder shared for writing; {hint}"),
+                RefusalKind::bad_argument("write_arg_outside_shared"),
+            )
+        })?;
         args.insert(name.into(), Value::from(resolved.to_string_lossy().to_string()));
         changed = true;
     }
@@ -241,6 +328,18 @@ mod tests {
         for may in ["stop_recording", "get_recording_state", "click", "get_window_state", "get_config"] {
             assert!(refusal(may).is_none(), "{may}");
         }
+    }
+
+    #[test]
+    fn a_refusal_nobody_classified_is_the_owners_policy() {
+        assert_eq!(Class::default(), Class::OwnerPolicy);
+        let kind = RefusalKind::default();
+        assert_eq!(kind.class, Class::OwnerPolicy);
+        assert_eq!(kind.data(), json!({"class": "owner_policy", "code": "refused"}));
+        assert_eq!(
+            RefusalKind::bad_argument("write_arg_not_path").data(),
+            json!({"class": "bad_argument", "code": "write_arg_not_path"})
+        );
     }
 
     #[test]
@@ -335,18 +434,21 @@ mod tests {
         );
         assert_eq!(ok["params"]["arguments"]["pid"], 1);
 
-        // Read-only folder, a folder that is not shared, a path that is not absolute.
-        for mut bad in [
-            shot(&ro),
-            shot(&outside),
-            call("get_desktop_state", json!({"screenshot_out_file": "~/Desktop/a.png"})),
-            call("click", json!({"pid": 1, "x": 1, "y": 1, "debug_image_out": outside.join("c.png").to_string_lossy()})),
-            call("browser_download", json!({"ref": "p1:2", "destination_root": outside.to_string_lossy()})),
-            call("get_desktop_state", json!({"screenshot_out_file": 7})),
+        // Read-only folder, a folder that is not shared, a path that is not
+        // absolute, not a path at all. Each is corrected by leaving the
+        // argument out, so each is a bad argument, not the owner's policy.
+        for (mut bad, code) in [
+            (shot(&ro), "write_arg_outside_shared"),
+            (shot(&outside), "write_arg_outside_shared"),
+            (call("get_desktop_state", json!({"screenshot_out_file": "~/Desktop/a.png"})), "write_arg_outside_shared"),
+            (call("click", json!({"pid": 1, "x": 1, "y": 1, "debug_image_out": outside.join("c.png").to_string_lossy()})), "write_arg_outside_shared"),
+            (call("browser_download", json!({"ref": "p1:2", "destination_root": outside.to_string_lossy()})), "write_arg_outside_shared"),
+            (call("get_desktop_state", json!({"screenshot_out_file": 7})), "write_arg_not_path"),
         ] {
             let why = confine_paths(&mut bad, &files).await.unwrap_err();
-            assert!(why.starts_with("denied: "), "{why}");
-            assert!(why.contains("owner"), "the synth must be told what to say to the owner: {why}");
+            assert!(why.tell.starts_with("denied: "), "{why:?}");
+            assert!(why.tell.contains("owner"), "the synth must be told what to say to the owner: {why:?}");
+            assert_eq!(why.kind, RefusalKind::bad_argument(code), "{why:?}");
         }
         // A download into the shared folder itself.
         let mut download = call("browser_download", json!({"ref": "p1:2", "destination_root": rw.to_string_lossy()}));
@@ -362,9 +464,13 @@ mod tests {
 
         // Files off, or the owner is asked before every write: nothing is written.
         let off = FilesSettings { enabled: false, ..files.clone() };
-        assert!(confine_paths(&mut shot(&rw), &off).await.unwrap_err().contains("turned off"));
+        let why = confine_paths(&mut shot(&rw), &off).await.unwrap_err();
+        assert!(why.tell.contains("turned off"), "{why:?}");
+        assert_eq!(why.kind, RefusalKind::bad_argument("write_arg_files_off"));
         let ask = FilesSettings { ask_on_write: true, ..files.clone() };
-        assert!(confine_paths(&mut shot(&rw), &ask).await.unwrap_err().contains("asked before every file"));
+        let why = confine_paths(&mut shot(&rw), &ask).await.unwrap_err();
+        assert!(why.tell.contains("asked before every file"), "{why:?}");
+        assert_eq!(why.kind, RefusalKind::bad_argument("write_arg_ask_on_write"));
 
         // A call without such an argument is not touched.
         let mut plain = call("get_window_state", json!({"pid": 1, "screenshot_out_file": null}));

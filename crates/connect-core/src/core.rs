@@ -1802,6 +1802,20 @@ mod tests {
         let line = |tool: &str, args: serde_json::Value| {
             serde_json::to_vec(&json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": tool, "arguments": args}})).unwrap()
         };
+        // The sentence, and the class and code of `error.data`.
+        let refused_as = |gate: Gate| match gate {
+            Gate::Refuse(v) => {
+                assert_eq!(v["id"], 9, "the answer must carry the call's id");
+                (
+                    v["error"]["message"].as_str().unwrap_or("").to_string(),
+                    v["error"]["data"]["class"].as_str().unwrap_or("").to_string(),
+                    v["error"]["data"]["code"].as_str().unwrap_or("").to_string(),
+                )
+            }
+            Gate::Forward(b) => panic!("forwarded: {}", String::from_utf8_lossy(&b)),
+            Gate::Answer(v) => panic!("answered by the app: {v}"),
+            Gate::Drop(why) => panic!("dropped: {why}"),
+        };
         let refused = |gate: Gate| match gate {
             Gate::Refuse(v) => {
                 assert_eq!(v["id"], 9, "the answer must carry the call's id");
@@ -1820,9 +1834,10 @@ mod tests {
             ("set_config", json!({"experimental_pip": true})),
             ("replay_trajectory", json!({"dir": "/tmp/rec"})),
         ] {
-            let said = refused(filter_line(&sh, false, &line(tool, args)).await);
+            let (said, class, code) = refused_as(filter_line(&sh, false, &line(tool, args)).await);
             assert!(said.starts_with("denied: "), "{tool}: {said}");
             assert!(said.contains("owner"), "{tool}: no words for the owner: {said}");
+            assert_eq!((class.as_str(), code.as_str()), ("owner_policy", "never_allowed"), "{tool}");
         }
         // Ending and reading a recording, and ordinary work, pass.
         for tool in ["stop_recording", "get_recording_state", "get_config", "click", "get_window_state"] {
@@ -1832,14 +1847,34 @@ mod tests {
             }
         }
         // A file the driver writes: no folder is shared, so nowhere.
-        let said = refused(
+        let (said, class, code) = refused_as(
             filter_line(&sh, false, &line("get_desktop_state", json!({"screenshot_out_file": "/tmp/shot.png"}))).await,
         );
         assert!(said.starts_with("denied: ") && said.contains("owner"), "{said}");
+        // Corrected by leaving the argument out.
+        assert_eq!(class, "bad_argument", "{said}");
+        assert!(code.starts_with("write_arg_"), "{code}");
         let said = refused(
             filter_line(&sh, false, &line("browser_download", json!({"ref": "p1:1", "destination_root": "/tmp"}))).await,
         );
         assert!(said.starts_with("denied: "), "{said}");
+
+        // The owner's switches: each refusal says its class and code.
+        core.mutate_settings(|s| {
+            s.computer.tool_denylist = vec!["press_key".into()];
+            s.computer.foreground = crate::settings::Foreground::Never;
+            s.computer.look.cursor = false;
+        });
+        for (tool, args, class, code) in [
+            ("press_key", json!({"pid": 1, "window_id": 1, "key": "return"}), "owner_policy", "tool_denylist"),
+            ("click", json!({"pid": 1, "window_id": 1, "x": 1, "y": 1, "delivery_mode": "foreground"}), "owner_policy", "foreground_off"),
+            ("set_agent_cursor_theme", json!({"session": "task-a"}), "bad_argument", "cursor_look_is_owners"),
+            ("move_cursor", json!({"session": "task-a", "x": 1, "y": 1}), "bad_argument", "agent_cursor_off"),
+        ] {
+            let (said, got_class, got_code) = refused_as(filter_line(&sh, false, &line(tool, args)).await);
+            assert!(said.starts_with("denied: "), "{tool}: {said}");
+            assert_eq!((got_class.as_str(), got_code.as_str()), (class, code), "{tool}: {said}");
+        }
 
         // One line in the journal per refusal, with a reason the UI knows.
         let journal = core.recent_journal();
@@ -1891,6 +1926,7 @@ mod tests {
         match filter_line(&sh, false, &line("get_window_state", secret_window.clone())).await {
             Gate::Refuse(v) => {
                 assert_eq!(v["id"], 4);
+                assert_eq!(v["error"]["data"], json!({"class": "owner_policy", "code": "app_excluded"}));
                 let said = v["error"]["message"].as_str().unwrap();
                 assert!(said.starts_with("denied: ") && said.contains("owner"), "{said}");
                 assert!(!said.to_lowercase().contains("1password"), "the synth is not told the list: {said}");
@@ -1898,7 +1934,12 @@ mod tests {
             _ => panic!("the excluded app's window was not refused"),
         }
         assert!(matches!(filter_line(&sh, false, &line("click", json!({"x": 5, "y": 5, "scope": "desktop"}))).await, Gate::Refuse(_)));
-        assert!(matches!(filter_line(&sh, false, &line("get_desktop_state", json!({}))).await, Gate::Refuse(_)));
+        match filter_line(&sh, false, &line("get_desktop_state", json!({}))).await {
+            Gate::Refuse(v) => {
+                assert_eq!(v["error"]["data"], json!({"class": "bad_argument", "code": "whole_screen_while_limited"}));
+            }
+            _ => panic!("the whole screen was not refused while apps are limited"),
+        }
         assert!(matches!(filter_line(&sh, false, &line("get_window_state", json!({"pid": 200, "window_id": 21}))).await, Gate::Forward(_)));
         // The list is the app's own answer, with the call's id, and the
         // excluded app is not on it.
@@ -1913,7 +1954,10 @@ mod tests {
             _ => panic!("list_windows was not answered by the app"),
         }
         // A catalog stream calls nothing, lists included.
-        assert!(matches!(filter_line(&sh, true, &line("list_windows", json!({}))).await, Gate::Refuse(_)));
+        match filter_line(&sh, true, &line("list_windows", json!({}))).await {
+            Gate::Refuse(v) => assert_eq!(v["error"]["data"], json!({"class": "owner_policy", "code": "catalog_stream"})),
+            _ => panic!("a catalog stream called a tool"),
+        }
         // What is never allowed stays never allowed, whichever app.
         assert!(matches!(filter_line(&sh, false, &line("start_recording", json!({"output_dir": "/tmp/r"}))).await, Gate::Refuse(_)));
 

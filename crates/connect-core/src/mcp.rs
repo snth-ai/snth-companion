@@ -47,6 +47,7 @@ use tokio::sync::Mutex;
 
 use crate::core::Shared;
 use crate::cua;
+use crate::cua_guard::RefusalKind;
 use crate::grant::ApprovalRequest;
 use crate::journal::Entry;
 use crate::presence;
@@ -176,7 +177,7 @@ pub async fn handle(mut s: MuxStream, hdr: StreamHeader, shared: &Arc<Shared>) {
                         && session_ref.outdated()
                     {
                         logln!("mcp: the settings changed since this session began; closing it between tasks");
-                        let mut b = serde_json::to_vec(&jsonrpc_error(id, REOPEN.into())).unwrap_or_default();
+                        let mut b = serde_json::to_vec(&jsonrpc_unavailable(id, REOPEN)).unwrap_or_default();
                         b.push(b'\n');
                         let mut w = sw.lock().await;
                         let _ = w.write_all(&b).await;
@@ -334,7 +335,21 @@ pub enum Gate {
     Drop(&'static str),
 }
 
-fn jsonrpc_error(id: Value, message: String) -> Value {
+/// The answer to a refused `tools/call`. `message` is the sentence for the
+/// synth (and for older synths, which read only that); `kind` goes into
+/// `error.data` as `{"class": ..., "code": ...}`, so a synth can tell the
+/// owner's policy (stop, tell the owner) from an argument it can correct.
+/// Every refusal of the pipe goes through here, and there is no way to
+/// build one without a kind (`RefusalKind::default()` is `owner_policy`).
+fn jsonrpc_error(id: Value, message: String, kind: RefusalKind) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32001, "message": message, "data": kind.data()}})
+}
+
+/// The answer to a call that came when the stream had to be closed so the
+/// owner's current settings apply (`REOPEN`). Not a refusal: nothing was
+/// decided about the call, and the synth calls again on a new stream. It
+/// has no class (the synth reads its `unavailable: ` prefix).
+fn jsonrpc_unavailable(id: Value, message: &str) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32001, "message": message}})
 }
 
@@ -382,6 +397,7 @@ pub async fn filter_scoped(
         return Gate::Refuse(jsonrpc_error(
             id,
             "denied: a catalog stream may not call tools".into(),
+            RefusalKind::owner_policy("catalog_stream"),
         ));
     }
 
@@ -397,7 +413,7 @@ pub async fn filter_scoped(
             tool,
             "denied: never allowed for the synth",
         ));
-        return Gate::Refuse(jsonrpc_error(id, why));
+        return Gate::Refuse(jsonrpc_error(id, why, RefusalKind::owner_policy("never_allowed")));
     }
 
     // Tool denylist.
@@ -408,6 +424,7 @@ pub async fn filter_scoped(
         return Gate::Refuse(jsonrpc_error(
             id,
             format!("denied: tool {tool:?} is on this computer's denylist"),
+            RefusalKind::owner_policy("tool_denylist"),
         ));
     }
 
@@ -420,9 +437,9 @@ pub async fn filter_scoped(
     // the synth use it? (Nothing is decided here for "every app".)
     match crate::cua_apps::decide(scope, tool, &msg, shared.cua_directory()).await {
         crate::cua_apps::Verdict::Pass => {}
-        crate::cua_apps::Verdict::Refuse { tell, journal } => {
+        crate::cua_apps::Verdict::Refuse { tell, journal, kind } => {
             shared.journal().record(Entry::new("computer", "tools/call", tool, journal));
-            return Gate::Refuse(jsonrpc_error(id, tell));
+            return Gate::Refuse(jsonrpc_error(id, tell, kind));
         }
         crate::cua_apps::Verdict::Answer(result) => {
             shared.journal().record(Entry::new("computer", "tools/call", tool, "ok"));
@@ -454,10 +471,13 @@ pub async fn filter_scoped(
             }
         };
         if !allowed {
-            let reason = match s.computer.foreground {
-                Foreground::Never => "foreground delivery is turned off",
-                Foreground::Idle => "foreground delivery is allowed only while you are away",
-                _ => "the owner did not allow foreground delivery",
+            let (reason, code) = match s.computer.foreground {
+                Foreground::Never => ("foreground delivery is turned off", "foreground_off"),
+                Foreground::Idle => (
+                    "foreground delivery is allowed only while you are away",
+                    "foreground_away_only",
+                ),
+                _ => ("the owner did not allow foreground delivery", "foreground_not_allowed"),
             };
             shared.journal().record(Entry::new(
                 "computer",
@@ -465,7 +485,11 @@ pub async fn filter_scoped(
                 tool,
                 format!("denied: {reason}"),
             ));
-            return Gate::Refuse(jsonrpc_error(id, format!("denied: {reason}")));
+            return Gate::Refuse(jsonrpc_error(
+                id,
+                format!("denied: {reason}"),
+                RefusalKind::owner_policy(code),
+            ));
         }
     }
 
@@ -478,20 +502,20 @@ pub async fn filter_scoped(
             tool,
             "denied: outside the shared folders",
         ));
-        return Gate::Refuse(jsonrpc_error(id, why));
+        return Gate::Refuse(jsonrpc_error(id, why.tell, why.kind));
     }
 
     // The owner's look: the synth does not change the cursor, and gets a
     // screenshot within the owner's limit.
     match crate::cua_look::gate(tool, &mut msg, &s.computer.look) {
-        crate::cua_look::Gate::Refuse(why) => {
+        crate::cua_look::Gate::Refuse(why, kind) => {
             shared.journal().record(Entry::new(
                 "computer",
                 "tools/call",
                 tool,
                 "denied: the look is the owner's to set",
             ));
-            return Gate::Refuse(jsonrpc_error(id, format!("denied: {why}")));
+            return Gate::Refuse(jsonrpc_error(id, format!("denied: {why}"), kind));
         }
         // Forwarded with its arguments changed (a screenshot within the
         // owner's limit, a session without the synth's cursor theme).
@@ -528,6 +552,30 @@ mod tests {
         assert!(between_tasks(Some(Duration::from_secs(3600)), 1));
         // Another session holds the daemon: ending this one frees nothing.
         assert!(!between_tasks(Some(Duration::from_secs(3600)), 2));
+    }
+
+    #[test]
+    fn a_refusal_carries_its_class_and_code_next_to_the_unchanged_sentence() {
+        let said = jsonrpc_error(
+            Value::from(7),
+            "denied: an app the owner excluded".into(),
+            RefusalKind::owner_policy("app_excluded"),
+        );
+        assert_eq!(
+            said,
+            json!({"jsonrpc": "2.0", "id": 7, "error": {
+                "code": -32001,
+                "message": "denied: an app the owner excluded",
+                "data": {"class": "owner_policy", "code": "app_excluded"}
+            }})
+        );
+        let bad = jsonrpc_error(Value::Null, "denied: x".into(), RefusalKind::bad_argument("window_not_named"));
+        assert_eq!(bad["error"]["data"], json!({"class": "bad_argument", "code": "window_not_named"}));
+        // A refusal nobody classified is the owner's policy.
+        let plain = jsonrpc_error(Value::from(1), "denied: y".into(), RefusalKind::default());
+        assert_eq!(plain["error"]["data"]["class"], "owner_policy");
+        // The stream closing for new settings is not a refusal.
+        assert!(jsonrpc_unavailable(Value::from(2), REOPEN)["error"].get("data").is_none());
     }
 
     #[test]
