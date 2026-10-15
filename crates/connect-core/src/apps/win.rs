@@ -63,7 +63,7 @@ impl Backend for WinBackend {
                     blocking(move || shell_open(&target)).await?;
                     Ok(json!({"opened": true, "path": shown}))
                 }
-                Request::OpenApp { name } => {
+                Request::OpenApp { name, .. } => {
                     let id = start_app_id(&name).await?;
                     blocking(move || shell_open(&format!("shell:AppsFolder\\{id}"))).await?;
                     Ok(json!({"opened": true, "name": name}))

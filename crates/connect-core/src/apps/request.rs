@@ -85,7 +85,9 @@ pub enum Request {
     /// `path` is as the synth wrote it; the gate replaces it with the
     /// resolved path inside a shared folder before a backend sees it.
     OpenFile { path: PathBuf },
-    OpenApp { name: String },
+    /// `bundle_id` (macOS, optional): open exactly that app (`open -b`);
+    /// the name stays the one the owner sees and the policy keys on.
+    OpenApp { name: String, bundle_id: Option<String> },
 }
 
 /// Characters that never belong in text a person will read or send:
@@ -304,6 +306,28 @@ fn app_name(raw: &str) -> Result<String, AppError> {
     Ok(v)
 }
 
+/// An app's bundle id, when given: reverse-DNS letters, digits, dots and
+/// hyphens only (`com.apple.finder`), at least one dot, never a path or a
+/// flag. Empty = none.
+fn bundle_id(raw: &str) -> Result<Option<String>, AppError> {
+    let v = raw.trim();
+    if v.is_empty() {
+        return Ok(None);
+    }
+    let bad = v.len() > 155
+        || !v.contains('.')
+        || v.starts_with(['.', '-'])
+        || v.ends_with('.')
+        || v.contains("..")
+        || !v.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+    if bad {
+        return Err(AppError::BadRequest(
+            "bundle_id must be an app's bundle id, for example com.apple.finder".into(),
+        ));
+    }
+    Ok(Some(v.to_string()))
+}
+
 fn letters_or_digits(s: &str) -> usize {
     s.chars().filter(|c| c.is_alphanumeric()).count()
 }
@@ -458,7 +482,10 @@ impl Request {
                 }
                 Request::OpenFile { path: PathBuf::from(raw) }
             }
-            ("open", "app") => Request::OpenApp { name: app_name(str_param(p, "name"))? },
+            ("open", "app") => Request::OpenApp {
+                name: app_name(str_param(p, "name"))?,
+                bundle_id: bundle_id(str_param(p, "bundle_id"))?,
+            },
             _ => return Err(AppError::Denied(format!("unknown method apps.{app}.{action}"))),
         })
     }
@@ -606,6 +633,27 @@ mod tests {
             assert!(parse("open", "app", json!({"name": bad})).is_err(), "{bad:?} was accepted");
         }
         assert!(parse("open", "app", json!({"name": "Visual Studio Code"})).is_ok());
+    }
+
+    #[test]
+    fn bundle_ids_are_bundle_ids() {
+        match parse("open", "app", json!({"name": "Finder", "bundle_id": "com.apple.finder"})).unwrap() {
+            Request::OpenApp { name, bundle_id } => {
+                assert_eq!(name, "Finder");
+                assert_eq!(bundle_id.as_deref(), Some("com.apple.finder"));
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse("open", "app", json!({"name": "Finder", "bundle_id": ""})).unwrap() {
+            Request::OpenApp { bundle_id, .. } => assert!(bundle_id.is_none()),
+            other => panic!("{other:?}"),
+        }
+        for bad in ["-a", "finder", "/Applications/Safari.app", "com.apple..x", ".com.x", "com.apple.finder;rm", "com apple", "com.x."] {
+            assert!(
+                parse("open", "app", json!({"name": "Finder", "bundle_id": bad})).is_err(),
+                "{bad:?} was accepted"
+            );
+        }
     }
 
     #[test]

@@ -645,3 +645,17 @@ fn the_hello_shape_of_apps() {
     assert_eq!(apps[3]["on"], false);
     assert_eq!(apps[8], json!({"id": "open", "on": true, "actions": ["url", "file", "app"]}));
 }
+
+#[tokio::test]
+async fn open_app_takes_a_bundle_id() {
+    // The synth brings an app's window to the owner's desktop with it
+    // (Finder lives outside /Applications); the name is still what the
+    // owner sees and what the policy keys on.
+    let env = mac(AppsMode::Auto, ALWAYS);
+    let out = env.call("apps.open.app", json!({"name": "Finder", "bundle_id": "com.apple.finder"})).await.unwrap();
+    assert_eq!(out["bundle_id"], "com.apple.finder");
+    let done = env.stub.done();
+    assert!(done.iter().any(|d| format!("{d:?}").contains("Finder (com.apple.finder)")), "{done:?}");
+    let e = env.call("apps.open.app", json!({"name": "Finder", "bundle_id": "-a"})).await.unwrap_err();
+    assert!(e.contains("bundle_id must be"), "{e}");
+}

@@ -193,9 +193,12 @@ impl StubBackend {
                 self.note("open.file", &path.to_string_lossy());
                 Ok(json!({"opened": true, "path": path.to_string_lossy()}))
             }
-            Request::OpenApp { name } => {
-                self.note("open.app", &name);
-                Ok(json!({"opened": true, "name": name}))
+            Request::OpenApp { name, bundle_id } => {
+                match &bundle_id {
+                    Some(id) => self.note("open.app", &format!("{name} ({id})")),
+                    None => self.note("open.app", &name),
+                }
+                Ok(json!({"opened": true, "name": name, "bundle_id": bundle_id}))
             }
         }
     }

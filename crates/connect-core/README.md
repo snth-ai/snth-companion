@@ -693,7 +693,19 @@ time limit, `bound`, one journal line.
   of a real query (at least 2 letters, or 4 digits of a number).
 - `open.url` takes http and https only; `open.file` only a document
   (allowlist of types, no executable bit) inside a shared folder, checked
-  after symlinks are resolved; `open.app` only a plain name.
+  after symlinks are resolved; `open.app` only a plain name, plus an
+  optional `bundle_id` (reverse-DNS letters, digits, dots and hyphens,
+  `com.apple.finder`): on a Mac `open -b <bundle_id>` instead of
+  `open -a <name>`, so exactly that app opens (Finder lives outside
+  /Applications); the name stays what the approval window shows (with the
+  bundle id under it) and what the policy and the journal key on. Either
+  way `open` activates the app and asks it to reopen: a running app shows
+  its main window, and macOS switches to the app's Space only when the
+  owner's Mission Control setting "When switching to an application,
+  switch to a Space with open windows for the application" is on. The
+  synth uses it to bring a window to the owner's current desktop for a
+  desktop task (openpaw `deskexec.RevealApp`). Windows and Linux ignore
+  `bundle_id`.
 
 The limits (defaults and caps) are the constants at the top of
 `request.rs` and are listed in the protocol document (`connect.md`).
