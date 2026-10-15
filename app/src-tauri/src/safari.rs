@@ -145,51 +145,112 @@ mod ffi {
     //! The two calls of SafariServices an app makes about its own
     //! extension. They are Objective-C class methods that answer through
     //! a block, on a queue of their own.
+    //!
+    //! NO OBJECTIVE-C EXCEPTION MAY REACH RUST. Rust cannot catch one: an
+    //! exception that unwinds out of a message send runs into the
+    //! `catch_unwind` of the task the call runs in (tokio's, Tauri's), and
+    //! that aborts the whole app ("fatal runtime error: Rust cannot catch
+    //! foreign exceptions", SIGABRT on a tokio-rt-worker). That was the
+    //! 0.1.7 crash on opening Logins: the question to Safari runs on a
+    //! tokio blocking thread. So every send here goes through `guarded`,
+    //! asks `respondsToSelector:` first (a macOS whose Safari API moved
+    //! answers "no" instead of raising "unrecognized selector"), and runs
+    //! inside an autorelease pool (the tokio thread has none of its own).
 
     use std::ffi::CString;
+    use std::panic::AssertUnwindSafe;
     use std::sync::mpsc;
     use std::time::Duration;
 
     use block2::RcBlock;
-    use objc2::msg_send;
-    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2::exception;
+    use objc2::rc::autoreleasepool;
+    use objc2::runtime::{AnyClass, AnyObject, Sel};
+    use objc2::{msg_send, sel};
 
     use super::Enabled;
 
     #[link(name = "SafariServices", kind = "framework")]
     extern "C" {}
 
-    fn ns_string(text: &str) -> Option<*mut AnyObject> {
+    pub(super) fn ns_string(text: &str) -> Option<*mut AnyObject> {
         let class = AnyClass::get(c"NSString")?;
         let text = CString::new(text).ok()?;
-        // An autoreleased NSString; used at once, in the same call.
+        // An autoreleased NSString; used at once, inside the caller's pool.
         let string: *mut AnyObject = unsafe { msg_send![class, stringWithUTF8String: text.as_ptr()] };
         (!string.is_null()).then_some(string)
+    }
+
+    /// Run Objective-C sends with any exception they raise caught on this
+    /// side. None (and a log line) when one was raised.
+    fn guarded<R>(what: &str, call: impl FnOnce() -> R) -> Option<R> {
+        match exception::catch(AssertUnwindSafe(call)) {
+            Ok(value) => Some(value),
+            Err(e) => {
+                let why = e.as_deref().map_or_else(|| "nil".to_string(), |e| format!("{e:?}"));
+                connect_core::logln!("safari: {what} raised an Objective-C exception: {why}");
+                None
+            }
+        }
+    }
+
+    /// Does `receiver` (an object, or a class for its class methods)
+    /// answer `selector`? Asked inside `guarded`.
+    fn responds(receiver: &AnyObject, selector: Sel) -> bool {
+        unsafe { msg_send![receiver, respondsToSelector: selector] }
+    }
+
+    fn class_object(class: &AnyClass) -> &AnyObject {
+        // A class is an object; its class methods are what it responds to.
+        unsafe { &*(class as *const AnyClass as *const AnyObject) }
+    }
+
+    /// What one SFSafariExtensionState says.
+    fn read_state(state: &AnyObject) -> Enabled {
+        let on = guarded("-[SFSafariExtensionState isEnabled]", || {
+            responds(state, sel!(isEnabled)).then(|| {
+                let on: bool = unsafe { msg_send![state, isEnabled] };
+                on
+            })
+        });
+        match on.flatten() {
+            Some(true) => Enabled::On,
+            Some(false) => Enabled::Off,
+            None => Enabled::Unknown,
+        }
     }
 
     /// `+[<manager> getStateOfSafariExtensionWithIdentifier:completionHandler:]`
     /// on the class given, which is SFSafariExtensionManager outside tests.
     pub(super) fn enabled_from(manager: &AnyClass, identifier: &str, wait: Duration) -> Enabled {
-        let Some(identifier) = ns_string(identifier) else {
-            return Enabled::Unknown;
-        };
         let (tx, rx) = mpsc::sync_channel::<Enabled>(1);
-        // void (^)(SFSafariExtensionState *state, NSError *error)
+        // void (^)(SFSafariExtensionState *state, NSError *error). Safari
+        // calls it on a queue of its own, or at once on this thread.
         let answer = RcBlock::new(move |state: *mut AnyObject, error: *mut AnyObject| {
-            let got = if state.is_null() || !error.is_null() {
-                Enabled::Unknown
-            } else {
-                let on: bool = unsafe { msg_send![state, isEnabled] };
-                if on {
-                    Enabled::On
-                } else {
-                    Enabled::Off
-                }
+            let got = match unsafe { state.as_ref() } {
+                Some(state) if error.is_null() => autoreleasepool(|_| read_state(state)),
+                _ => Enabled::Unknown,
             };
             // A late answer finds nobody waiting; that is fine.
             let _ = tx.try_send(got);
         });
-        let _: () = unsafe { msg_send![manager, getStateOfSafariExtensionWithIdentifier: identifier, completionHandler: &*answer] };
+        let asked = autoreleasepool(|_| {
+            let Some(identifier) = ns_string(identifier) else {
+                return false;
+            };
+            let manager = class_object(manager);
+            guarded("+[SFSafariExtensionManager getStateOfSafariExtensionWithIdentifier:completionHandler:]", || {
+                if !responds(manager, sel!(getStateOfSafariExtensionWithIdentifier:completionHandler:)) {
+                    return false;
+                }
+                let _: () = unsafe { msg_send![manager, getStateOfSafariExtensionWithIdentifier: identifier, completionHandler: &*answer] };
+                true
+            })
+            .unwrap_or(false)
+        });
+        if !asked {
+            return Enabled::Unknown;
+        }
         rx.recv_timeout(wait).unwrap_or(Enabled::Unknown)
     }
 
@@ -202,13 +263,24 @@ mod ffi {
 
     /// `+[<application> showPreferencesForExtensionWithIdentifier:completionHandler:]`
     pub(super) fn show_settings_with(application: &AnyClass, identifier: &str) -> bool {
-        let Some(identifier) = ns_string(identifier) else {
-            return false;
-        };
         // void (^)(NSError *error): nothing to do with the answer.
         let done = RcBlock::new(|_error: *mut AnyObject| {});
-        let _: () = unsafe { msg_send![application, showPreferencesForExtensionWithIdentifier: identifier, completionHandler: &*done] };
-        true
+        autoreleasepool(|_| {
+            let Some(identifier) = ns_string(identifier) else {
+                return false;
+            };
+            let application = class_object(application);
+            guarded("+[SFSafariApplication showPreferencesForExtensionWithIdentifier:completionHandler:]", || {
+                if !responds(application, sel!(showPreferencesForExtensionWithIdentifier:completionHandler:)) {
+                    return false;
+                }
+                let _: () = unsafe {
+                    msg_send![application, showPreferencesForExtensionWithIdentifier: identifier, completionHandler: &*done]
+                };
+                true
+            })
+            .unwrap_or(false)
+        })
     }
 
     pub(super) fn show_settings(identifier: &str) -> bool {
@@ -308,10 +380,10 @@ mod tests {
 
         use block2::DynBlock;
         use objc2::rc::Retained;
-        use objc2::runtime::{AnyObject, NSObject};
+        use objc2::runtime::{AnyClass, AnyObject, NSObject};
         use objc2::{define_class, msg_send, ClassType};
 
-        use super::super::ffi::{enabled_from, show_settings_with};
+        use super::super::ffi::{enabled_from, ns_string, show_settings_with};
         use super::super::Enabled;
 
         define_class!(
@@ -340,6 +412,30 @@ mod tests {
             }
         );
 
+        define_class!(
+            #[unsafe(super(NSObject))]
+            #[name = "SNTHConnectTestExtensionStateThrows"]
+            struct ThrowingState;
+
+            impl ThrowingState {
+                #[unsafe(method(isEnabled))]
+                fn is_enabled(&self) -> bool {
+                    raise("NSGenericException")
+                }
+            }
+        );
+
+        /// Raise an Objective-C exception, the way a system framework does.
+        fn raise(name: &str) -> ! {
+            let class = AnyClass::get(c"NSException").unwrap();
+            let name = ns_string(name).unwrap();
+            let reason = ns_string("thrown by the test").unwrap();
+            let nothing = std::ptr::null_mut::<AnyObject>();
+            let exception: *mut AnyObject = unsafe { msg_send![class, exceptionWithName: name, reason: reason, userInfo: nothing] };
+            let _: () = unsafe { msg_send![exception, raise] };
+            unreachable!("raise returned")
+        }
+
         fn text(string: &AnyObject) -> String {
             let chars: *const std::ffi::c_char = unsafe { msg_send![string, UTF8String] };
             unsafe { CStr::from_ptr(chars) }.to_string_lossy().into_owned()
@@ -365,6 +461,20 @@ mod tests {
                         }
                         "ai.snth.test.off" => {
                             let state: Retained<OffState> = unsafe { msg_send![OffState::class(), new] };
+                            handler.call((Retained::as_ptr(&state) as *mut AnyObject, nothing));
+                        }
+                        // Safari throws instead of answering (an Objective-C
+                        // exception out of the call itself).
+                        "ai.snth.test.throws" => raise("NSInternalInconsistencyException"),
+                        // An answer that is not a state object at all.
+                        "ai.snth.test.not-a-state" => {
+                            let odd: Retained<NSObject> = unsafe { msg_send![NSObject::class(), new] };
+                            handler.call((Retained::as_ptr(&odd) as *mut AnyObject, nothing));
+                        }
+                        // A state whose isEnabled throws, answered on the
+                        // caller's own thread.
+                        "ai.snth.test.state-throws" => {
+                            let state: Retained<ThrowingState> = unsafe { msg_send![ThrowingState::class(), new] };
                             handler.call((Retained::as_ptr(&state) as *mut AnyObject, nothing));
                         }
                         // Safari does not know the extension: no state, an error.
@@ -415,6 +525,66 @@ mod tests {
 
             assert!(show_settings_with(safari, "ai.snth.connect.safari"));
             assert_eq!(*SHOWN.lock().unwrap(), ["ai.snth.connect.safari"]);
+        }
+
+        /// Set in the child process of the test below.
+        const CHILD: &str = "SNTH_CONNECT_SAFARI_THROW_CHILD";
+
+        /// The crash of 0.1.7 (opening Logins aborted the app): Safari's
+        /// call raised an Objective-C exception on the tokio thread the
+        /// question runs on. Rust cannot catch a foreign exception, so the
+        /// task's own `catch_unwind` aborted the whole process ("Rust
+        /// cannot catch foreign exceptions", SIGABRT on a tokio-rt-worker).
+        ///
+        /// The question is asked here exactly as the Logins page asks it
+        /// (`spawn_blocking` on a tokio runtime), in a child process, so a
+        /// regression shows up as this test failing with the child's
+        /// signal instead of taking the whole test run down.
+        #[test]
+        fn safari_throwing_does_not_take_the_app_down() {
+            let cases = [
+                // The call itself throws.
+                "ai.snth.test.throws",
+                // The answer is not a state, and a state whose isEnabled
+                // throws (both answered on the asking thread).
+                "ai.snth.test.not-a-state",
+                "ai.snth.test.state-throws",
+            ];
+            if std::env::var_os(CHILD).is_some() {
+                let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+                for case in cases {
+                    let got = rt
+                        .block_on(rt.spawn_blocking(move || {
+                            enabled_from(FakeSafari::class(), case, Duration::from_millis(200))
+                        }))
+                        .unwrap();
+                    assert_eq!(got, Enabled::Unknown, "{case}");
+                    println!("survived {case}");
+                }
+                // A class that has no such method at all (a macOS where
+                // Safari's API moved): nothing is sent, nothing is thrown.
+                let plain = rt
+                    .block_on(rt.spawn_blocking(|| {
+                        enabled_from(NSObject::class(), "ai.snth.test.on", Duration::from_millis(200))
+                    }))
+                    .unwrap();
+                assert_eq!(plain, Enabled::Unknown);
+                assert!(!show_settings_with(NSObject::class(), "ai.snth.test.on"));
+                println!("survived a missing method");
+                return;
+            }
+            let out = connect_core::proc::std_command(std::env::current_exe().unwrap())
+                .args(["--exact", "safari::tests::calls::safari_throwing_does_not_take_the_app_down", "--nocapture", "--test-threads=1"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success(), "the child died: {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}", out.status);
+            for case in cases {
+                assert!(stdout.contains(&format!("survived {case}")), "{case} was not reached:\n{stdout}");
+            }
+            assert!(stdout.contains("survived a missing method"), "{stdout}");
         }
     }
 }
