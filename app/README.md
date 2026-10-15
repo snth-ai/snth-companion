@@ -510,6 +510,16 @@ installs one thing. `app/safari/README.md` has the mechanics; in short:
   while that row is waiting, and when the window comes back), then
   "connected, not linked" with "Link this browser", then "linked". An app
   opened from the disk image says that Safari cannot use it from there.
+  Both calls into SafariServices (`safari.rs`, `ffi`) ask
+  `respondsToSelector:` first and run inside `objc2::exception::catch` and
+  an autorelease pool. An Objective-C exception must never unwind into
+  Rust: Rust cannot catch it, so the `catch_unwind` of the tokio task the
+  question runs on aborts the whole app ("fatal runtime error: Rust cannot
+  catch foreign exceptions"). That was the 0.1.7 crash on opening Logins;
+  `safari::tests::calls::safari_throwing_does_not_take_the_app_down`
+  replays it in a child process (a Safari that throws, an answer that is
+  not a state, a state whose `isEnabled` throws, a class without the
+  method). Any new Objective-C call in the app follows the same rule.
 - **Pairing** is the same as in Chrome: "Link this browser" in the popup or
   on the Logins page, the owner's yes in the app, a code from the synth,
   redeemed at the hub by the extension. No permission is asked for in
@@ -576,6 +586,57 @@ registered and the classic `OUTLOOK.EXE` exists, drive it from a hidden
 PowerShell child through COM, classify sending mail like sending a message
 (asked every time, whole text shown). A day of work plus a real machine
 with classic Outlook to verify on; the CI machines have none.
+
+## Crash logs
+
+`crashlog.rs`, installed first thing in `main`. The folder is the one
+Tauri's `app_log_dir` names: `~/Library/Logs/ai.snth.connect/` (macOS),
+`%LOCALAPPDATA%\ai.snth.connect\logs\` (Windows),
+`~/.local/share/ai.snth.connect/logs/` (Linux, or under `$XDG_DATA_HOME`).
+
+- `panic.log`: every Rust panic: time (UTC), app version, system, pid,
+  message, file:line, the executable's load address and
+  `Backtrace::force_capture()`. "Copy diagnostics" says how many panics are
+  in it and when the last was; the file itself never leaves the computer.
+- `stderr.log`: stderr, when it goes nowhere (started from Finder, the
+  Start menu, a desktop file; from a terminal it stays on the terminal).
+  connect-core's `logln!` lines, the default panic message with the
+  thread's name, and the runtime's last line before an abort that no panic
+  hook sees (a foreign exception, a panic while panicking, a panic in a
+  function that cannot unwind). The macOS crash report has the stack of
+  such an abort; this file has the reason.
+- Each file is moved to `<name>.1` at start when it is over 2 MiB.
+
+A release build is stripped (`strip = true`, `debug = false`), so a
+backtrace is bare addresses (`0x1047e1234 - __mh_execute_header` on macOS).
+They become names with the debug symbols of that exact build:
+
+```bash
+atos -arch arm64 -o snth-connect.dSYM/Contents/Resources/DWARF/snth-connect \
+     -l <load address from panic.log or the crash report> <address> ...
+```
+
+No release keeps those symbols yet. PROPOSAL (not wired in): build the
+release with `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only` and
+`CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=packed` in the environment (no
+change to `Cargo.toml`, so dev builds and CI stay as they are). The shipped
+binary keeps the same size (strip still runs; checked on a small crate:
+byte-identical size), and the symbols land next to it:
+
+- macOS, `scripts/release-macos.sh`: export both variables for the
+  `npm run tauri build` call, then
+  `ditto -c -k --keepParent target/$TARGET/release/snth-connect.dSYM "$OUT/snth-connect-$VERSION-$TARGET.dSYM.zip"`
+  (with `--universal`, one per architecture), check
+  `dwarfdump --uuid` against the signed binary, and keep the zip with the
+  release files (a private place is enough: the app is open source, so
+  uploading it to the draft release is also fine).
+- Windows, `connect-release.yml`: the same two variables give
+  `target/<target>/release/snth_connect.pdb`; add it to an
+  `actions/upload-artifact` step.
+- Linux: `packed` gives a `.dwp` next to the binary; the same artifact step.
+
+The cost is a longer and larger release build (the debug info is generated,
+then split off), so it waits for the release manager.
 
 ## Not verified
 

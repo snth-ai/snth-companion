@@ -9,6 +9,7 @@ mod actions;
 mod approvals;
 mod browsers;
 mod commands;
+mod crashlog;
 mod i18n;
 mod logins;
 #[cfg(target_os = "macos")]
@@ -332,6 +333,9 @@ fn ctx_of(app: &AppHandle) -> Option<Arc<Ctx>> {
 
 fn main() {
     let context = tauri::generate_context!();
+    // Before anything else runs: a panic from here on is written down
+    // (crashlog.rs says where), and so is stderr when it goes nowhere.
+    crashlog::install(&context.package_info().version.to_string());
     let updater_ready = updater_configured(context.config());
 
     let mut builder = tauri::Builder::default()

@@ -44,9 +44,16 @@ directories.workspace = true
 # access(2): can the app replace itself where it runs (updates.rs)?
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+# crashlog.rs: the load address of the executable, and a stderr handle for
+# an app without a console. Already in the build (connect-host uses it).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_LibraryLoader"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # Two calls of SafariServices about the app's own Safari extension: is it
 # switched on, and open Safari's settings at it (safari.rs). Both crates are
-# in the build already (Tauri's window layer uses them).
-objc2 = "0.6"
+# in the build already (Tauri's window layer uses them). "exception": every
+# send is wrapped in objc2::exception::catch, because an Objective-C
+# exception that reaches Rust aborts the app (the 0.1.7 Logins crash).
+objc2 = { version = "0.6", features = ["exception"] }
 block2 = "0.6"
