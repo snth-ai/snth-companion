@@ -792,6 +792,12 @@ pub async fn diagnostics(ctx: Cx<'_>) -> Result<String, String> {
         format!("stop shortcut: {} (active {})",
             if st.prefs.stop_shortcut.is_empty() { "none" } else { &st.prefs.stop_shortcut }, st.prefs.stop_shortcut_active),
         format!("launch at login: {}", on(st.prefs.autostart)),
+        // How many panics were written down and when the last was; the
+        // file itself stays on this computer (crashlog.rs).
+        format!("crash log: {}", match crate::crashlog::summary() {
+            None => "no panics written down".to_string(),
+            Some((count, last)) => format!("{count} panic(s), the last at {last} (panic.log in the app's log folder)"),
+        }),
     ];
     Ok(lines.join("\n"))
 }
