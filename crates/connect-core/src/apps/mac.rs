@@ -852,11 +852,21 @@ impl Runner {
                 self.tool(&self.open, &[shown.clone()], None, "open").await?;
                 Ok(json!({"opened": true, "path": shown}))
             }
-            Request::OpenApp { name } => {
-                self.tool(&self.open, &["-a".to_string(), name.clone()], None, "open")
-                    .await
-                    .map_err(|_| AppError::NotFound(format!("no app named {name:?} on this Mac")))?;
-                Ok(json!({"opened": true, "name": name}))
+            Request::OpenApp { name, bundle_id } => {
+                // `open` activates the app and asks it to reopen (a running
+                // app shows its main window; macOS switches to the app's
+                // Space when the owner's Mission Control setting allows
+                // it). A bundle id names exactly one app (Finder lives
+                // outside /Applications).
+                let args = match &bundle_id {
+                    Some(id) => vec!["-b".to_string(), id.clone()],
+                    None => vec!["-a".to_string(), name.clone()],
+                };
+                self.tool(&self.open, &args, None, "open").await.map_err(|_| match &bundle_id {
+                    Some(id) => AppError::NotFound(format!("no app with the bundle id {id:?} on this Mac")),
+                    None => AppError::NotFound(format!("no app named {name:?} on this Mac")),
+                })?;
+                Ok(json!({"opened": true, "name": name, "bundle_id": bundle_id}))
             }
         }
     }

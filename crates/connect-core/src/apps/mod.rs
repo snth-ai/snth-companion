@@ -401,7 +401,7 @@ fn scope_of(req: &Request) -> String {
         Request::ClipboardWrite { .. } => "clipboard.write".into(),
         Request::OpenUrl { host, .. } => format!("open.url:{host}"),
         Request::OpenFile { .. } => "open.file".into(),
-        Request::OpenApp { name } => format!("open.app:{}", name.to_lowercase()),
+        Request::OpenApp { name, .. } => format!("open.app:{}", name.to_lowercase()),
         // Reads and notifications are never asked about.
         _ => String::new(),
     }
@@ -468,7 +468,13 @@ fn details_of(req: &Request) -> Vec<(String, String)> {
         Request::ClipboardWrite { text } => vec![kv("text", text)],
         Request::OpenUrl { url, .. } => vec![kv("url", url)],
         Request::OpenFile { path } => vec![kv("path", &path.to_string_lossy())],
-        Request::OpenApp { name } => vec![kv("name", name)],
+        Request::OpenApp { name, bundle_id } => {
+            let mut d = vec![kv("name", name)];
+            if let Some(id) = bundle_id {
+                d.push(kv("bundle id", id));
+            }
+            d
+        }
         _ => Vec::new(),
     }
 }
@@ -480,7 +486,7 @@ fn journal_target(req: &Request) -> String {
     match req {
         Request::OpenUrl { host, .. } => host.clone(),
         Request::OpenFile { path } => path.to_string_lossy().to_string(),
-        Request::OpenApp { name } => name.clone(),
+        Request::OpenApp { name, .. } => name.clone(),
         Request::ShortcutsRun { name, .. } => name.clone(),
         _ => String::new(),
     }
