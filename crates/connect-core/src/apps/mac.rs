@@ -19,6 +19,13 @@
 //!   step. Sending does not need it.
 //! - Shortcuts: `/usr/bin/shortcuts`. Clipboard: `pbpaste` / `pbcopy`.
 //!   Opening: `/usr/bin/open`. Notifications: the host's `Notifier`.
+//! - Opening an app also checks that a window came up (`WindowCheck`):
+//!   `open` activates a running app and asks it to reopen, and some apps
+//!   answer with no window at all (TextEdit with its last document
+//!   closed). Then one explicit reopen goes to it (only when SNTH Connect
+//!   may already send that app Apple events: no prompt), and the answer
+//!   says `"window": false, "status": "no_window"` when there is still
+//!   none, instead of a plain "opened".
 //!
 //! Every script is a constant. What the synth sent travels as ARGUMENTS
 //! of the script (`on run argv`), never as script text, so there is
@@ -32,7 +39,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
@@ -439,6 +446,45 @@ fn display_name(app: &str) -> &'static str {
     super::app_title(app)
 }
 
+/// Asks a running app to reopen: kAEReopenApplication, what a click on
+/// its Dock icon sends (it shows a window, or makes one). A standard
+/// command: no terminology of the app is needed.
+const APP_REOPEN: &str = r#"
+on run argv
+	tell application id (item 1 of argv) to reopen
+end run
+"#;
+
+/// Counts an app's windows by its name (WindowCheck::count).
+pub type WindowCount = Arc<dyn Fn(&str) -> Option<usize> + Send + Sync>;
+
+/// Whether opening an app gave it a window, and the one reopen when it
+/// did not. The parts are fields so a test can stand in for them;
+/// `WindowCheck::system` uses the real ones.
+#[derive(Clone)]
+pub struct WindowCheck {
+    /// The app's windows a person can work in (on screen, the normal
+    /// window layer, at least 50 points a side), by the app's name as the
+    /// Window Server names its owner. None: the app cannot be told among
+    /// the windows (no window of that owner name at all, on any layer).
+    pub count: WindowCount,
+    /// Whether this app may already send Apple events to the app with
+    /// this bundle id (asked without a prompt).
+    pub may_script: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    /// How long a window is waited for after `open` and after the reopen.
+    pub wait: Duration,
+}
+
+impl WindowCheck {
+    pub fn system() -> WindowCheck {
+        WindowCheck {
+            count: Arc::new(app_windows),
+            may_script: Arc::new(|bundle: &str| automation_state(bundle) == PermissionState::Granted),
+            wait: Duration::from_millis(1500),
+        }
+    }
+}
+
 /// The Mac backend. The program paths are fields so a test can point
 /// them at stand-ins; `system` uses the real ones.
 pub struct MacBackend {
@@ -450,6 +496,7 @@ pub struct MacBackend {
     /// The Messages history database.
     pub chat_db: PathBuf,
     pub notifier: Arc<dyn Notifier>,
+    pub windows: WindowCheck,
 }
 
 impl MacBackend {
@@ -465,6 +512,7 @@ impl MacBackend {
             open: "/usr/bin/open".into(),
             chat_db: home.join("Library/Messages/chat.db"),
             notifier,
+            windows: WindowCheck::system(),
         }
     }
 
@@ -477,6 +525,7 @@ impl MacBackend {
             open: self.open.clone(),
             chat_db: self.chat_db.clone(),
             notifier: self.notifier.clone(),
+            windows: self.windows.clone(),
         }
     }
 }
@@ -570,6 +619,96 @@ fn automation_state(bundle: &str) -> PermissionState {
     }
 }
 
+/// The windows of an app a person can work in, from the Window Server's
+/// list (CGWindowListCopyWindowInfo): owner name equal to `name` (case
+/// does not matter), the normal window layer, on screen, at least 50
+/// points a side. Reading owner names, layers and bounds needs no
+/// permission (window titles would need Screen Recording; none is read).
+/// None when no window of any layer or state has that owner name: the
+/// app is not running, or the Window Server knows it by another name.
+fn app_windows(name: &str) -> Option<usize> {
+    use std::ffi::{c_char, c_void, CStr};
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct CGRect {
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+    }
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        static kCGWindowOwnerName: *const c_void;
+        static kCGWindowLayer: *const c_void;
+        static kCGWindowIsOnscreen: *const c_void;
+        static kCGWindowBounds: *const c_void;
+        fn CGWindowListCopyWindowInfo(option: u32, relative_to: u32) -> *const c_void;
+        fn CGRectMakeWithDictionaryRepresentation(dict: *const c_void, rect: *mut CGRect) -> bool;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFArrayGetCount(array: *const c_void) -> isize;
+        fn CFArrayGetValueAtIndex(array: *const c_void, i: isize) -> *const c_void;
+        fn CFDictionaryGetValue(dict: *const c_void, key: *const c_void) -> *const c_void;
+        fn CFStringGetCString(s: *const c_void, buf: *mut c_char, len: isize, encoding: u32) -> u8;
+        fn CFNumberGetValue(n: *const c_void, kind: isize, out: *mut c_void) -> u8;
+        fn CFBooleanGetValue(b: *const c_void) -> u8;
+        fn CFRelease(cf: *const c_void);
+    }
+    // kCGWindowListOptionAll | kCGWindowListExcludeDesktopElements: every
+    // window, without the desktop and its icons (Finder's desktop is not
+    // a window to work in).
+    const OPTIONS: u32 = 16;
+    const UTF8: u32 = 0x0800_0100;
+    const SINT32: isize = 3;
+
+    let want = name.trim().to_lowercase();
+    if want.is_empty() {
+        return None;
+    }
+    unsafe {
+        let list = CGWindowListCopyWindowInfo(OPTIONS, 0);
+        if list.is_null() {
+            return None;
+        }
+        let mut known = false;
+        let mut count = 0usize;
+        for i in 0..CFArrayGetCount(list) {
+            let w = CFArrayGetValueAtIndex(list, i);
+            let owner = CFDictionaryGetValue(w, kCGWindowOwnerName);
+            if owner.is_null() {
+                continue;
+            }
+            let mut buf = [0 as c_char; 256];
+            if CFStringGetCString(owner, buf.as_mut_ptr(), buf.len() as isize, UTF8) == 0 {
+                continue;
+            }
+            if CStr::from_ptr(buf.as_ptr()).to_string_lossy().to_lowercase() != want {
+                continue;
+            }
+            known = true;
+            let mut layer: i32 = -1;
+            let l = CFDictionaryGetValue(w, kCGWindowLayer);
+            if l.is_null() || CFNumberGetValue(l, SINT32, &mut layer as *mut i32 as *mut c_void) == 0 || layer != 0 {
+                continue;
+            }
+            let on = CFDictionaryGetValue(w, kCGWindowIsOnscreen);
+            if on.is_null() || CFBooleanGetValue(on) == 0 {
+                continue;
+            }
+            let mut r = CGRect::default();
+            let b = CFDictionaryGetValue(w, kCGWindowBounds);
+            if !b.is_null() && CGRectMakeWithDictionaryRepresentation(b, &mut r) && r.w >= 50.0 && r.h >= 50.0 {
+                count += 1;
+            }
+        }
+        CFRelease(list);
+        known.then_some(count)
+    }
+}
+
 /// Full Disk Access shows as being able to open the Messages database.
 /// Opening it reads nothing and never prompts.
 fn full_disk_state(chat_db: &Path) -> PermissionState {
@@ -588,6 +727,7 @@ struct Runner {
     open: PathBuf,
     chat_db: PathBuf,
     notifier: Arc<dyn Notifier>,
+    windows: WindowCheck,
 }
 
 /// The number at the end of an osascript error line: "... (-1728)".
@@ -656,6 +796,26 @@ fn note_html(text: &str) -> String {
 }
 
 impl Runner {
+    /// Whether the app shows a window, waiting up to `windows.wait` for
+    /// one: Some(true) as soon as one is there, Some(false) when the app
+    /// is known among the windows and shows none, None when it cannot be
+    /// told.
+    async fn window_after_open(&self, name: &str) -> Option<bool> {
+        let deadline = Instant::now() + self.windows.wait;
+        let mut seen = None;
+        loop {
+            match (self.windows.count)(name) {
+                Some(n) if n > 0 => return Some(true),
+                Some(_) => seen = Some(false),
+                None => {}
+            }
+            if Instant::now() >= deadline {
+                return seen;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
     /// Run one constant script with these arguments; stdout on success.
     async fn osa(&self, app: &str, script: &str, args: &[String], missing: &str) -> Result<String, AppError> {
         let mut child = crate::proc::command(&self.osascript)
@@ -866,7 +1026,25 @@ impl Runner {
                     Some(id) => AppError::NotFound(format!("no app with the bundle id {id:?} on this Mac")),
                     None => AppError::NotFound(format!("no app named {name:?} on this Mac")),
                 })?;
-                Ok(json!({"opened": true, "name": name, "bundle_id": bundle_id}))
+                // "Opened" is not "shown": did a window come up? If not,
+                // one explicit reopen, then the honest answer.
+                let mut window = self.window_after_open(&name).await;
+                let mut reopened = false;
+                if window == Some(false) {
+                    if let Some(id) = bundle_id.as_ref().filter(|id| (self.windows.may_script)(id)) {
+                        reopened = self.osa("open", APP_REOPEN, std::slice::from_ref(id), "the app did not answer").await.is_ok();
+                        window = self.window_after_open(&name).await;
+                    }
+                }
+                let mut out = json!({"opened": true, "name": name, "bundle_id": bundle_id, "window": window, "reopened": reopened});
+                if window == Some(false) {
+                    out["status"] = json!("no_window");
+                    out["note"] = json!(format!(
+                        "{name} is running but shows no window; opening it{} brought none up",
+                        if reopened { " and asking it to reopen" } else { "" }
+                    ));
+                }
+                Ok(out)
             }
         }
     }

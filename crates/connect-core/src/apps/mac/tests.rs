@@ -56,6 +56,12 @@ if [ -n "$in" ]; then printf 'got: ' > "$out"; cat "$in" >> "$out"; else printf 
 exit 0
 "#;
 
+/// A window check that answers from `count` and allows the reopen when
+/// `may_script`, without waiting.
+fn windows_seen(count: impl Fn(&str) -> Option<usize> + Send + Sync + 'static, may_script: bool) -> WindowCheck {
+    WindowCheck { count: Arc::new(count), may_script: Arc::new(move |_| may_script), wait: Duration::ZERO }
+}
+
 struct Silent;
 impl Notifier for Silent {
     fn show(&self, _title: String, _body: String) -> NotifyFuture {
@@ -91,6 +97,8 @@ impl Fixture {
             open: exe("open", FAKE),
             chat_db: dir.join("chat.db"),
             notifier: Arc::new(Silent),
+            // No look at the real Window Server: a window is there.
+            windows: windows_seen(|_| Some(1), true),
         };
         Fixture { dir, backend }
     }
@@ -578,4 +586,57 @@ fn error_numbers_are_read_from_the_last_line() {
     assert_eq!(script_error_number("x\n34:56: execution error: Notes got an error: Can't get note. (-1728)\n"), Some(-1728));
     assert_eq!(script_error_number("no number"), None);
     assert_eq!(script_error_number(""), None);
+}
+
+#[tokio::test]
+async fn open_app_says_whether_a_window_came_up() {
+    // A window is there: "window": true, no reopen.
+    let fx = Fixture::new();
+    let out = fx.call("open", "app", json!({"name": "TextEdit", "bundle_id": "com.apple.TextEdit"})).await.unwrap();
+    assert_eq!(out["window"], true);
+    assert_eq!(out["reopened"], false);
+    assert!(out.get("status").is_none());
+    assert!(fx.args("osascript").is_empty());
+
+    // Running with no window (TextEdit, its last document closed, live
+    // 2026-10-16): one reopen; still none: no_window, never "shown".
+    let mut fx = Fixture::new();
+    fx.backend.windows = windows_seen(|_| Some(0), true);
+    let out = fx.call("open", "app", json!({"name": "TextEdit", "bundle_id": "com.apple.TextEdit"})).await.unwrap();
+    assert_eq!(out["window"], false);
+    assert_eq!(out["status"], "no_window");
+    assert_eq!(out["reopened"], true);
+    assert!(out["note"].as_str().unwrap().contains("shows no window"), "{out}");
+    assert_eq!(fx.args("osascript"), ["-", "com.apple.TextEdit"]);
+    assert!(fx.stdin("osascript").contains("to reopen"));
+
+    // The reopen brings one up.
+    let mut fx = Fixture::new();
+    let sent = fx.backend.osascript.with_extension("args");
+    // The stand-in osascript writes its arguments once the reopen went.
+    fx.backend.windows = windows_seen(move |_| Some(usize::from(sent.exists())), true);
+    let out = fx.call("open", "app", json!({"name": "TextEdit", "bundle_id": "com.apple.TextEdit"})).await.unwrap();
+    assert_eq!(out["window"], true, "{out}");
+    assert_eq!(out["reopened"], true);
+
+    // No Apple events allowed to that app yet: no reopen (no prompt),
+    // the honest no_window.
+    let mut fx = Fixture::new();
+    fx.backend.windows = windows_seen(|_| Some(0), false);
+    let out = fx.call("open", "app", json!({"name": "TextEdit", "bundle_id": "com.apple.TextEdit"})).await.unwrap();
+    assert_eq!((out["window"].clone(), out["reopened"].clone(), out["status"].clone()), (json!(false), json!(false), json!("no_window")));
+    assert!(fx.args("osascript").is_empty());
+
+    // Cannot be told (another owner name): as before, no claim either way.
+    let mut fx = Fixture::new();
+    fx.backend.windows = windows_seen(|_| None, true);
+    let out = fx.call("open", "app", json!({"name": "Visual Studio Code"})).await.unwrap();
+    assert_eq!(out["window"], Value::Null);
+    assert!(out.get("status").is_none());
+}
+
+#[test]
+fn the_reopen_script_is_a_constant_that_takes_the_bundle_id() {
+    assert!(APP_REOPEN.is_ascii() && APP_REOPEN.contains("on run argv") && !APP_REOPEN.contains("do shell script"));
+    assert_eq!(APP_REOPEN.matches("tell application id (item 1 of argv)").count(), 1);
 }
