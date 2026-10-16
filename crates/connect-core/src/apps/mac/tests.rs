@@ -59,7 +59,7 @@ exit 0
 /// A window check that answers from `count` and allows the reopen when
 /// `may_script`, without waiting.
 fn windows_seen(count: impl Fn(&str) -> Option<usize> + Send + Sync + 'static, may_script: bool) -> WindowCheck {
-    WindowCheck { count: Arc::new(count), may_script: Arc::new(move |_| may_script), wait: Duration::ZERO }
+    WindowCheck { count: Arc::new(count), may_script: Arc::new(move |_| may_script), wait: Duration::ZERO, finder_folder: None }
 }
 
 struct Silent;
@@ -639,4 +639,63 @@ async fn open_app_says_whether_a_window_came_up() {
 fn the_reopen_script_is_a_constant_that_takes_the_bundle_id() {
     assert!(APP_REOPEN.is_ascii() && APP_REOPEN.contains("on run argv") && !APP_REOPEN.contains("do shell script"));
     assert_eq!(APP_REOPEN.matches("tell application id (item 1 of argv)").count(), 1);
+}
+
+fn listed(owner: &str, layer: i32, x: f64, y: f64, w: f64, h: f64) -> ListedWindow {
+    ListedWindow { owner: owner.to_string(), layer, on_screen: true, bounds: Frame { x, y, w, h } }
+}
+
+#[test]
+fn finders_desktop_is_not_a_finder_window() {
+    // Live 2026-10-16: Finder showed only its desktop; the open-app check
+    // must not take that for a window to work in.
+    let displays = [Frame { x: 0.0, y: 0.0, w: 1512.0, h: 982.0 }, Frame { x: 1512.0, y: -200.0, w: 2560.0, h: 1440.0 }];
+    let desktop_only = [
+        listed("Finder", 0, 0.0, 0.0, 1512.0, 982.0),
+        listed("Finder", 0, 1512.0, -200.0, 2560.0, 1440.0),
+        listed("Finder", -2147483603, 0.0, 0.0, 1512.0, 982.0),
+    ];
+    assert_eq!(workable_windows("Finder", &desktop_only, &displays), Some(0));
+    // A browser window counts, also one that fills the screen below the
+    // menu bar; another app of a whole display's size counts too.
+    let with_window = [listed("Finder", 0, 0.0, 0.0, 1512.0, 982.0), listed("Finder", 0, 0.0, 33.0, 1512.0, 949.0)];
+    assert_eq!(workable_windows("finder", &with_window, &displays), Some(1));
+    assert_eq!(workable_windows("Preview", &[listed("Preview", 0, 0.0, 0.0, 1512.0, 982.0)], &displays), Some(1));
+    // Tiny, off-layer or another owner: as before.
+    assert_eq!(workable_windows("TextEdit", &[listed("TextEdit", 0, 10.0, 40.0, 1.0, 1.0)], &displays), Some(0));
+    assert_eq!(workable_windows("TextEdit", &[listed("Notes", 0, 10.0, 40.0, 500.0, 400.0)], &displays), None);
+}
+
+#[tokio::test]
+async fn finder_without_a_window_gets_its_desktop_folder() {
+    // Finder shows only its desktop: the owner's Desktop folder is opened
+    // (no Apple event), and a window is there.
+    let mut fx = Fixture::new();
+    let opened = fx.backend.open.with_extension("args");
+    let desktop = fx.dir.join("Desktop");
+    let folder = desktop.to_string_lossy().to_string();
+    let seen = folder.clone();
+    fx.backend.windows = windows_seen(
+        move |_| {
+            let args = std::fs::read(&opened).unwrap_or_default();
+            Some(usize::from(String::from_utf8_lossy(&args).contains(&seen)))
+        },
+        false,
+    );
+    fx.backend.windows.finder_folder = Some(desktop);
+    let out = fx.call("open", "app", json!({"name": "Finder", "bundle_id": "com.apple.finder"})).await.unwrap();
+    assert_eq!(out["window"], true, "{out}");
+    assert_eq!(out["desktop_folder"], true);
+    assert_eq!(out["reopened"], false);
+    assert_eq!(fx.args("open"), [folder]);
+    assert!(fx.args("osascript").is_empty());
+
+    // Another app never gets a folder.
+    let mut fx = Fixture::new();
+    fx.backend.windows = windows_seen(|_| Some(0), false);
+    fx.backend.windows.finder_folder = Some(fx.dir.join("Desktop"));
+    let out = fx.call("open", "app", json!({"name": "TextEdit", "bundle_id": "com.apple.TextEdit"})).await.unwrap();
+    assert_eq!(out["status"], "no_window");
+    assert!(out.get("desktop_folder").is_none());
+    assert_eq!(fx.args("open"), ["-b", "com.apple.TextEdit"]);
 }

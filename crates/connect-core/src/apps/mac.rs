@@ -25,7 +25,11 @@
 //!   closed). Then one explicit reopen goes to it (only when SNTH Connect
 //!   may already send that app Apple events: no prompt), and the answer
 //!   says `"window": false, "status": "no_window"` when there is still
-//!   none, instead of a plain "opened".
+//!   none, instead of a plain "opened". Finder's desktop (the icons on
+//!   the wallpaper) is never counted as a Finder window, and a Finder
+//!   with no window gets one by opening the owner's Desktop folder
+//!   (`open ~/Desktop`: no Apple event, so no Automation prompt) before
+//!   the reopen.
 //!
 //! Every script is a constant. What the synth sent travels as ARGUMENTS
 //! of the script (`on run argv`), never as script text, so there is
@@ -473,6 +477,9 @@ pub struct WindowCheck {
     pub may_script: Arc<dyn Fn(&str) -> bool + Send + Sync>,
     /// How long a window is waited for after `open` and after the reopen.
     pub wait: Duration,
+    /// The folder a Finder with no window is shown in (the owner's
+    /// Desktop). None: Finder gets only the reopen, like any app.
+    pub finder_folder: Option<PathBuf>,
 }
 
 impl WindowCheck {
@@ -481,8 +488,66 @@ impl WindowCheck {
             count: Arc::new(app_windows),
             may_script: Arc::new(|bundle: &str| automation_state(bundle) == PermissionState::Granted),
             wait: Duration::from_millis(1500),
+            finder_folder: directories::BaseDirs::new().map(|d| d.home_dir().join("Desktop")),
         }
     }
+}
+
+/// Finder by the name or the bundle id an open names.
+fn is_finder(name: &str, bundle_id: Option<&str>) -> bool {
+    bundle_id.is_some_and(|id| id.eq_ignore_ascii_case("com.apple.finder")) || name.trim().eq_ignore_ascii_case("finder")
+}
+
+/// A rectangle in global display points (the Window Server's bounds).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Frame {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+/// One window of the Window Server's list, as the window check reads it
+/// (no title: that would need Screen Recording).
+#[derive(Clone, Debug)]
+pub struct ListedWindow {
+    pub owner: String,
+    pub layer: i32,
+    pub on_screen: bool,
+    pub bounds: Frame,
+}
+
+/// The windows of `name` a person can work in: owner name equal to
+/// `name` (case does not matter), the normal window layer, on screen, at
+/// least 50 points a side, and for Finder never its desktop (a window of
+/// the size of a whole display: the icons on the wallpaper, which would
+/// otherwise pass for "Finder shows a window" on every desktop). None
+/// when no window of any layer or state has that owner name.
+pub fn workable_windows(name: &str, windows: &[ListedWindow], displays: &[Frame]) -> Option<usize> {
+    let want = name.trim().to_lowercase();
+    if want.is_empty() {
+        return None;
+    }
+    let finder = want == "finder";
+    let whole_display = |b: &Frame| {
+        displays.iter().any(|d| (b.x - d.x).abs() < 1.0 && (b.y - d.y).abs() < 1.0 && (b.w - d.w).abs() < 1.0 && (b.h - d.h).abs() < 1.0)
+    };
+    let mut known = false;
+    let mut count = 0usize;
+    for w in windows {
+        if w.owner.to_lowercase() != want {
+            continue;
+        }
+        known = true;
+        if w.layer != 0 || !w.on_screen || w.bounds.w < 50.0 || w.bounds.h < 50.0 {
+            continue;
+        }
+        if finder && whole_display(&w.bounds) {
+            continue;
+        }
+        count += 1;
+    }
+    known.then_some(count)
 }
 
 /// The Mac backend. The program paths are fields so a test can point
@@ -620,12 +685,11 @@ fn automation_state(bundle: &str) -> PermissionState {
 }
 
 /// The windows of an app a person can work in, from the Window Server's
-/// list (CGWindowListCopyWindowInfo): owner name equal to `name` (case
-/// does not matter), the normal window layer, on screen, at least 50
-/// points a side. Reading owner names, layers and bounds needs no
-/// permission (window titles would need Screen Recording; none is read).
-/// None when no window of any layer or state has that owner name: the
-/// app is not running, or the Window Server knows it by another name.
+/// list (CGWindowListCopyWindowInfo), judged by `workable_windows`.
+/// Reading owner names, layers and bounds needs no permission (window
+/// titles would need Screen Recording; none is read). The displays'
+/// frames (CGGetActiveDisplayList, CGDisplayBounds) tell Finder's desktop
+/// apart.
 fn app_windows(name: &str) -> Option<usize> {
     use std::ffi::{c_char, c_void, CStr};
 
@@ -646,6 +710,8 @@ fn app_windows(name: &str) -> Option<usize> {
         static kCGWindowBounds: *const c_void;
         fn CGWindowListCopyWindowInfo(option: u32, relative_to: u32) -> *const c_void;
         fn CGRectMakeWithDictionaryRepresentation(dict: *const c_void, rect: *mut CGRect) -> bool;
+        fn CGGetActiveDisplayList(max: u32, displays: *mut u32, count: *mut u32) -> i32;
+        fn CGDisplayBounds(display: u32) -> CGRect;
     }
     #[link(name = "CoreFoundation", kind = "framework")]
     extern "C" {
@@ -659,22 +725,31 @@ fn app_windows(name: &str) -> Option<usize> {
     }
     // kCGWindowListOptionAll | kCGWindowListExcludeDesktopElements: every
     // window, without the desktop and its icons (Finder's desktop is not
-    // a window to work in).
+    // a window to work in; workable_windows also drops a Finder window of
+    // a whole display's size, in case a macOS version lists it on the
+    // normal layer).
     const OPTIONS: u32 = 16;
     const UTF8: u32 = 0x0800_0100;
     const SINT32: isize = 3;
 
-    let want = name.trim().to_lowercase();
-    if want.is_empty() {
+    if name.trim().is_empty() {
         return None;
     }
+    let mut windows = Vec::new();
+    let mut displays = Vec::new();
     unsafe {
+        let mut ids = [0u32; 16];
+        let mut n = 0u32;
+        if CGGetActiveDisplayList(ids.len() as u32, ids.as_mut_ptr(), &mut n) == 0 {
+            for id in ids.iter().take(n as usize) {
+                let r = CGDisplayBounds(*id);
+                displays.push(Frame { x: r.x, y: r.y, w: r.w, h: r.h });
+            }
+        }
         let list = CGWindowListCopyWindowInfo(OPTIONS, 0);
         if list.is_null() {
             return None;
         }
-        let mut known = false;
-        let mut count = 0usize;
         for i in 0..CFArrayGetCount(list) {
             let w = CFArrayGetValueAtIndex(list, i);
             let owner = CFDictionaryGetValue(w, kCGWindowOwnerName);
@@ -685,28 +760,24 @@ fn app_windows(name: &str) -> Option<usize> {
             if CFStringGetCString(owner, buf.as_mut_ptr(), buf.len() as isize, UTF8) == 0 {
                 continue;
             }
-            if CStr::from_ptr(buf.as_ptr()).to_string_lossy().to_lowercase() != want {
-                continue;
-            }
-            known = true;
+            let owner = CStr::from_ptr(buf.as_ptr()).to_string_lossy().to_string();
             let mut layer: i32 = -1;
             let l = CFDictionaryGetValue(w, kCGWindowLayer);
-            if l.is_null() || CFNumberGetValue(l, SINT32, &mut layer as *mut i32 as *mut c_void) == 0 || layer != 0 {
-                continue;
+            if l.is_null() || CFNumberGetValue(l, SINT32, &mut layer as *mut i32 as *mut c_void) == 0 {
+                layer = -1;
             }
             let on = CFDictionaryGetValue(w, kCGWindowIsOnscreen);
-            if on.is_null() || CFBooleanGetValue(on) == 0 {
-                continue;
-            }
+            let on_screen = !on.is_null() && CFBooleanGetValue(on) != 0;
             let mut r = CGRect::default();
             let b = CFDictionaryGetValue(w, kCGWindowBounds);
-            if !b.is_null() && CGRectMakeWithDictionaryRepresentation(b, &mut r) && r.w >= 50.0 && r.h >= 50.0 {
-                count += 1;
+            if b.is_null() || !CGRectMakeWithDictionaryRepresentation(b, &mut r) {
+                r = CGRect::default();
             }
+            windows.push(ListedWindow { owner, layer, on_screen, bounds: Frame { x: r.x, y: r.y, w: r.w, h: r.h } });
         }
         CFRelease(list);
-        known.then_some(count)
     }
+    workable_windows(name, &windows, &displays)
 }
 
 /// Full Disk Access shows as being able to open the Messages database.
@@ -1030,6 +1101,19 @@ impl Runner {
                 // one explicit reopen, then the honest answer.
                 let mut window = self.window_after_open(&name).await;
                 let mut reopened = false;
+                let mut desktop_folder = false;
+                if window == Some(false) && is_finder(&name, bundle_id.as_deref()) {
+                    // Finder with only its desktop: a Finder window on the
+                    // owner's Desktop folder (what a task there needs),
+                    // with no Apple event and so no Automation prompt.
+                    if let Some(dir) = self.windows.finder_folder.as_ref() {
+                        let folder = dir.to_string_lossy().to_string();
+                        if self.tool(&self.open, &[folder], None, "open").await.is_ok() {
+                            desktop_folder = true;
+                            window = self.window_after_open(&name).await;
+                        }
+                    }
+                }
                 if window == Some(false) {
                     if let Some(id) = bundle_id.as_ref().filter(|id| (self.windows.may_script)(id)) {
                         reopened = self.osa("open", APP_REOPEN, std::slice::from_ref(id), "the app did not answer").await.is_ok();
@@ -1037,6 +1121,9 @@ impl Runner {
                     }
                 }
                 let mut out = json!({"opened": true, "name": name, "bundle_id": bundle_id, "window": window, "reopened": reopened});
+                if desktop_folder {
+                    out["desktop_folder"] = json!(true);
+                }
                 if window == Some(false) {
                     out["status"] = json!("no_window");
                     out["note"] = json!(format!(
