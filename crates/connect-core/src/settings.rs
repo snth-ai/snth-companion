@@ -52,6 +52,21 @@ pub enum ComputerMode {
     Away,
 }
 
+/// Experiment (connect.md: computer.experiment): the owner's choice of the
+/// new way for the synth to drive this computer. The synth decides what it
+/// means; it is honoured only where the synth already has the new way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Experiment {
+    /// As the synth decides.
+    #[default]
+    Default,
+    /// Use the new way where the synth has it.
+    On,
+    /// Never the new way: the synth drives the computer the old way.
+    Off,
+}
+
 /// Foreground-delivery gate (connect.md: computer.foreground). Applies to
 /// a tools/call that asks the driver to front a window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,6 +348,10 @@ pub struct ComputerSettings {
     /// Absent in a settings file written before it existed: the defaults.
     #[serde(default)]
     pub look: LookSettings,
+    /// The owner's choice of the experimental way (sent to the synth).
+    /// Absent in a settings file written before it existed: default.
+    #[serde(default)]
+    pub experiment: Experiment,
 }
 
 fn default_away_idle() -> u64 {
@@ -468,6 +487,7 @@ impl Default for Settings {
                 apps: AppScope::default(),
                 tool_denylist: Vec::new(),
                 look: LookSettings::default(),
+                experiment: Experiment::Default,
             },
             files: FilesSettings {
                 enabled: false,
@@ -547,6 +567,7 @@ impl Settings {
                     apps: AppScope::default(),
                     tool_denylist: Vec::new(),
                     look: LookSettings::default(),
+                    experiment: Experiment::Default,
                 };
                 s.files.enabled = true;
                 s.files.ask_on_write = true;
@@ -575,6 +596,7 @@ impl Settings {
                     apps: AppScope::default(),
                     tool_denylist: Vec::new(),
                     look: LookSettings::default(),
+                    experiment: Experiment::Default,
                 };
                 s.files.enabled = true;
                 s.files.ask_on_write = false;
@@ -603,6 +625,7 @@ impl Settings {
                     apps: AppScope::default(),
                     tool_denylist: Vec::new(),
                     look: LookSettings::default(),
+                    experiment: Experiment::Default,
                 };
                 s.files.enabled = true;
                 s.files.ask_on_write = false;
@@ -869,6 +892,22 @@ mod tests {
         assert!(!look.preview_window);
         for p in [Preset::Careful, Preset::Balanced, Preset::Full, Preset::Custom] {
             assert_eq!(Settings::from_preset(p, vec![]).computer.look, look);
+        }
+    }
+
+    #[test]
+    fn a_settings_file_written_before_the_experiment_still_loads() {
+        // settings.json of app 0.1.10 has no "experiment" under "computer".
+        let mut old = serde_json::to_value(Settings::from_preset(Preset::Balanced, vec![])).unwrap();
+        old["computer"].as_object_mut().unwrap().remove("experiment");
+        let s: Settings = serde_json::from_value(old).unwrap();
+        assert_eq!(s.computer.experiment, Experiment::Default);
+        assert_eq!(s.computer.mode, ComputerMode::Auto);
+        assert_eq!(Settings::default().computer.experiment, Experiment::Default);
+        // Stored in plain words.
+        for (e, word) in [(Experiment::Default, "default"), (Experiment::On, "on"), (Experiment::Off, "off")] {
+            assert_eq!(serde_json::to_value(e).unwrap(), serde_json::json!(word));
+            assert_eq!(serde_json::from_value::<Experiment>(serde_json::json!(word)).unwrap(), e);
         }
     }
 

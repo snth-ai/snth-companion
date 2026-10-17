@@ -1079,15 +1079,18 @@ impl Core {
     /// owner chose stays, like the shared folders. So does the owner's
     /// choice of apps: a preset says when the synth may act and whether it
     /// asks, never which apps, and a list the owner made by hand must not
-    /// be lost to a click on a preset.
+    /// be lost to a click on a preset. Nor is the experiment: it says how
+    /// the synth drives the computer, not when it may.
     pub fn apply_preset(&self, preset: Preset) -> u64 {
         self.mutate_settings(|s| {
             let roots = s.files.roots.clone();
             let look = s.computer.look.clone();
             let apps = s.computer.apps.clone();
+            let experiment = s.computer.experiment;
             *s = Settings::from_preset(preset, roots);
             s.computer.look = look;
             s.computer.apps = apps;
+            s.computer.experiment = experiment;
         })
     }
 
@@ -1789,6 +1792,39 @@ mod tests {
         core.apply_preset(Preset::Careful);
         assert_eq!(core.settings().computer.look.color, CursorColor::Green);
         assert_eq!(core.settings().computer.look.screenshot_max, 1024);
+    }
+
+    #[tokio::test]
+    async fn the_experiment_is_told_to_the_synth() {
+        use crate::settings::Experiment;
+        let (core, _) = test_core();
+        let rev = core.apply_preset(Preset::Balanced);
+        let mut told = core.shared().settings_tx.subscribe();
+        told.borrow_and_update();
+        let caps = |core: &Core| {
+            wire::capabilities_value(&core.settings(), "0.33.1", "ok", core.shared().apps.backend().as_ref())
+        };
+        assert_eq!(caps(&core)["computer"]["experiment"], "default");
+
+        // A change of the experiment is a settings change: the rev moves
+        // and the synth is sent new capabilities.
+        let next = core.mutate_settings(|s| s.computer.experiment = Experiment::Off);
+        assert_eq!(next, rev + 1);
+        assert!(told.has_changed().unwrap(), "a settings message for an experiment change");
+        assert_eq!(caps(&core)["computer"]["experiment"], "off");
+        told.borrow_and_update();
+        core.mutate_settings(|s| s.computer.experiment = Experiment::On);
+        assert!(told.has_changed().unwrap());
+        assert_eq!(caps(&core)["computer"]["experiment"], "on");
+
+        // A preset is a policy: the owner's choice of the experiment stays.
+        core.apply_preset(Preset::Careful);
+        assert_eq!(core.settings().computer.experiment, Experiment::On);
+        // The look words stay out of the capabilities.
+        let text = caps(&core).to_string();
+        for word in ["look", "cursor", "screenshot"] {
+            assert!(!text.contains(word), "the capabilities mention {word}: {text}");
+        }
     }
 
     #[tokio::test]

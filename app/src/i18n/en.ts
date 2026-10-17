@@ -240,6 +240,13 @@ export const en = {
     previewDesc: (n: string) =>
       `A small window on top of everything shows the last picture ${n} took. This part of the helper is unfinished and may misbehave. It appears the next time the helper starts.`,
     experimental: "Experimental",
+    expTitle: "Experiment",
+    expLead: (n: string) => `A new way for ${n} to control this computer`,
+    expDesc: (n: string) =>
+      `Faster and cheaper, and still experimental. It works only for synths that already have it. Default: as ${n} decides.`,
+    expDefault: "Default",
+    expOn: "On",
+    expOff: "Off",
     needsTitle: "What this needs",
     helper: "Helper app",
     helperDesc: "SNTH Connect installs and updates it by itself.",

@@ -6,6 +6,8 @@ export type NetMode = "all" | "ask" | "list";
 export type CookiesMode = "ask" | "ask_new" | "auto";
 export type ComputerMode = "ask" | "auto" | "away";
 export type Foreground = "never" | "idle" | "ask" | "always";
+/** The owner's choice of the new way to drive the computer. "default" = as the synth decides. */
+export type Experiment = "default" | "on" | "off";
 export type Preset = "careful" | "balanced" | "full" | "custom";
 export type Capability = "net" | "cookies" | "computer" | "files" | "apps";
 /** When the app asks before a change in the owner's apps: every time,
@@ -129,6 +131,7 @@ export interface Settings {
     apps: { policy: AppsPolicy; except: AppRef[]; only: AppRef[] };
     tool_denylist: string[];
     look: Look;
+    experiment: Experiment;
   };
   files: { enabled: boolean; roots: Root[]; ask_on_write: boolean };
   apps: {

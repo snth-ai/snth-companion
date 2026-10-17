@@ -910,6 +910,15 @@ mod tests {
     }
 
     #[test]
+    fn the_experiment_does_not_make_the_settings_custom() {
+        let mut s = Settings::from_preset(Preset::Careful, vec![]);
+        s.computer.experiment = connect_core::settings::Experiment::Off;
+        assert!(matches!(matching_preset(&s), Preset::Careful));
+        s.computer.foreground = connect_core::settings::Foreground::Always;
+        assert!(matches!(matching_preset(&s), Preset::Custom));
+    }
+
+    #[test]
     fn hub_override_must_be_https() {
         assert_eq!(hub_for(None).unwrap(), HUB_URL);
         assert_eq!(hub_for(Some("  ".into())).unwrap(), HUB_URL);

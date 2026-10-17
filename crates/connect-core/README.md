@@ -172,7 +172,8 @@ before apps existed loads with apps off.
 toggle, monthly cap, skip-on-metered), cookies (enabled, mode), computer
 (enabled, mode ask/auto/away, foreground never/idle/ask/always, away-idle
 minutes, `apps`: which apps the synth may use, see "Which apps", tool
-denylist, and `look`: how it looks on the screen, see "How it looks"), files (enabled, roots with a write
+denylist, `look`: how it looks on the screen, see "How it looks", and
+`experiment`, see "Experiment"), files (enabled, roots with a write
 flag, ask-on-write), apps (enabled, mode ask/ask_new/auto, per-app switches
 that differ from the default). `settings_rev` grows by one on every change;
 writes are atomic.
@@ -342,6 +343,20 @@ left:
   the binary its daemon runs.
 
 `connectd selftest cua` plays this with the real driver.
+
+## Experiment
+
+`settings.computer.experiment` (`Experiment`): `default` | `on` | `off`, the
+owner's choice of the new way for the synth to drive the computer (faster
+and cheaper, still experimental). A settings file without it loads as
+`default`. It is sent to the synth as `capabilities.computer.experiment`
+(an app without it = the synth reads `default`), and a change of it moves
+`settings_rev` and pushes a `settings` message like any policy change. The
+synth decides: `default` = as the synth decides, `on` = the new way where
+the synth has it, `off` = never; a synth without the new way ignores it. A
+preset keeps the owner's choice and it does not make the settings custom
+(`matching_preset`). The app itself does nothing else with it. UI: the
+"Experiment" block at the bottom of the Computer screen.
 
 ## How it looks (`cua_look.rs`)
 

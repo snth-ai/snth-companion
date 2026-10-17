@@ -38,6 +38,11 @@ pub fn capabilities_value(
         crate::settings::Foreground::Ask => "ask",
         crate::settings::Foreground::Always => "always",
     };
+    let experiment = match s.computer.experiment {
+        crate::settings::Experiment::Default => "default",
+        crate::settings::Experiment::On => "on",
+        crate::settings::Experiment::Off => "off",
+    };
     let roots: Vec<Value> = s
         .files
         .roots
@@ -51,6 +56,7 @@ pub fn capabilities_value(
             "enabled": s.computer.enabled,
             "mode": computer_mode,
             "foreground": foreground,
+            "experiment": experiment,
             "cua_version": cua_version,
             "status": cua_status,
         },
