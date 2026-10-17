@@ -262,7 +262,7 @@ function presetSettings(preset: Exclude<Preset, "custom">, roots: Settings["file
   const base: Settings = {
     net: { enabled: true, mode: "ask", domains: [], allow_local_network: false, monthly_cap_bytes: 0, skip_on_metered: true },
     cookies: { enabled: true, mode: "ask" },
-    computer: { enabled: true, mode: "ask", foreground: "never", away_idle_minutes: 5, apps: { policy: "all", except: [], only: [] }, tool_denylist: [], look: defaultLook() },
+    computer: { enabled: true, mode: "ask", foreground: "never", away_idle_minutes: 5, apps: { policy: "all", except: [], only: [] }, tool_denylist: [], look: defaultLook(), experiment: "default" },
     files: { enabled: true, roots, ask_on_write: true },
     apps: { enabled: true, mode: "ask", apps: {} },
     preset,
@@ -316,7 +316,7 @@ function offSettings(): Settings {
   return {
     net: { enabled: false, mode: "ask", domains: [], allow_local_network: false, monthly_cap_bytes: 0, skip_on_metered: false },
     cookies: { enabled: false, mode: "ask" },
-    computer: { enabled: false, mode: "ask", foreground: "never", away_idle_minutes: 5, apps: { policy: "all", except: [], only: [] }, tool_denylist: [], look: defaultLook() },
+    computer: { enabled: false, mode: "ask", foreground: "never", away_idle_minutes: 5, apps: { policy: "all", except: [], only: [] }, tool_denylist: [], look: defaultLook(), experiment: "default" },
     files: { enabled: false, roots: [], ask_on_write: false },
     apps: { enabled: false, mode: "ask", apps: {} },
     preset: "custom",
@@ -1182,10 +1182,11 @@ class MockBackend implements Backend {
   }
 
   applyPreset(preset: Exclude<Preset, "custom">) {
-    // A preset is a policy: the look the owner chose stays.
-    const look = this.state.core.settings.computer.look;
+    // A preset is a policy: the look and the experiment the owner chose stay.
+    const { look, experiment } = this.state.core.settings.computer;
     this.state.core.settings = presetSettings(preset, this.state.core.settings.files.roots);
     this.state.core.settings.computer.look = look;
+    this.state.core.settings.computer.experiment = experiment;
     this.refreshApps();
     return this.changed();
   }
@@ -1201,9 +1202,10 @@ class MockBackend implements Backend {
     );
     next.preset = "custom";
     for (const p of ["careful", "balanced", "full"] as const) {
-      // How it looks is not part of a preset.
+      // How it looks and the experiment are not part of a preset.
       const probe = presetSettings(p, next.files.roots);
       probe.computer.look = next.computer.look;
+      probe.computer.experiment = next.computer.experiment;
       if (JSON.stringify(probe) === JSON.stringify({ ...next, preset: p })) next.preset = p;
     }
     this.state.core.settings = next;

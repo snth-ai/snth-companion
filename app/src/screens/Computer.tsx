@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { backend } from "../backend";
-import type { AppChoice, AppRef, AppsPolicy, ComputerMode, CursorColor, CursorSpeed, Foreground, ReducedMotion } from "../backend/types";
+import type { AppChoice, AppRef, AppsPolicy, ComputerMode, CursorColor, CursorSpeed, Experiment, Foreground, ReducedMotion } from "../backend/types";
 import { useStore } from "../lib/store";
 import { ChoiceList, Notice, Row, Section, Segmented, Sheet, SwitchRow } from "../ui/controls";
 import { IconPlus, IconX } from "../ui/icons";
@@ -442,6 +442,23 @@ export function Computer() {
               ) : null}
             </div>
           </details>
+        </Section>
+
+        <Section title={t.expTitle}>
+          <div className="group">
+            <Row title={t.expLead(name)} desc={t.expDesc(name)}>
+              <Segmented<Experiment>
+                label={t.expTitle}
+                value={c.experiment}
+                onChange={(v) => edit((d) => void (d.computer.experiment = v))}
+                options={[
+                  { value: "default", title: t.expDefault },
+                  { value: "on", title: t.expOn },
+                  { value: "off", title: t.expOff },
+                ]}
+              />
+            </Row>
+          </div>
         </Section>
       </fieldset>
 
