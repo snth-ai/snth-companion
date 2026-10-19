@@ -53,6 +53,12 @@
     "allow-set-auto-update",
     "allow-set-developer",
     "allow-diagnostics",
-    "allow-open-external"
+    "allow-open-external",
+    "allow-island-set",
+    "allow-island-hotkey-set",
+    "allow-island-hotkey-reset",
+    "allow-face-refresh",
+    "allow-face-set",
+    "allow-island-ask-design"
   ]
 }

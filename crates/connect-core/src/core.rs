@@ -1520,6 +1520,16 @@ impl Core {
         crate::island::set_face(&self.shared, synth_id, face, patch).await
     }
 
+    /// A picture of the screen for the island (see
+    /// `cua_apps::Directory::desktop_picture`). Err("not_installed")
+    /// while the app has no helper of its own yet.
+    pub async fn desktop_picture(&self, out: &std::path::Path, max_edge: u32) -> Result<serde_json::Value, String> {
+        if self.shared.cua_installer.is_some() && !std::path::Path::new(&self.shared.cua_bin_now()).is_file() {
+            return Err("not_installed".into());
+        }
+        self.shared.cua_dir.desktop_picture(out, max_edge).await
+    }
+
     /// The cached face of a synth (None: the default preset of its id).
     pub fn face_of(&self, synth_id: &str) -> Option<serde_json::Value> {
         self.shared.persisted.read().unwrap().faces.get(synth_id).cloned()

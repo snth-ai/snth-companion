@@ -9,6 +9,12 @@
 	     to control Calendar"). -->
 	<key>com.apple.security.automation.apple-events</key>
 	<true/>
+	<!-- The island's hold-to-talk keys record the owner's voice while a
+	     key is held. Under the hardened runtime the microphone is refused
+	     outright unless this is set; with it, macOS asks the owner once
+	     (NSMicrophoneUsageDescription in Info.plist). -->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
 	<!-- The app group the app shares with its Safari extension
 	     (Contents/PlugIns/SNTH Vault.appex). The extension is sandboxed
 	     and reaches the running app through a socket in this group's

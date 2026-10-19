@@ -324,6 +324,21 @@ pub struct OwnerMessage {
     pub images: Vec<Image>,
 }
 
+/// A fresh client_id: a random UUID (version 4).
+pub fn new_client_id() -> String {
+    use rand::RngCore;
+    let mut b = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut b);
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let mut hex = String::with_capacity(32);
+    for x in b {
+        use std::fmt::Write;
+        let _ = write!(hex, "{x:02x}");
+    }
+    format!("{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32])
+}
+
 /// Why a message could not go, as a short code the UI has words for, and
 /// the detail behind it (diagnostics).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

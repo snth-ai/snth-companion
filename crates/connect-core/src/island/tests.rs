@@ -394,6 +394,14 @@ async fn island_events_reach_the_ui_tagged_with_their_synth() {
 }
 
 #[test]
+fn client_ids_are_uuids_and_never_repeat() {
+    let a = new_client_id();
+    assert_eq!(a.len(), 36);
+    assert_eq!(&a[14..15], "4");
+    assert_ne!(a, new_client_id());
+}
+
+#[test]
 fn the_view_says_who_takes_island_requests() {
     let (core, _q) = linked(&[("mia", BOTH), ("old", &["requests"])]);
     let view = core.island_view();

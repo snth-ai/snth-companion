@@ -69,6 +69,8 @@ const WINDOWS_TTL: Duration = Duration::from_secs(5);
 const REFRESH_GAP: Duration = Duration::from_secs(2);
 /// One call of the directory's own runtime.
 const LISTER_TIMEOUT: Duration = Duration::from_secs(45);
+/// A picture of the screen for the island: the owner is holding a key.
+const PICTURE_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// One app as the driver's `list_apps` reports it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -955,6 +957,41 @@ impl Directory {
         self.state.lock().await.reads
     }
 
+    /// A picture of the screen for the owner's island (screenshot +
+    /// voice): `get_desktop_state` of the directory's own runtime, the
+    /// picture written to `out` (a file in the app's own data folder) at
+    /// most `max_edge` pixels on its long side. The owner's action, from
+    /// the app itself: the synth never reaches this runtime, so none of
+    /// the synth's limits apply. Returns the tool's whole result (it may
+    /// carry the picture inline as well).
+    pub async fn desktop_picture(&self, out: &Path, max_edge: u32) -> Result<Value, String> {
+        let Source::Driver { bin, env } = self.source() else {
+            return Err("no driver".into());
+        };
+        let mut st = self.state.lock().await;
+        let args = json!({"screenshot_out_file": out.to_string_lossy(), "max_image_dimension": max_edge});
+        let mut last = String::new();
+        for _ in 0..2 {
+            if st.lister.is_none() {
+                match tokio::time::timeout(LISTER_TIMEOUT, Lister::start(&bin(), &env)).await {
+                    Ok(Ok(lister)) => st.lister = Some(lister),
+                    Ok(Err(why)) => return Err(why),
+                    Err(_) => return Err("the helper did not start in time".into()),
+                }
+            }
+            let lister = st.lister.as_mut().expect("just started");
+            match tokio::time::timeout(PICTURE_TIMEOUT, lister.call_tool("get_desktop_state", args.clone())).await {
+                Ok(Ok(result)) => return Ok(result),
+                Ok(Err(why)) => last = why,
+                Err(_) => last = "get_desktop_state did not answer in time".into(),
+            }
+            if let Some(dead) = st.lister.take() {
+                dead.stop().await;
+            }
+        }
+        Err(last)
+    }
+
     async fn read_apps(&self, st: &mut State) -> Result<(), String> {
         st.reads.0 += 1;
         if let Source::Driver { .. } = self.source() {
@@ -1104,12 +1141,18 @@ impl Lister {
     }
 
     async fn tool(&mut self, tool: &str) -> Result<Value, String> {
-        let result = self.request("tools/call", json!({"name": tool, "arguments": {}})).await?;
+        let result = self.call_tool(tool, json!({})).await?;
+        result.get("structuredContent").cloned().ok_or_else(|| format!("the helper answered {tool} without a list"))
+    }
+
+    /// One tool call; its whole result, or the helper's refusal.
+    async fn call_tool(&mut self, tool: &str, arguments: Value) -> Result<Value, String> {
+        let result = self.request("tools/call", json!({"name": tool, "arguments": arguments})).await?;
         if result.get("isError").and_then(Value::as_bool) == Some(true) {
             let said: String = result.pointer("/content/0/text").and_then(Value::as_str).unwrap_or("?").chars().take(200).collect();
             return Err(format!("the helper refused {tool}: {said}"));
         }
-        result.get("structuredContent").cloned().ok_or_else(|| format!("the helper answered {tool} without a list"))
+        Ok(result)
     }
 
     async fn stop(mut self) {

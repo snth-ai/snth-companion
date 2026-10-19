@@ -1,5 +1,5 @@
-//! The two windows: the main one (hidden to the tray on close) and the
-//! small always-on-top approval window.
+//! The windows: the main one (hidden to the tray on close), the small
+//! always-on-top approval window, and the island (island/mod.rs).
 
 use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
@@ -9,7 +9,7 @@ pub const APPROVAL: &str = "approval";
 /// Only the app's own pages may load in a window: the bundled assets, or
 /// the local dev server in a debug build. Everything else is refused, so
 /// a stray link can never put remote content next to the command bridge.
-fn is_app_url(url: &Url) -> bool {
+pub(crate) fn is_app_url(url: &Url) -> bool {
     match url.scheme() {
         "tauri" | "about" => true,
         "http" | "https" => match url.host_str() {
