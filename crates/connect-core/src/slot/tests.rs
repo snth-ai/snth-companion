@@ -337,3 +337,101 @@ async fn a_single_link_is_found_without_a_stream_and_several_are_not() {
     core.shared().add_link(&pending("maya", "Maya", LinkSource::Code)).unwrap();
     assert_eq!(core.shared().current_synth_id(), "", "with two links a host call is nobody's");
 }
+
+/// A keychain whose writes fail while `fail_sets` is above zero.
+struct FlakySecret {
+    inner: MemSecretStore,
+    fail_sets: Mutex<usize>,
+}
+
+impl SecretStore for FlakySecret {
+    fn set(&self, key: &str, value: &str) -> std::io::Result<()> {
+        let mut left = self.fail_sets.lock().unwrap();
+        if *left > 0 {
+            *left -= 1;
+            return Err(std::io::Error::other("the keychain said no"));
+        }
+        self.inner.set(key, value)
+    }
+    fn get(&self, key: &str) -> std::io::Result<Option<String>> {
+        self.inner.get(key)
+    }
+    fn delete(&self, key: &str) -> std::io::Result<()> {
+        self.inner.delete(key)
+    }
+}
+
+fn core_with(path: std::path::PathBuf, secret: Arc<FlakySecret>) -> Core {
+    Core::new(CoreConfig {
+        settings_path: Some(path),
+        journal_path: None,
+        approver: Arc::new(OwnerApprover(Arc::default())),
+        cookies: Arc::new(crate::cookies::MultiReader { chromium: vec![], firefox: vec![], keys: Arc::new(crate::cookies::fixtures::NoKey) }),
+        apps: Arc::new(crate::apps::stub::StubBackend::offering(&[])),
+        secret,
+        hub: Arc::new(NoHub),
+        app_version: "t".into(),
+        cua_bin: "cua-driver-not-installed".into(),
+        cua_private_root: None,
+        cua_attach: CuaAttach::User,
+    })
+}
+
+#[tokio::test]
+async fn a_token_the_keychain_would_not_move_keeps_the_link_until_a_later_start_moves_it() {
+    let dir = temp_dir("migrate-flaky");
+    let path = dir.join("settings.json");
+    std::fs::write(&path, serde_json::to_vec(&old_settings_file()).unwrap()).unwrap();
+    // Every write fails during the first start (the move is tried twice).
+    let secret = Arc::new(FlakySecret { inner: MemSecretStore::new(), fail_sets: Mutex::new(2) });
+    secret.inner.set(TOKEN_KEY, "tok-old").unwrap();
+
+    let core = core_with(path.clone(), secret.clone());
+    assert_eq!(core.link_ids(), ["mia"], "the link is there, on the old key");
+    let mia = core.shared().slot("mia").unwrap();
+    assert_eq!(core.shared().token_of(&mia).as_deref(), Some("tok-old"));
+    assert_eq!(secret.get(TOKEN_KEY).unwrap().as_deref(), Some("tok-old"), "the bare key is kept");
+    assert_eq!(secret.get(&token_key("mia")).unwrap(), None);
+    // An ordinary save writes the new shape: no `identity` any more.
+    core.apply_preset(Preset::Careful);
+    let written: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(written.get("identity").is_none());
+    drop((mia, core));
+
+    // The next start: the keychain works again; the token moves.
+    let core = core_with(path.clone(), secret.clone());
+    assert_eq!(core.link_ids(), ["mia"]);
+    assert_eq!(secret.get(&token_key("mia")).unwrap().as_deref(), Some("tok-old"));
+    assert_eq!(secret.get(TOKEN_KEY).unwrap(), None);
+    drop(core);
+
+    // Still failing at the next start: the link stays on the old key, and
+    // unlinking it removes that key too.
+    std::fs::write(&path, serde_json::to_vec(&old_settings_file()).unwrap()).unwrap();
+    secret.inner.delete(&token_key("mia")).unwrap();
+    secret.inner.set(TOKEN_KEY, "tok-old").unwrap();
+    *secret.fail_sets.lock().unwrap() = 2;
+    let core = core_with(path.clone(), secret.clone());
+    assert_eq!(core.link_ids(), ["mia"]);
+    core.unpair_synth("mia").await;
+    assert_eq!(secret.get(TOKEN_KEY).unwrap(), None);
+    assert!(core.link_ids().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_bare_token_is_not_given_to_one_of_several_pairings() {
+    let dir = temp_dir("bare-several");
+    let path = dir.join("settings.json");
+    let secret = Arc::new(MemSecretStore::new());
+    let core = core_at(Some(path.clone()), secret.clone(), Arc::default());
+    core.shared().add_link(&pending("mia", "Mia", LinkSource::Code)).unwrap();
+    core.shared().add_link(&pending("maya", "Maya", LinkSource::Code)).unwrap();
+    drop(core);
+    secret.delete(&token_key("maya")).unwrap();
+    secret.set(TOKEN_KEY, "tok-stray").unwrap();
+    let core = core_at(Some(path), secret.clone(), Arc::default());
+    assert_eq!(core.link_ids(), ["mia"]);
+    assert_eq!(secret.get(TOKEN_KEY).unwrap().as_deref(), Some("tok-stray"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

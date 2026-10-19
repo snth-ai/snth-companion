@@ -191,7 +191,11 @@ the grants and the linked browsers become that synth's, the token moves to
 removed) and the file is written in the new shape at once. The old field
 is read, never written. If the app stops between moving the token and
 writing the file, the next start finds the token in place and only removes
-the bare key.
+the bare key. If the keychain refuses the write, the bare key is
+kept and the link reads its token from there (`LinkSlot::legacy_token`);
+every start tries the move again (with exactly one stored pairing, a token
+under the bare key is that pairing's), and a new token for the link or
+unlinking it removes the bare key.
 
 ## Several synths
 

@@ -350,7 +350,11 @@ impl Shared {
 
     /// The token of one link, from the secret store.
     pub(crate) fn token_of(&self, slot: &LinkSlot) -> Option<String> {
-        self.secret.get(&slot.token_key).ok().flatten().filter(|t| !t.is_empty())
+        let own = self.secret.get(&slot.token_key).ok().flatten().filter(|t| !t.is_empty());
+        if own.is_none() && slot.legacy_token.load(Ordering::Acquire) {
+            return self.secret.get(TOKEN_KEY).ok().flatten().filter(|t| !t.is_empty());
+        }
+        own
     }
 
     pub(crate) fn secret(&self) -> &Arc<dyn SecretStore> {
@@ -925,6 +929,11 @@ impl Shared {
         let existing = self.slot(&p.synth_id);
         match existing {
             Some(slot) => {
+                // A token of its own now: an old one under the bare key
+                // that could not be moved is not needed any more.
+                if slot.legacy_token.swap(false, Ordering::AcqRel) {
+                    let _ = self.secret.delete(TOKEN_KEY);
+                }
                 *slot.url.write().unwrap() = p.synth_url.clone();
                 *slot.source.write().unwrap() = p.source;
                 if !p.hub_id.is_empty() {
@@ -956,6 +965,9 @@ impl Shared {
         slot.wake.notify_one();
         let id = slot.synth_id.clone();
         let _ = self.secret.delete(&slot.token_key);
+        if slot.legacy_token.swap(false, Ordering::AcqRel) {
+            let _ = self.secret.delete(TOKEN_KEY);
+        }
         self.grants.clear_synth(&id);
         let removed = {
             let mut links = self.links.write().unwrap();
@@ -1012,20 +1024,32 @@ fn migrate_legacy_token(secret: &dyn SecretStore, p: &Persisted) -> bool {
     let Some(old) = p.identity.as_ref() else {
         return false;
     };
-    let key = crate::slot::token_key(&old.synth_id);
+    match move_bare_token(secret, &old.synth_id) {
+        // Moved, or no token anywhere (the old pairing was already gone).
+        Ok(_) => true,
+        // Could not move it: the bare key stays, and the link reads it from
+        // there (`legacy_token`) until a later start moves it.
+        Err(()) => false,
+    }
+}
+
+/// Move the token under the bare `TOKEN_KEY` to this synth's own key:
+/// write, read back, and only then remove the bare key. Ok(true) when the
+/// synth's key holds a token now, Ok(false) when there was none anywhere,
+/// Err when the move failed (the bare key is kept).
+fn move_bare_token(secret: &dyn SecretStore, synth_id: &str) -> Result<bool, ()> {
+    let key = crate::slot::token_key(synth_id);
     let have_new = secret.get(&key).ok().flatten().is_some_and(|t| !t.is_empty());
     if !have_new {
         let Some(token) = secret.get(TOKEN_KEY).ok().flatten().filter(|t| !t.is_empty()) else {
-            // No token anywhere: the old pairing was already gone.
-            return true;
+            return Ok(false);
         };
         if secret.set(&key, &token).is_err() || secret.get(&key).ok().flatten().as_deref() != Some(token.as_str()) {
-            // Could not move it: keep the old key for the next start.
-            return false;
+            return Err(());
         }
     }
     let _ = secret.delete(TOKEN_KEY);
-    true
+    Ok(true)
 }
 
 /// Where a daemon is and what it was started with.
@@ -1193,17 +1217,39 @@ impl Core {
         // State that survives a restart: the confirmed pairings (each only
         // while its token is still in the secret store), their durable
         // grants and this month's egress count.
+        //
+        // A token of an app before 0.1.13 that could not be moved at an
+        // earlier start (the keychain refused the write) is still under the
+        // bare key while the file is in the new shape already: with exactly
+        // one stored pairing it is that pairing's. The move is tried again;
+        // until it works, the link reads the bare key.
+        let only_one = persisted.identities.len() == 1;
         let links: Vec<Arc<LinkSlot>> = persisted
             .identities
             .iter()
-            .filter(|id| {
-                cfg.secret
+            .filter_map(|id| {
+                let own = cfg
+                    .secret
                     .get(&crate::slot::token_key(&id.synth_id))
                     .ok()
                     .flatten()
-                    .is_some_and(|t| !t.is_empty())
+                    .is_some_and(|t| !t.is_empty());
+                let slot = LinkSlot::from_identity(id);
+                if !own {
+                    if !only_one {
+                        return None;
+                    }
+                    match move_bare_token(cfg.secret.as_ref(), &id.synth_id) {
+                        Ok(true) => {}
+                        Ok(false) => return None,
+                        Err(()) => {
+                            crate::logln!("could not move the pairing token to its own key; using the old one");
+                            slot.legacy_token.store(true, Ordering::Release);
+                        }
+                    }
+                }
+                Some(Arc::new(slot))
             })
-            .map(|id| Arc::new(LinkSlot::from_identity(id)))
             .collect();
         let grants = GrantStore::new();
         for g in &persisted.grants {

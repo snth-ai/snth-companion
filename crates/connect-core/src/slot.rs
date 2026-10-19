@@ -58,6 +58,10 @@ pub struct LinkSlot {
     pub(crate) token_key: String,
     /// Not stored: the CLI's link from `--url` + `--token`.
     pub(crate) adhoc: bool,
+    /// The token of an app before 0.1.13 could not be moved to this
+    /// synth's key yet: it is read from the bare `pairing_token` key until
+    /// a move succeeds (`Core::new` retries at every start).
+    pub(crate) legacy_token: AtomicBool,
     /// What the synth said in its last hello_ack.
     pub(crate) synth: RwLock<Option<HelloAck>>,
     pub(crate) state: RwLock<LinkState>,
@@ -106,6 +110,7 @@ impl LinkSlot {
             stored_name: RwLock::new(name),
             token_key,
             adhoc,
+            legacy_token: AtomicBool::new(false),
             synth: RwLock::new(None),
             state: RwLock::new(LinkState::Connecting),
             detail: Mutex::new(String::new()),
