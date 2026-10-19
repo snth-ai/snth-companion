@@ -506,7 +506,7 @@ async fn run_command(core: &Core, line: &str) -> bool {
         "browsers" => {
             println!("BROWSERS {}", serde_json::to_string(&core.browsers()).unwrap_or_default());
         }
-        "link-browser" => match core.browser_link(rest.trim()).await {
+        "link-browser" => match core.browser_link(rest.trim(), None).await {
             Ok(()) => println!("OK link-browser"),
             Err(why) => println!("ERR link-browser {}", why.code()),
         },
@@ -515,17 +515,17 @@ async fn run_command(core: &Core, line: &str) -> bool {
             Err(why) => println!("ERR unlink-browser {why}"),
         },
         // Names and dates only: there is no command that prints a login.
-        "vault-list" => match core.vault_list().await {
+        "vault-list" => match core.vault_list(None).await {
             Ok(list) => println!("VAULT {}", serde_json::to_string(&list).unwrap_or_default()),
             Err(why) => println!("ERR vault-list {why}"),
         },
-        "vault-forget" => match core.vault_forget(rest.trim()).await {
+        "vault-forget" => match core.vault_forget(rest.trim(), None).await {
             Ok(()) => println!("OK vault-forget"),
             Err(why) => println!("ERR vault-forget {why}"),
         },
         "revoke" => {
             let (cap, scope) = rest.trim().split_once(' ').unwrap_or((rest.trim(), ""));
-            core.revoke(cap, scope.trim());
+            core.revoke(None, cap, scope.trim());
             println!("OK revoke");
         }
         "status" => {

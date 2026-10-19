@@ -73,26 +73,65 @@ pub fn normalize_code(raw: &str) -> Option<String> {
     }
 }
 
-/// Parse `snth://pair?code=XXXXXX`. Returns the normalized 6-digit code.
-/// Anything else (another scheme, another host, a missing or malformed
-/// code) is `None`.
-pub fn parse_deep_link(url: &str) -> Option<String> {
+/// What a `snth://` link asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeepLink {
+    /// `snth://pair?code=XXXXXX`: a code from the synth's bot (normalized
+    /// to six digits).
+    Pair(String),
+    /// `snth://login?code=...&state=...`: the platform's answer to the
+    /// app's sign-in. `code` is `Err(reason)` for
+    /// `snth://login?error=...&state=...` (the owner pressed Cancel).
+    Login { code: Result<String, String>, state: String },
+}
+
+/// The longest login code or state the app accepts from a link.
+const MAX_LOGIN_FIELD: usize = 256;
+
+fn query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+    query.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k == key).then_some(v)
+    })
+}
+
+/// A login code or state: url-safe characters only, bounded.
+fn login_field(v: &str) -> Option<String> {
+    let ok = !v.is_empty()
+        && v.len() <= MAX_LOGIN_FIELD
+        && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.');
+    ok.then(|| v.to_string())
+}
+
+/// Parse a `snth://` link. Anything else (another scheme, another action,
+/// a missing or malformed value) is `None`.
+pub fn parse_deep_link(url: &str) -> Option<DeepLink> {
     let rest = url.strip_prefix("snth://")?;
-    // host[/path]?query  -- we only accept the "pair" action.
-    let (head, query) = match rest.split_once('?') {
-        Some((h, q)) => (h, q),
-        None => return None,
-    };
+    // host[/path]?query
+    let (head, query) = rest.split_once('?')?;
     let action = head.split('/').next().unwrap_or("");
-    if action != "pair" {
-        return None;
-    }
-    for pair in query.split('&') {
-        if let Some(v) = pair.strip_prefix("code=") {
-            return normalize_code(v);
+    match action {
+        "pair" => normalize_code(query_value(query, "code")?).map(DeepLink::Pair),
+        "login" => {
+            let state = login_field(query_value(query, "state")?)?;
+            let code = match (query_value(query, "code"), query_value(query, "error")) {
+                (Some(c), _) => Ok(login_field(c)?),
+                (None, Some(e)) => Err(login_field(e).unwrap_or_else(|| "error".into())),
+                (None, None) => return None,
+            };
+            Some(DeepLink::Login { code, state })
         }
+        _ => None,
     }
-    None
+}
+
+/// The 6-digit code of a `snth://pair` link, for a caller that handles
+/// nothing else.
+pub fn parse_pair_link(url: &str) -> Option<String> {
+    match parse_deep_link(url)? {
+        DeepLink::Pair(code) => Some(code),
+        DeepLink::Login { .. } => None,
+    }
 }
 
 /// Claims a code against a hub. Behind a trait so tests run offline.
@@ -137,6 +176,31 @@ pub struct Pending {
     pub synth_id: String,
     pub synth_url: String,
     pub(crate) token: String,
+    /// The synth's name when the platform said it (empty from the hub).
+    pub synth_name: String,
+    /// How the token was obtained.
+    pub source: crate::settings::LinkSource,
+    /// The platform's hub id (account links), for a later re-mint.
+    pub hub_id: String,
+    /// A code redeemed through the signed-in account: did the platform
+    /// tie the synth to the account (None for a code through the hub).
+    pub linked_to_account: Option<bool>,
+    /// Why not, in the platform's words ("synth_linked_elsewhere").
+    pub reason: Option<String>,
+}
+
+/// The WebSocket endpoint of a synth url: https -> wss, http -> ws, plus
+/// the connect path.
+pub fn ws_url_of(synth_url: &str) -> String {
+    let base = synth_url.trim_end_matches('/');
+    let ws = if let Some(rest) = base.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = base.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        base.to_string()
+    };
+    format!("{ws}/api/connect/ws")
 }
 
 impl Pending {
@@ -145,21 +209,17 @@ impl Pending {
             synth_id: c.synth_id,
             synth_url: c.synth_url,
             token: c.companion_token,
+            synth_name: String::new(),
+            source: crate::settings::LinkSource::Code,
+            hub_id: String::new(),
+            linked_to_account: None,
+            reason: None,
         }
     }
 
-    /// The WebSocket endpoint derived from the synth url: https -> wss,
-    /// http -> ws, plus the connect path.
+    /// The WebSocket endpoint derived from the synth url.
     pub fn ws_url(&self) -> String {
-        let base = self.synth_url.trim_end_matches('/');
-        let ws = if let Some(rest) = base.strip_prefix("https://") {
-            format!("wss://{rest}")
-        } else if let Some(rest) = base.strip_prefix("http://") {
-            format!("ws://{rest}")
-        } else {
-            base.to_string()
-        };
-        format!("{ws}/api/connect/ws")
+        ws_url_of(&self.synth_url)
     }
 }
 
@@ -169,33 +229,40 @@ mod tests {
 
     #[test]
     fn deep_link_parsing() {
+        let pair = |u: &str| parse_pair_link(u);
+        assert_eq!(pair("snth://pair?code=123456").as_deref(), Some("123456"));
+        assert_eq!(pair("snth://pair?x=1&code=12-34-56").as_deref(), Some("123456"));
+        assert_eq!(pair("snth://pair?code=12345"), None); // too short
+        assert_eq!(pair("snth://other?code=123456"), None); // wrong action
+        assert_eq!(pair("https://evil/pair?code=123456"), None); // wrong scheme
+        assert_eq!(pair("snth://pair"), None); // no code
+    }
+
+    #[test]
+    fn login_links_carry_a_code_or_an_error_and_always_a_state() {
         assert_eq!(
-            parse_deep_link("snth://pair?code=123456").as_deref(),
-            Some("123456")
+            parse_deep_link("snth://login?code=cac_0a1b&state=Zx-_9"),
+            Some(DeepLink::Login { code: Ok("cac_0a1b".into()), state: "Zx-_9".into() })
         );
         assert_eq!(
-            parse_deep_link("snth://pair?x=1&code=12-34-56").as_deref(),
-            Some("123456")
+            parse_deep_link("snth://login?error=denied&state=abc"),
+            Some(DeepLink::Login { code: Err("denied".into()), state: "abc".into() })
         );
-        assert_eq!(parse_deep_link("snth://pair?code=12345"), None); // too short
-        assert_eq!(parse_deep_link("snth://other?code=123456"), None); // wrong action
-        assert_eq!(parse_deep_link("https://evil/pair?code=123456"), None); // wrong scheme
-        assert_eq!(parse_deep_link("snth://pair"), None); // no code
+        // No state, an empty or odd one, no code and no error: nothing.
+        assert_eq!(parse_deep_link("snth://login?code=cac_1"), None);
+        assert_eq!(parse_deep_link("snth://login?code=cac_1&state="), None);
+        assert_eq!(parse_deep_link("snth://login?code=cac_1&state=a%20b"), None);
+        assert_eq!(parse_deep_link("snth://login?state=abc"), None);
+        assert_eq!(parse_deep_link("snth://login?code=a<b&state=abc"), None);
+        let long = "a".repeat(MAX_LOGIN_FIELD + 1);
+        assert_eq!(parse_deep_link(&format!("snth://login?code={long}&state=abc")), None);
+        // A pair link is not a login and the other way round.
+        assert_eq!(parse_pair_link("snth://login?code=123456&state=abc"), None);
     }
 
     #[test]
     fn ws_url_derivation() {
-        let p = Pending {
-            synth_id: "mia".into(),
-            synth_url: "https://mia.snth.ai/".into(),
-            token: "t".into(),
-        };
-        assert_eq!(p.ws_url(), "wss://mia.snth.ai/api/connect/ws");
-        let p2 = Pending {
-            synth_id: "x".into(),
-            synth_url: "http://127.0.0.1:8080".into(),
-            token: "t".into(),
-        };
-        assert_eq!(p2.ws_url(), "ws://127.0.0.1:8080/api/connect/ws");
+        assert_eq!(ws_url_of("https://mia.snth.ai/"), "wss://mia.snth.ai/api/connect/ws");
+        assert_eq!(ws_url_of("http://127.0.0.1:8080"), "ws://127.0.0.1:8080/api/connect/ws");
     }
 }

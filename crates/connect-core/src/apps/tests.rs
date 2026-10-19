@@ -265,7 +265,7 @@ async fn ask_new_mode_asks_once_per_kind_of_change() {
     }
     assert_eq!(env.owner.asks(), act_calls().len(), "one ask per kind, then remembered");
     // A remembered yes is for that kind only.
-    let scopes: Vec<String> = env.core.grant_list().into_iter().map(|(_, s, _)| s).collect();
+    let scopes: Vec<String> = env.core.grant_list().into_iter().map(|g| g.scope).collect();
     for want in ["calendar.create", "shortcuts.run:Morning Routine", "open.url:example.com", "open.app:safari"] {
         assert!(scopes.iter().any(|s| s == want), "no grant {want} in {scopes:?}");
     }
@@ -354,7 +354,7 @@ async fn in_ask_mode_not_even_always_is_kept_for_a_message() {
     assert_eq!(env.owner.last().remember, Remember::Never);
     assert!(env.core.grant_list().is_empty());
     // And an "always" given earlier, in another mode, is not used now.
-    env.core.shared().grants().record(CAP, "messages.send:+79161234567", ALWAYS);
+    env.core.shared().grants().record("", CAP, "messages.send:+79161234567", ALWAYS);
     env.call("apps.messages.send", send("+79161234567", "three")).await.unwrap();
     assert_eq!(env.owner.asks(), 3);
 }
@@ -368,10 +368,10 @@ async fn no_blanket_grant_covers_a_message() {
         "", "*", "apps", "messages", "messages.send", "messages.send:", "messages.send:*", "messages.*",
         "task", "all", "messages.send:+7916",
     ] {
-        grants.grants().record(CAP, scope, ALWAYS);
+        grants.grants().record("", CAP, scope, ALWAYS);
     }
     for cap in ["*", "messages", "computer", "files"] {
-        grants.grants().record(cap, "messages.send:+79161234567", ALWAYS);
+        grants.grants().record("", cap, "messages.send:+79161234567", ALWAYS);
     }
     let e = env.call("apps.messages.send", send("+79161234567", "hi")).await.unwrap_err();
     assert_eq!(e, "denied: the owner did not allow it");
@@ -387,7 +387,7 @@ async fn no_blanket_grant_covers_a_message() {
     .unwrap_err();
     assert!(e.starts_with("denied: "), "{e}");
     assert_eq!(env.owner.asks(), 1, "permission.request for apps must not reach the owner");
-    assert!(!grants.grants().allows(CAP, "messages.send:+79161234567"));
+    assert!(!grants.grants().allows("", CAP, "messages.send:+79161234567"));
 }
 
 #[tokio::test]

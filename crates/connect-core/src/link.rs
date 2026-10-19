@@ -1,4 +1,6 @@
-//! One outbound link to the synth, and the reconnect loop around it.
+//! One outbound link to a synth, and the reconnect loop around it. A
+//! computer linked to several synths runs one of these per link
+//! (`LinkSlot`, slot.rs); each is independent of the others.
 //!
 //! Roles (connect.md): this app is the yamux CLIENT (odd stream ids). It
 //! opens exactly one stream, `control`, for hello / presence / settings /
@@ -21,6 +23,8 @@ use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 
 use crate::core::{LinkState, Shared};
+use crate::settings::LinkSource;
+use crate::slot::{LinkSlot, PEER};
 use crate::proto::{
     read_line, reply_refusal, write_json_line, HeaderReply, MuxStream, Refusal, StreamHeader,
     MAX_HEADER_LINE,
@@ -51,62 +55,113 @@ enum End {
     Shutdown,
     Dropped(String),
     Failed(String),
+    /// The synth refused the token (HTTP 401): not a pairing any more.
+    Refused(String),
 }
 
-/// The reconnect loop. Resolves the token and the synth url each pass;
-/// without them it idles until paired or shutdown.
+/// The reconnect loop of one link. Resolves the token and the synth url
+/// each pass; without a token it idles until one is stored or shutdown.
+///
+/// HTTP 401 from the synth means the token is no longer a pairing
+/// (connect.md: re-pair needed): the loop stops dialing. An account link
+/// first asks the platform once for a fresh token and dials again with
+/// it; otherwise (or when that fails) the link reads `needs_repair` and
+/// waits until a new token is stored (`LinkSlot::wake`), the link is
+/// removed, or the app shuts down.
 pub async fn run_forever(
     shared: Arc<Shared>,
+    slot: Arc<LinkSlot>,
     ws_url_override: Option<String>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut backoff = BACKOFF_MIN;
+    // One fresh token per refusal: a synth that refuses the fresh one too
+    // is not asked again in a loop.
+    let mut reminted = false;
     loop {
-        if *shutdown.borrow() || shared.stopping.load(Ordering::Acquire) {
+        if *shutdown.borrow() || slot.stopping() {
             break;
         }
-        let token = shared.token();
-        let url = ws_url_override.clone().or_else(|| shared.synth_ws_url());
-        let (token, url) = match (token, url) {
-            (Some(t), Some(u)) if !t.is_empty() => (t, u),
-            _ => {
-                shared.set_link_state(LinkState::Unpaired, "no pairing");
-                tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(2)) => {}
-                    _ = shutdown.changed() => {}
-                }
-                continue;
+        let url = ws_url_override.clone().unwrap_or_else(|| slot.ws_url());
+        let Some(token) = shared.token_of(&slot) else {
+            shared.set_slot_state(&slot, LinkState::Unpaired, "no pairing");
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                _ = slot.wake.notified() => {}
+                _ = shutdown.changed() => {}
             }
+            continue;
         };
-        shared.set_link_state(LinkState::Connecting, "dialing");
-        match run_one(&shared, &url, &token, &mut shutdown).await {
+        shared.set_slot_state(&slot, LinkState::Connecting, "dialing");
+        match run_one(&shared, &slot, &url, &token, &mut shutdown).await {
             End::Shutdown => break,
             End::Dropped(why) => {
-                logln!("link dropped: {why}");
-                shared.set_link_state(LinkState::Reconnecting, &why);
+                logln!("link {}: dropped: {why}", slot.synth_id);
+                shared.set_slot_state(&slot, LinkState::Reconnecting, &why);
                 backoff = BACKOFF_MIN;
+                reminted = false;
             }
             End::Failed(why) => {
-                logln!("link failed: {why}");
-                shared.set_link_state(LinkState::Reconnecting, &why);
+                logln!("link {}: failed: {why}", slot.synth_id);
+                shared.set_slot_state(&slot, LinkState::Reconnecting, &why);
+            }
+            End::Refused(why) => {
+                logln!("link {}: {why}", slot.synth_id);
+                if slot.stopping() {
+                    break;
+                }
+                if slot.source() == LinkSource::Account && !reminted {
+                    reminted = true;
+                    match crate::account::remint(&shared, &slot).await {
+                        Ok(()) => {
+                            logln!("link {}: a fresh token came through the account", slot.synth_id);
+                            backoff = BACKOFF_MIN;
+                            continue;
+                        }
+                        Err(e) => logln!("link {}: no fresh token through the account: {e}", slot.synth_id),
+                    }
+                }
+                shared.set_slot_state(&slot, LinkState::NeedsRepair, &why);
+                // Until there is a new token (or the link goes): no
+                // dialing. A wake with the refused token still in place
+                // (left over from an earlier change) is not a new token.
+                loop {
+                    tokio::select! {
+                        _ = slot.wake.notified() => {}
+                        _ = shutdown.changed() => break,
+                    }
+                    if slot.stopping() || *shutdown.borrow() || shared.token_of(&slot).as_deref() != Some(token.as_str()) {
+                        break;
+                    }
+                }
+                // The token that woke us is a fresh one already (a new
+                // code, or the owner's "connect again"): if the synth
+                // refuses it too, the link waits again without asking.
+                reminted = true;
+                backoff = BACKOFF_MIN;
+                continue;
             }
         }
-        if shared.stopping.load(Ordering::Acquire) {
+        if slot.stopping() {
             break;
         }
         let wait = jitter(backoff);
-        logln!("reconnecting in {:.1} s", wait.as_secs_f64());
+        logln!("link {}: reconnecting in {:.1} s", slot.synth_id, wait.as_secs_f64());
         tokio::select! {
             _ = tokio::time::sleep(wait) => {}
+            _ = slot.wake.notified() => {}
             _ = shutdown.changed() => break,
         }
         backoff = (backoff * 2).min(BACKOFF_MAX);
     }
-    shared.set_link_state(LinkState::Unpaired, "stopped");
+    if slot.stopping() || *shutdown.borrow() {
+        shared.set_slot_state(&slot, LinkState::Unpaired, "stopped");
+    }
 }
 
 async fn run_one(
     shared: &Arc<Shared>,
+    slot: &Arc<LinkSlot>,
     url: &str,
     token: &str,
     shutdown: &mut watch::Receiver<bool>,
@@ -130,10 +185,10 @@ async fn run_one(
         Ok(Err(WsError::Http(resp))) => {
             let code = resp.status();
             if code == 401 {
-                // The token is not a pairing: stop redialing this pass and
-                // let the owner re-pair. We keep the token (the UI decides
-                // to wipe) but report it.
-                return End::Failed(format!("synth refused: HTTP {code} (re-pair needed)"));
+                // The token is not a pairing: stop redialing (connect.md)
+                // and let the owner re-pair. The token is kept until a new
+                // one replaces it or the owner unlinks.
+                return End::Refused(format!("synth refused: HTTP {code} (re-pair needed)"));
             }
             return End::Failed(format!("synth refused: HTTP {code}"));
         }
@@ -156,6 +211,7 @@ async fn run_one(
     let mut control_task = tokio::spawn(control_loop(
         BufReader::new(control.compat()),
         shared.clone(),
+        slot.clone(),
         established.clone(),
     ));
 
@@ -166,7 +222,10 @@ async fn run_one(
             inbound = poll_fn(|cx| conn.poll_next_inbound(cx)) => match inbound {
                 Some(Ok(stream)) => {
                     let sh = shared.clone();
-                    streams.spawn(async move { serve_stream(stream, sh).await });
+                    // Everything this stream does is this synth's (grants,
+                    // the journal, the approval window, computer control).
+                    let peer = slot.clone();
+                    streams.spawn(PEER.scope(peer, async move { serve_stream(stream, sh).await }));
                 }
                 Some(Err(e)) => break Some(format!("link error: {e}")),
                 None => break Some("closed by the synth".into()),
@@ -207,7 +266,7 @@ async fn run_one(
 
 /// Ends the app's requests to the synth when the control stream ends,
 /// however it ends (a dropped link, a shutdown, an aborted task).
-struct RequestsAttached(Arc<Shared>, u64);
+struct RequestsAttached(Arc<LinkSlot>, u64);
 
 impl Drop for RequestsAttached {
     fn drop(&mut self) {
@@ -217,9 +276,9 @@ impl Drop for RequestsAttached {
 
 /// hello, then presence / settings / unpair / requests until the link
 /// drops.
-async fn control_loop(mut s: MuxStream, shared: Arc<Shared>, established: Arc<AtomicBool>) -> String {
-    let (mut requests_rx, generation) = shared.requests.attach();
-    let _requests = RequestsAttached(shared.clone(), generation);
+async fn control_loop(mut s: MuxStream, shared: Arc<Shared>, slot: Arc<LinkSlot>, established: Arc<AtomicBool>) -> String {
+    let (mut requests_rx, generation) = slot.requests.attach();
+    let _requests = RequestsAttached(slot.clone(), generation);
     if let Err(e) = write_json_line(&mut s, &json!({"kind": "control"})).await {
         return format!("send header: {e}");
     }
@@ -257,6 +316,7 @@ async fn control_loop(mut s: MuxStream, shared: Arc<Shared>, established: Arc<At
     let mut rd = BufReader::new(rd);
 
     let shared_r = shared.clone();
+    let slot_r = slot.clone();
     let est = established.clone();
     let reader = async move {
         loop {
@@ -267,18 +327,19 @@ async fn control_loop(mut s: MuxStream, shared: Arc<Shared>, established: Arc<At
                         Some("hello_ack") => {
                             let ack: wire::HelloAck =
                                 serde_json::from_slice(&line).unwrap_or_default();
-                            shared_r.requests.set_supported(ack.has(crate::requests::FEATURE));
-                            shared_r.set_synth(ack.clone());
-                            shared_r.set_link_state(
+                            slot_r.requests.set_supported(ack.has(crate::requests::FEATURE));
+                            shared_r.set_synth(&slot_r, ack.clone());
+                            shared_r.set_slot_state(
+                                &slot_r,
                                 LinkState::Linked,
                                 &format!("linked to {}", ack.synth_name),
                             );
                             est.store(true, Ordering::Release);
-                            logln!("linked as device {}", shared_r.device_id());
+                            logln!("linked to {} as device {}", slot_r.display_name(), shared_r.device_id());
                         }
-                        Some("response") => shared_r.requests.resolve(&msg),
+                        Some("response") => slot_r.requests.resolve(&msg),
                         Some("unpair_ack") => {
-                            shared_r.unpair_ack.notify_one();
+                            slot_r.unpair_ack.notify_one();
                             return "unpaired (ack)".to_string();
                         }
                         Some("error") => {
@@ -297,6 +358,7 @@ async fn control_loop(mut s: MuxStream, shared: Arc<Shared>, established: Arc<At
     let mut settings_rx = shared.settings_tx.subscribe();
     let mut control_rx = shared.control_tx.subscribe();
     let shared_w = shared.clone();
+    let slot_w = slot.clone();
     let writer = async move {
         let mut tick = tokio::time::interval(PRESENCE_EVERY);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -330,7 +392,7 @@ async fn control_loop(mut s: MuxStream, shared: Arc<Shared>, established: Arc<At
                         return format!("send presence: {e}");
                     }
                 }
-                _ = shared_w.unpair_req.notified() => {
+                _ = slot_w.unpair_req.notified() => {
                     if let Err(e) = write_json_line(&mut wr, &json!({"type":"unpair"})).await {
                         return format!("send unpair: {e}");
                     }

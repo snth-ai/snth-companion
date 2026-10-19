@@ -126,6 +126,10 @@ pub struct ApprovalRequest {
     pub details: Vec<(String, String)>,
     /// What the owner may ask the app to remember for this ask.
     pub remember: Remember,
+    /// The synth that asks (its display name), when the ask comes over a
+    /// link. The core fills it in (`Shared::ask_scoped`); None for an ask
+    /// that comes from the owner's own browser.
+    pub synth: Option<String>,
 }
 
 impl ApprovalRequest {
@@ -142,6 +146,7 @@ impl ApprovalRequest {
             summary: summary.into(),
             details: Vec::new(),
             remember: Remember::Any,
+            synth: None,
         }
     }
 
@@ -187,6 +192,9 @@ pub trait Approver: Send + Sync {
 /// One remembered grant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Grant {
+    /// The synth it was given to ("" when no synth was known: a test, the
+    /// CLI before its first link).
+    synth: String,
     capability: String,
     scope: String,
     /// None = session (dropped on restart); Some(0) = forever;
@@ -194,9 +202,20 @@ struct Grant {
     until: Option<i64>,
 }
 
-/// In-memory store of session, until-time and always grants. The caller
-/// persists the "always" ones through settings (e.g. net domains) where
-/// that makes sense; this store is the fast path checked per request.
+/// One live grant, for the UI and for writing to disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantRow {
+    pub synth_id: String,
+    pub capability: String,
+    pub scope: String,
+    /// 0 = forever, -1 = session, else the unix second it ends.
+    pub until: i64,
+}
+
+/// In-memory store of session, until-time and always grants, per synth:
+/// an answer the owner gave one synth is never an answer to another. The
+/// caller persists the durable ones; this store is the fast path checked
+/// per request.
 #[derive(Default)]
 pub struct GrantStore {
     grants: Mutex<Vec<Grant>>,
@@ -207,8 +226,9 @@ impl GrantStore {
         GrantStore::default()
     }
 
-    /// Record an approval for (capability, scope). `Once` records nothing.
-    pub fn record(&self, capability: &str, scope: &str, approval: Approval) {
+    /// Record an approval for (synth, capability, scope). `Once` records
+    /// nothing.
+    pub fn record(&self, synth: &str, capability: &str, scope: &str, approval: Approval) {
         if !approval.allow {
             return;
         }
@@ -219,16 +239,17 @@ impl GrantStore {
             Duration_::Until(t) => Some(t),
         };
         let mut g = self.grants.lock().unwrap();
-        g.retain(|x| !(x.capability == capability && x.scope == scope));
+        g.retain(|x| !(x.synth == synth && x.capability == capability && x.scope == scope));
         g.push(Grant {
+            synth: synth.to_string(),
             capability: capability.to_string(),
             scope: scope.to_string(),
             until,
         });
     }
 
-    /// Is there a live grant for (capability, scope) right now?
-    pub fn allows(&self, capability: &str, scope: &str) -> bool {
+    /// Is there a live grant for (synth, capability, scope) right now?
+    pub fn allows(&self, synth: &str, capability: &str, scope: &str) -> bool {
         let now = now_unix();
         let mut g = self.grants.lock().unwrap();
         g.retain(|x| match x.until {
@@ -236,7 +257,8 @@ impl GrantStore {
             Some(t) => t > now,
         });
         g.iter().any(|x| {
-            x.capability == capability
+            x.synth == synth
+                && x.capability == capability
                 && x.scope == scope
                 && match x.until {
                     Some(0) | None => true,
@@ -246,34 +268,47 @@ impl GrantStore {
     }
 
     /// Drop a grant (the owner revoked it in the UI).
-    pub fn revoke(&self, capability: &str, scope: &str) {
+    pub fn revoke(&self, synth: &str, capability: &str, scope: &str) {
+        let mut g = self.grants.lock().unwrap();
+        g.retain(|x| !(x.synth == synth && x.capability == capability && x.scope == scope));
+    }
+
+    /// Drop a grant whatever synth it was given to (a site taken back
+    /// everywhere).
+    pub fn revoke_everywhere(&self, capability: &str, scope: &str) {
         let mut g = self.grants.lock().unwrap();
         g.retain(|x| !(x.capability == capability && x.scope == scope));
     }
 
     /// Put back a grant read from disk at startup (`until`: 0 = forever,
     /// otherwise the unix second it ends). An expired one is skipped.
-    pub fn restore(&self, capability: &str, scope: &str, until: i64) {
+    pub fn restore(&self, synth: &str, capability: &str, scope: &str, until: i64) {
         if until != 0 && until <= now_unix() {
             return;
         }
         let mut g = self.grants.lock().unwrap();
-        g.retain(|x| !(x.capability == capability && x.scope == scope));
+        g.retain(|x| !(x.synth == synth && x.capability == capability && x.scope == scope));
         g.push(Grant {
+            synth: synth.to_string(),
             capability: capability.to_string(),
             scope: scope.to_string(),
             until: Some(until),
         });
     }
 
-    /// Forget everything (unpair).
+    /// Forget everything (the computer is unlinked from every synth).
     pub fn clear(&self) {
         self.grants.lock().unwrap().clear();
     }
 
-    /// Snapshot for the UI / status: (capability, scope, until_unix) where
-    /// until_unix 0 = forever, -1 = session.
-    pub fn list(&self) -> Vec<(String, String, i64)> {
+    /// Forget every grant of one synth (it was unlinked); the others keep
+    /// theirs.
+    pub fn clear_synth(&self, synth: &str) {
+        self.grants.lock().unwrap().retain(|x| x.synth != synth);
+    }
+
+    /// Snapshot for the UI / status.
+    pub fn list(&self) -> Vec<GrantRow> {
         let now = now_unix();
         let g = self.grants.lock().unwrap();
         g.iter()
@@ -281,9 +316,11 @@ impl GrantStore {
                 Some(0) | None => true,
                 Some(t) => t > now,
             })
-            .map(|x| {
-                let u = x.until.unwrap_or(-1);
-                (x.capability.clone(), x.scope.clone(), u)
+            .map(|x| GrantRow {
+                synth_id: x.synth.clone(),
+                capability: x.capability.clone(),
+                scope: x.scope.clone(),
+                until: x.until.unwrap_or(-1),
             })
             .collect()
     }
@@ -328,15 +365,16 @@ mod tests {
     #[test]
     fn once_records_nothing() {
         let s = GrantStore::new();
-        s.record("net", "example.com", Approval::once());
-        assert!(!s.allows("net", "example.com"));
+        s.record("mia", "net", "example.com", Approval::once());
+        assert!(!s.allows("mia", "net", "example.com"));
     }
 
     #[test]
     fn always_and_session_are_remembered() {
         let s = GrantStore::new();
-        s.record("net", "a.com", Approval::always());
+        s.record("mia", "net", "a.com", Approval::always());
         s.record(
+            "mia",
             "cookies",
             "b.com",
             Approval {
@@ -344,15 +382,18 @@ mod tests {
                 duration: Duration_::Session,
             },
         );
-        assert!(s.allows("net", "a.com"));
-        assert!(s.allows("cookies", "b.com"));
-        assert!(!s.allows("net", "other.com"));
+        assert!(s.allows("mia", "net", "a.com"));
+        assert!(s.allows("mia", "cookies", "b.com"));
+        assert!(!s.allows("mia", "net", "other.com"));
+        // An answer given to one synth is not an answer to another.
+        assert!(!s.allows("maya", "net", "a.com"));
     }
 
     #[test]
     fn until_time_expires() {
         let s = GrantStore::new();
         s.record(
+            "mia",
             "files",
             "/x",
             Approval {
@@ -360,8 +401,9 @@ mod tests {
                 duration: Duration_::Until(now_unix() - 1),
             },
         );
-        assert!(!s.allows("files", "/x"));
+        assert!(!s.allows("mia", "files", "/x"));
         s.record(
+            "mia",
             "files",
             "/y",
             Approval {
@@ -369,30 +411,35 @@ mod tests {
                 duration: Duration_::Until(now_unix() + 100),
             },
         );
-        assert!(s.allows("files", "/y"));
+        assert!(s.allows("mia", "files", "/y"));
     }
 
     #[test]
     fn restore_skips_expired() {
         let s = GrantStore::new();
-        s.restore("cookies", "a.com", 0);
-        s.restore("cookies", "b.com", now_unix() + 100);
-        s.restore("cookies", "c.com", now_unix() - 100);
-        assert!(s.allows("cookies", "a.com"));
-        assert!(s.allows("cookies", "b.com"));
-        assert!(!s.allows("cookies", "c.com"));
+        s.restore("mia", "cookies", "a.com", 0);
+        s.restore("mia", "cookies", "b.com", now_unix() + 100);
+        s.restore("mia", "cookies", "c.com", now_unix() - 100);
+        assert!(s.allows("mia", "cookies", "a.com"));
+        assert!(s.allows("mia", "cookies", "b.com"));
+        assert!(!s.allows("mia", "cookies", "c.com"));
         assert_eq!(s.list().len(), 2);
     }
 
     #[test]
     fn revoke_and_clear() {
         let s = GrantStore::new();
-        s.record("net", "a.com", Approval::always());
-        s.record("net", "b.com", Approval::always());
-        s.revoke("net", "a.com");
-        assert!(!s.allows("net", "a.com"));
-        assert!(s.allows("net", "b.com"));
+        s.record("mia", "net", "a.com", Approval::always());
+        s.record("mia", "net", "b.com", Approval::always());
+        s.record("maya", "net", "a.com", Approval::always());
+        s.revoke("mia", "net", "a.com");
+        assert!(!s.allows("mia", "net", "a.com"));
+        assert!(s.allows("maya", "net", "a.com"), "revoking for one synth leaves the other");
+        assert!(s.allows("mia", "net", "b.com"));
+        s.clear_synth("mia");
+        assert!(!s.allows("mia", "net", "b.com"));
+        assert!(s.allows("maya", "net", "a.com"));
         s.clear();
-        assert!(!s.allows("net", "b.com"));
+        assert!(!s.allows("maya", "net", "a.com"));
     }
 }

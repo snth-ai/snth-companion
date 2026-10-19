@@ -73,71 +73,89 @@ fn hub_for(override_url: Option<String>) -> Result<String, String> {
     }
 }
 
-/// Ask the hub who a 6-digit code belongs to. Nothing is stored and no
-/// link is opened: the answer is held in memory until `pair_confirm`.
+/// Ask who a 6-digit code belongs to: the hub, or (signed in) the
+/// platform, which also ties the synth to the account. Nothing is stored
+/// and no link is opened: the answer is held in memory until
+/// `pair_confirm`. A code for a synth this computer is linked to already
+/// replaces that link's token on confirm (a link the synth refused).
 #[tauri::command]
 pub async fn pair_begin(
     ctx: Cx<'_>,
     code: String,
     hub_url: Option<String>,
 ) -> Result<PendingDto, String> {
-    if ctx.core.is_paired() {
-        return Err("already_linked".into());
-    }
     let code = normalize_code(&code).ok_or("bad_code")?;
     let hub = hub_for(hub_url)?;
     match ctx.core.pair_begin(hub, code).await {
-        Ok(p) => Ok(PendingDto { synth_id: p.synth_id, synth_url: p.synth_url }),
-        Err(e) => {
-            let code = if e.contains("not found") {
-                "code_not_found"
-            } else if e.contains("expired") {
-                "code_expired"
-            } else if e.contains("six digits") {
-                "bad_code"
-            } else if e.contains("could not reach hub") {
-                "hub_unreachable"
-            } else {
-                "hub_error"
-            };
-            Err(format!("{code}: {e}"))
-        }
+        Ok(p) => Ok(PendingDto::of(p)),
+        Err(e) => Err(pair_error(&e)),
     }
 }
 
+/// The UI's code for a failed claim, then the detail.
+fn pair_error(e: &str) -> String {
+    // The account's path says its code itself.
+    const OWN: [&str; 9] = [
+        "code_not_found",
+        "code_expired",
+        "bad_code",
+        "rate_limited",
+        "signed_out",
+        "platform_unreachable",
+        "platform_error",
+        "platform_unavailable",
+        "conflict",
+    ];
+    if let Some((code, _)) = e.split_once(':') {
+        if OWN.contains(&code) {
+            return e.to_string();
+        }
+    }
+    let code = if e.contains("not found") {
+        "code_not_found"
+    } else if e.contains("expired") {
+        "code_expired"
+    } else if e.contains("six digits") {
+        "bad_code"
+    } else if e.contains("could not reach hub") {
+        "hub_unreachable"
+    } else {
+        "hub_error"
+    };
+    format!("{code}: {e}")
+}
+
 /// The owner saw the synth's identity and clicked Connect. Only now is the
-/// token stored and the link allowed. Every capability starts off, and the
-/// core is held paused until onboarding is finished (`finish_onboarding`),
-/// so nothing the owner picks halfway through takes effect early.
+/// token stored and the link allowed. For the computer's FIRST link every
+/// capability starts off, and the core is held paused until onboarding is
+/// finished (`finish_onboarding`), so nothing the owner picks halfway
+/// through takes effect early. A second link changes no setting.
 #[tauri::command]
 pub async fn pair_confirm(ctx: Cx<'_>) -> Result<UiState, String> {
+    let first = !ctx.core.is_paired();
     ctx.core.pair_confirm()?;
+    if first {
+        begin_onboarding(&ctx).await;
+    }
+    ctx.relink.notify_one();
+    tray::refresh(&ctx);
+    Ok(build_state(&ctx).await)
+}
+
+/// The computer's first link was just made: everything off, paused, and
+/// the onboarding steps (preset, folders, computer) shown once.
+pub async fn begin_onboarding(ctx: &Ctx) {
     ctx.core.mutate_settings(|s| *s = Settings::default());
     ctx.update_prefs(|p| {
         p.onboarded = false;
         p.paused = false;
     });
     ctx.core.pause().await;
-    ctx.relink.notify_one();
-    tray::refresh(&ctx);
-    Ok(build_state(&ctx).await)
 }
 
-#[tauri::command]
-pub fn pair_cancel(ctx: Cx<'_>) {
-    ctx.core.pair_cancel();
-}
-
-/// Unlink this computer: tell the synth, erase the token and every
-/// remembered permission, turn every capability off. The activity journal
-/// stays on this computer.
-#[tauri::command]
-pub async fn unpair(ctx: Cx<'_>) -> Result<UiState, String> {
-    for id in ctx.approvals.deny_all() {
-        ui::emit(&ctx.app, UiEvent::ApprovalClosed { id });
-    }
-    windows::hide_approval(&ctx.app);
-    ctx.core.unpair().await;
+/// The computer's last link is gone: everything off, onboarding again at
+/// the next link. The activity journal stays.
+pub fn after_last_link(ctx: &Ctx) {
     ctx.core.mutate_settings(|s| *s = Settings::default());
     if ctx.core.link_brief().paused {
         ctx.core.resume();
@@ -146,7 +164,105 @@ pub async fn unpair(ctx: Cx<'_>) -> Result<UiState, String> {
         p.onboarded = false;
         p.paused = false;
     });
-    *ctx.link_detail.lock().unwrap() = (None, String::new());
+    ctx.link_detail.lock().unwrap().clear();
+}
+
+#[tauri::command]
+pub fn pair_cancel(ctx: Cx<'_>) {
+    ctx.core.pair_cancel();
+}
+
+/// Unlink this computer from every synth: tell each one, erase the tokens
+/// and every remembered permission, turn every capability off. The
+/// activity journal stays on this computer. A platform sign-in stays (the
+/// owner signs out separately).
+#[tauri::command]
+pub async fn unpair(ctx: Cx<'_>) -> Result<UiState, String> {
+    for id in ctx.approvals.deny_all() {
+        ui::emit(&ctx.app, UiEvent::ApprovalClosed { id });
+    }
+    windows::hide_approval(&ctx.app);
+    for id in ctx.core.link_ids() {
+        ctx.core.account_skip(&id);
+    }
+    ctx.core.unpair().await;
+    after_last_link(&ctx);
+    tray::refresh(&ctx);
+    Ok(build_state(&ctx).await)
+}
+
+/// "Disconnect from this synth": that synth's token, grants and browsers
+/// go; the other links and the settings stay. An account synth is left
+/// alone by the sync from now on, until the owner connects it again.
+#[tauri::command]
+pub async fn unpair_synth(ctx: Cx<'_>, synth_id: String) -> Result<UiState, String> {
+    if !ctx.core.link_ids().contains(&synth_id) {
+        return Err("unknown_synth".into());
+    }
+    ctx.core.account_skip(&synth_id);
+    ctx.core.unpair_synth(&synth_id).await;
+    if ctx.core.link_ids().is_empty() {
+        for id in ctx.approvals.deny_all() {
+            ui::emit(&ctx.app, UiEvent::ApprovalClosed { id });
+        }
+        windows::hide_approval(&ctx.app);
+        after_last_link(&ctx);
+    }
+    tray::refresh(&ctx);
+    Ok(build_state(&ctx).await)
+}
+
+/// "Connect again" for a link the synth refused: an account link gets a
+/// fresh token; a code link answers `needs_code` (a new code from the bot,
+/// through `pair_begin` + `pair_confirm`, replaces its token).
+#[tauri::command]
+pub async fn reconnect_synth(ctx: Cx<'_>, synth_id: String) -> Result<UiState, String> {
+    ctx.core.reconnect_synth(&synth_id).await?;
+    Ok(build_state(&ctx).await)
+}
+
+// --- the platform account ---
+
+/// Forget a sign-in that was started in the browser.
+#[tauri::command]
+pub async fn login_cancel(ctx: Cx<'_>) -> Result<UiState, String> {
+    ctx.core.login_cancel();
+    Ok(build_state(&ctx).await)
+}
+
+/// The owner confirmed: link this computer to every synth of the account.
+/// The first link of the computer starts the onboarding steps.
+#[tauri::command]
+pub async fn account_connect(ctx: Cx<'_>) -> Result<UiState, String> {
+    let first = !ctx.core.is_paired();
+    let report = ctx.core.account_connect().await?;
+    if first && report.first_link {
+        begin_onboarding(&ctx).await;
+    }
+    ctx.relink.notify_one();
+    tray::refresh(&ctx);
+    Ok(build_state(&ctx).await)
+}
+
+/// Read the account's synths again ("Check again").
+#[tauri::command]
+pub async fn account_sync(ctx: Cx<'_>) -> Result<UiState, String> {
+    crate::account::sync_now(&ctx).await;
+    Ok(build_state(&ctx).await)
+}
+
+/// Sign out of the account: the platform forgets this computer, every
+/// link made through the account goes. Links made with a code stay.
+#[tauri::command]
+pub async fn sign_out(ctx: Cx<'_>) -> Result<UiState, String> {
+    ctx.core.sign_out().await;
+    if ctx.core.link_ids().is_empty() {
+        for id in ctx.approvals.deny_all() {
+            ui::emit(&ctx.app, UiEvent::ApprovalClosed { id });
+        }
+        windows::hide_approval(&ctx.app);
+        after_last_link(&ctx);
+    }
     tray::refresh(&ctx);
     Ok(build_state(&ctx).await)
 }
@@ -353,8 +469,13 @@ pub async fn set_root_write(ctx: Cx<'_>, path: String, write: bool) -> Result<Ui
 }
 
 #[tauri::command]
-pub async fn revoke_grant(ctx: Cx<'_>, capability: String, scope: String) -> Result<UiState, String> {
-    ctx.core.revoke(&capability, &scope);
+pub async fn revoke_grant(
+    ctx: Cx<'_>,
+    capability: String,
+    scope: String,
+    synth_id: Option<String>,
+) -> Result<UiState, String> {
+    ctx.core.revoke(synth_id.as_deref(), &capability, &scope);
     Ok(build_state(&ctx).await)
 }
 
@@ -589,15 +710,21 @@ pub async fn apps_request_permission(ctx: Cx<'_>, app: String) -> Result<(), Str
 /// Ask the synth which sites its vault holds a login for (names and
 /// dates only; there is no request that returns a login).
 #[tauri::command]
-pub async fn logins_refresh(ctx: Cx<'_>) -> Result<UiState, String> {
+pub async fn logins_refresh(ctx: Cx<'_>, synth_id: Option<String>) -> Result<UiState, String> {
     ask_safari(&ctx).await;
-    if ctx.core.is_paired() {
-        match ctx.core.vault_list().await {
-            Ok(list) => ctx.vault.ready(list),
-            Err(e) => ctx.vault.set(logins::vault_failure(&e)),
-        }
-    } else {
-        ctx.vault.set(logins::VaultView::Unknown);
+    let ids = ctx.core.link_ids();
+    // Whose vault: the synth asked for, else the one shown last, else the
+    // first link.
+    let synth = synth_id
+        .filter(|id| ids.contains(id))
+        .or_else(|| ctx.vault.synth().filter(|id| ids.contains(id)))
+        .or_else(|| ids.first().cloned());
+    match synth {
+        Some(id) => match ctx.core.vault_list(Some(&id)).await {
+            Ok(list) => ctx.vault.ready(Some(id), list),
+            Err(e) => ctx.vault.set_for(Some(id), logins::vault_failure(&e)),
+        },
+        None => ctx.vault.set_for(None, logins::VaultView::Unknown),
     }
     Ok(build_state(&ctx).await)
 }
@@ -624,8 +751,9 @@ pub async fn safari_check(ctx: Cx<'_>) -> Result<UiState, String> {
 
 /// Remove one saved login from the synth's vault.
 #[tauri::command]
-pub async fn vault_forget(ctx: Cx<'_>, site: String) -> Result<UiState, String> {
-    ctx.core.vault_forget(&site).await.map_err(|e| format!("vault_failed: {e}"))?;
+pub async fn vault_forget(ctx: Cx<'_>, site: String, synth_id: Option<String>) -> Result<UiState, String> {
+    let synth = synth_id.or_else(|| ctx.vault.synth());
+    ctx.core.vault_forget(&site, synth.as_deref()).await.map_err(|e| format!("vault_failed: {e}"))?;
     ctx.vault.drop_site(&site.trim().to_ascii_lowercase());
     Ok(build_state(&ctx).await)
 }
@@ -634,8 +762,8 @@ pub async fn vault_forget(ctx: Cx<'_>, site: String) -> Result<UiState, String> 
 /// app gets a pairing code from the synth and hands it to that browser's
 /// extension, which redeems it at the hub.
 #[tauri::command]
-pub async fn browser_link(ctx: Cx<'_>, install: String) -> Result<UiState, String> {
-    ctx.core.browser_link(&install).await.map_err(|why| why.code().to_string())?;
+pub async fn browser_link(ctx: Cx<'_>, install: String, synth_id: Option<String>) -> Result<UiState, String> {
+    ctx.core.browser_link(&install, synth_id.as_deref()).await.map_err(|why| why.code().to_string())?;
     Ok(build_state(&ctx).await)
 }
 
@@ -771,9 +899,13 @@ pub async fn diagnostics(ctx: Cx<'_>) -> Result<String, String> {
         format!("updates: configured {}, automatic {}, blocked {:?}, state {:?}",
             st.update.configured, st.update.auto, st.update.blocked, st.update.phase),
         String::new(),
-        format!("linked: {} (state {:?}, paused {})", c.paired, c.link_state, c.paused),
+        format!("linked: {} (state {:?}, paused {}, {} link(s))", c.paired, c.link_state, c.paused, c.links.len()),
         format!("link detail: {}", if st.link_detail.is_empty() { "-" } else { &st.link_detail }),
         format!("synth: {} at {} (version {})", c.synth_id.as_deref().unwrap_or("-"), host, c.synth_version.as_deref().unwrap_or("-")),
+        format!("links: {}", if c.links.is_empty() { "-".to_string() } else {
+            c.links.iter().map(|l| format!("{} ({:?}, {:?}, version {})", l.synth_id, l.state, l.source, l.synth_version.as_deref().unwrap_or("-"))).collect::<Vec<_>>().join(", ")
+        }),
+        format!("account: {}", if st.account.signed_in { format!("signed in ({} synths listed)", st.account.synths.as_ref().map_or(0, |s| s.len())) } else { "signed out".to_string() }),
         format!("settings revision: {}, preset {:?}", c.settings_rev, s.preset),
         String::new(),
         format!("internet: {} (mode {:?}, {} listed sites, local network {}, limit {} bytes, skip metered {})",
@@ -862,6 +994,13 @@ pub fn open_external(ctx: Cx<'_>, target: String) -> Result<(), String> {
         }
         return run_detached(vec!["/usr/bin/open".into(), "-a".into(), "Safari".into()]);
     }
+    // The platform's sign-in page: Rust builds the address (a fresh state
+    // and PKCE challenge, or the waiting sign-in's again).
+    if target == "platform_login" {
+        let url = ctx.core.login_url().map_err(|e| format!("login_failed: {e}"))?;
+        crate::state::emit_state(&ctx);
+        return run_detached(open_argv(&url));
+    }
     let extension = logins::extension_url(HUB_URL);
     let url = match target.as_str() {
         "privacy_accessibility" => {
@@ -882,13 +1021,18 @@ pub fn open_external(ctx: Cx<'_>, target: String) -> Result<(), String> {
         "releases" => "https://github.com/snth-ai/snth-companion/releases/latest",
         _ => return Err("unknown_target".into()),
     };
+    run_detached(open_argv(url))
+}
+
+/// The system's way to open an address in the default browser.
+fn open_argv(url: &str) -> Vec<String> {
     #[cfg(target_os = "macos")]
     let argv: Vec<String> = vec!["/usr/bin/open".into(), url.into()];
     #[cfg(all(unix, not(target_os = "macos")))]
     let argv: Vec<String> = vec!["xdg-open".into(), url.into()];
     #[cfg(windows)]
     let argv: Vec<String> = vec!["explorer.exe".into(), url.into()];
-    run_detached(argv)
+    argv
 }
 
 #[cfg(test)]
@@ -962,6 +1106,15 @@ mod tests {
         let mut next = s.clone();
         shell_needs_developer(&mut next, true);
         assert!(next.shell.enabled);
+    }
+
+    #[test]
+    fn a_failed_claim_reads_as_one_code() {
+        assert!(pair_error("code not found (already used or never existed); ask for a fresh one").starts_with("code_not_found: "));
+        assert!(pair_error("could not reach hub: dns").starts_with("hub_unreachable: "));
+        assert_eq!(pair_error("rate_limited: platform returned 429: rate_limited"), "rate_limited: platform returned 429: rate_limited");
+        assert!(pair_error("signed_out: not signed in").starts_with("signed_out: "));
+        assert!(pair_error("something odd").starts_with("hub_error: "));
     }
 
     #[test]

@@ -59,6 +59,8 @@ pub struct ApprovalDto {
     pub remember: &'static str,
     pub asked_at_ms: u64,
     pub expires_at_ms: u64,
+    /// The synth that asks (its name), when a synth asks.
+    pub synth: Option<String>,
 }
 
 struct Pending {
@@ -106,6 +108,7 @@ impl Approvals {
                 })
                 .collect(),
             remember: req.remember.label(),
+            synth: req.synth.map(|n| sanitize_reason(&n)).filter(|n| !n.is_empty()),
             asked_at_ms: now,
             expires_at_ms: now + APPROVAL_TIMEOUT.as_millis() as u64,
         };

@@ -47,6 +47,11 @@ pub struct Entry {
     /// A command line: how long it ran, in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    /// The synth the line is about (its display name), when it came over a
+    /// link. Filled in by `Journal::record` from the stream's link; None
+    /// for the app's own lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synth: Option<String>,
 }
 
 impl Entry {
@@ -70,6 +75,7 @@ impl Entry {
             cwd: None,
             exit_code: None,
             duration_ms: None,
+            synth: None,
         }
     }
 
@@ -123,7 +129,11 @@ impl Journal {
 
     /// Append one entry everywhere. Never fails the caller: a file error
     /// is swallowed (the journal is a record, not a gate).
-    pub fn record(&self, e: Entry) {
+    pub fn record(&self, mut e: Entry) {
+        // Work done for a synth over its link says which synth it was.
+        if e.synth.is_none() {
+            e.synth = crate::slot::current().map(|slot| slot.display_name());
+        }
         {
             let mut inner = self.inner.lock().unwrap();
             if inner.ring.len() == RING_CAP {

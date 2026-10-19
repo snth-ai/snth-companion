@@ -303,7 +303,7 @@ async fn open_gate(shared: &Arc<Shared>, hdr: &StreamHeader) -> Result<(), Refus
             }
         }
         ComputerMode::Ask => {
-            if shared.grants().allows("computer", "task") {
+            if shared.grant_allows("computer", "task") {
                 return Ok(());
             }
             let req = ApprovalRequest::new(
@@ -428,10 +428,27 @@ pub async fn filter_scoped(
         ));
     }
 
+    // One synth drives at a time. While another synth's actions are
+    // recent, this one may look but not act (`cua_apps::LOOK_ONLY_TOOLS`).
+    let acting = crate::cua_apps::is_action(tool);
+    let (synth_id, synth_name) = match shared.current_slot() {
+        Some(slot) => (slot.synth_id.clone(), slot.display_name()),
+        None => (String::new(), String::new()),
+    };
+    let driven_by_other = shared.lease_check(&synth_id).err();
+    if acting {
+        if let Some(driver) = driven_by_other {
+            return busy(shared, id, tool, &driver);
+        }
+    }
+
     // The label the synth gave this task, for the owner's status line.
     // Kept in memory in the bounded form the driver itself shows; the
-    // journal never gets it.
-    shared.note_task(msg.pointer("/params/arguments/session").and_then(Value::as_str));
+    // journal never gets it. A synth that only looks while another one
+    // drives does not rename the task that runs.
+    if acting || shared.computer_driver().is_none() {
+        shared.note_task(msg.pointer("/params/arguments/session").and_then(Value::as_str));
+    }
 
     // The owner's choice of apps: which app is this call about, and may
     // the synth use it? (Nothing is decided here for "every app".)
@@ -522,6 +539,15 @@ pub async fn filter_scoped(
         crate::cua_look::Gate::Changed(_) | crate::cua_look::Gate::Pass => {}
     }
 
+    // The action goes to the driver now: this synth holds the computer
+    // (checked again under the lease's lock, so two synths cannot both
+    // pass the check above and both act).
+    if acting {
+        if let Err(driver) = shared.lease_take(&synth_id, &synth_name) {
+            return busy(shared, id, tool, &driver);
+        }
+    }
+
     shared
         .journal()
         .record(Entry::new("computer", "tools/call", tool, "ok"));
@@ -529,6 +555,28 @@ pub async fn filter_scoped(
         Ok(b) => Gate::Forward(b),
         Err(_) => Gate::Drop("cannot re-serialize"),
     }
+}
+
+/// Another synth drives the computer: one plain line, as `unavailable`
+/// (it passes: the synth tries again in a minute; nothing about the call
+/// was decided).
+fn busy(shared: &Arc<Shared>, id: Value, tool: &str, driver: &str) -> Gate {
+    shared.journal().record(Entry::new(
+        "computer",
+        "tools/call",
+        tool,
+        format!("denied: {driver} is controlling the computer"),
+    ));
+    Gate::Refuse(jsonrpc_busy(id, driver))
+}
+
+/// The answer to an action while another synth controls the computer.
+fn jsonrpc_busy(id: Value, driver: &str) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "error": {
+        "code": -32001,
+        "message": format!("unavailable: {driver} is controlling this computer right now; try again in a minute"),
+        "data": {"code": "computer_busy"},
+    }})
 }
 
 #[cfg(test)]

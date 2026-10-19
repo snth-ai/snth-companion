@@ -527,7 +527,7 @@ pub async fn exec(shared: &Arc<Shared>, params: &Value, cancel: impl std::future
         e
     };
 
-    if settings.mode == ShellMode::Ask && !shared.grants().allows(CAP, &req.command) {
+    if settings.mode == ShellMode::Ask && !shared.grant_allows(CAP, &req.command) {
         let remember = if req.command.len() <= MAX_REMEMBERED && !req.command.contains('\n') {
             Remember::AlwaysOnly
         } else {

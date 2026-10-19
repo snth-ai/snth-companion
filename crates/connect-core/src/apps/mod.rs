@@ -552,7 +552,7 @@ pub async fn handle(shared: &Arc<Shared>, method: &str, params: &Value) -> Resul
     let reason = params.get("reason").and_then(Value::as_str).unwrap_or("");
 
     if let Decision::Ask { scope, remember } = decide(settings.apps.mode, spec.risk, &request) {
-        let granted = remember != Remember::Never && shared.grants().allows(CAP, &scope);
+        let granted = remember != Remember::Never && shared.grant_allows(CAP, &scope);
         if !granted {
             let ask = ApprovalRequest::new(CAP, &scope, reason, format!("let the synth do {label}"))
                 .with_details(details_of(&request))
@@ -573,11 +573,8 @@ pub async fn handle(shared: &Arc<Shared>, method: &str, params: &Value) -> Resul
 
     let target = journal_target(&request);
     let synth_name = shared
-        .synth
-        .read()
-        .unwrap()
-        .as_ref()
-        .map(|s| s.synth_name.clone())
+        .current_slot()
+        .map(|s| s.display_name())
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| "SNTH".to_string());
     let limit = if matches!(request, Request::ShortcutsRun { .. }) { SHORTCUT_TIMEOUT } else { CALL_TIMEOUT };
