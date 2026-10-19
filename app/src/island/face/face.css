@@ -1,0 +1,368 @@
+/* The face's own styles: the black island shapes the face sits on, the
+   face editor and the review page. Uses the app's tokens (app.css). */
+
+/* ---------- island shapes ---------- */
+
+.face-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0 0 999px 999px;
+  background: #000;
+  flex: none;
+}
+
+.face-card {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 28px;
+  background: #000;
+  flex: none;
+}
+
+/* ---------- review page ---------- */
+
+html:has(.fd),
+html:has(.fd) body {
+  overflow: auto;
+  height: auto;
+}
+
+.fd {
+  padding: 28px 32px 48px;
+  min-height: 100vh;
+}
+
+.fd.fd-bare {
+  display: inline-block;
+  padding: 16px;
+  min-height: 0;
+  background: var(--bg);
+}
+
+.fd-head {
+  margin-bottom: 18px;
+}
+
+.fd-head .fd-chips {
+  margin-top: 12px;
+}
+
+.fd-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.fd-stage {
+  display: grid;
+  grid-template-columns: minmax(0, 620px) minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.fd-screen {
+  position: relative;
+  height: 300px;
+  border-radius: 14px;
+  overflow: hidden;
+  background:
+    radial-gradient(120% 90% at 20% 100%, #4b3a6b 0%, transparent 60%),
+    radial-gradient(90% 80% at 90% 90%, #7a3f5b 0%, transparent 55%),
+    linear-gradient(180deg, #2a2633 0%, #1a1820 100%);
+  box-shadow: var(--shadow);
+}
+
+.fd-menubar {
+  height: 36px;
+  display: flex;
+  justify-content: center;
+  background: rgba(30, 28, 36, 0.55);
+  backdrop-filter: blur(20px);
+}
+
+.fd-menubar .fd-cell {
+  margin: 0;
+}
+
+.fd-open {
+  position: absolute;
+  top: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 24px 8px 8px;
+  border-radius: 36px;
+  background: #000;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.45);
+}
+
+.fd-open .face-card {
+  border-radius: 28px;
+}
+
+.fd-open-name {
+  color: #f4f1f2;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.fd-open-state {
+  margin-top: 2px;
+  color: #a39ea0;
+  font-size: 13px;
+}
+
+.fd-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.fd-controls label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.fd-gridtitle {
+  margin-top: 28px;
+}
+
+.fd-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  max-width: 1500px;
+}
+
+.fd-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.fd-label {
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+.fd-grid {
+  border-collapse: separate;
+  border-spacing: 6px;
+}
+
+.fd-grid th {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+  text-align: center;
+  white-space: nowrap;
+}
+
+.fd-grid tbody th {
+  text-align: right;
+  padding-right: 6px;
+}
+
+/* ---------- controls the app does not have yet ---------- */
+
+.face-range {
+  width: 150px;
+  accent-color: var(--accent);
+}
+
+/* ---------- editor ---------- */
+
+.fe-stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 0 0 18px;
+  border-radius: var(--radius);
+  overflow: hidden;
+  background:
+    radial-gradient(110% 120% at 15% 110%, #3d3156 0%, transparent 60%),
+    radial-gradient(90% 100% at 95% 100%, #5e3247 0%, transparent 55%),
+    linear-gradient(180deg, #24212b 0%, #17151c 100%);
+}
+
+.fe-notch {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 32px;
+  padding: 0 34px;
+  border-radius: 0 0 13px 13px;
+  background: #000;
+}
+
+.fe-open {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 16px;
+  border-radius: 34px;
+  background: #000;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+}
+
+.fe-states {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 10px;
+}
+
+.fe-looks {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 8px;
+}
+
+.fe-look {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 5px 5px 7px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  text-align: center;
+  transition: border-color 0.15s var(--ease), background-color 0.15s var(--ease);
+}
+
+.fe-look:hover {
+  background: var(--hover);
+}
+
+.fe-look[aria-checked="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.fe-look-face {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 60px;
+  border-radius: 7px;
+  background: #000;
+}
+
+.fe-look-name {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 550;
+  white-space: nowrap;
+}
+
+.fe-look-name .tag {
+  font-weight: 500;
+}
+
+.fe-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.fe-slider {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+
+.fe-num {
+  min-width: 46px;
+  text-align: right;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+}
+
+.fe-colour {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  flex: none;
+  cursor: pointer;
+}
+
+.fe-hex {
+  font: 12px var(--mono);
+  color: var(--text-2);
+}
+
+.fe-colour input[type="color"] {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: none;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.fe-colour input[type="color"]::-webkit-color-swatch-wrapper {
+  padding: 3px;
+}
+
+.fe-colour input[type="color"]::-webkit-color-swatch {
+  border: 0;
+  border-radius: 5px;
+}
+
+.fe-glyphs {
+  flex-wrap: nowrap;
+  max-width: none;
+  gap: 3px;
+}
+
+.fe-glyphs .swatch {
+  width: 28px;
+  height: 28px;
+}
+
+.fe-glyphs .swatch {
+  color: var(--text-2);
+}
+
+.fe-glyphs .swatch[aria-checked="true"] {
+  color: var(--accent-text);
+}
+
+.fe-emotes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 14px 12px;
+  border-top: 0 !important;
+}
+
+.mock-window.fd-editor {
+  height: auto;
+  min-height: 560px;
+}
+
+.mock-window.fd-editor .main {
+  height: auto;
+  overflow: visible;
+}
