@@ -159,7 +159,6 @@ export interface TargetInput {
 export function targetPose(input: TargetInput): Pose {
   const { face, state, st, t, look, lean, level, emote, reduced } = input;
   const cur = face.motion.curiosity;
-  const live = face.motion.liveliness;
   const rest = face.eyes.lids.rest * LID_REST;
   const style = face.mouth.style;
   const baseSmile = style === "smile" ? 0.55 : style === "open" ? 0.6 : style === "cat" ? 0.3 : 0.05;
@@ -426,9 +425,6 @@ export function targetPose(input: TargetInput): Pose {
   p.uL = clamp(p.uL + follow, 0, 1);
   p.uR = clamp(p.uR + follow, 0, 1);
 
-  // Liveliness: a slow sway on top of the head while awake and idle.
-  if (state === "idle" && live > 0.6 && !reduced) p.hr += Math.sin(t * 1.7) * (live - 0.6) * 4;
-
   if (reduced) {
     p.hx = 0;
     p.hy = 0;
@@ -591,6 +587,23 @@ function springFor(g: Group, face: FaceConfig): Spring {
   }
 }
 
+/** When a channel counts as settled, in its own units: well under what a
+ * pixel shows, so the loop stops as soon as nothing visible moves. */
+const EPS: Partial<Record<Channel, number>> = {
+  hx: 0.04,
+  hy: 0.04,
+  hr: 0.08,
+  ax: 0.08,
+  ay: 0.08,
+  ear: 0.3,
+  bLa: 0.15,
+  bRa: 0.15,
+  glr: 0.15,
+  blush: 0.01,
+  dim: 0.01,
+  glow: 0.01,
+};
+
 const rand = (lo: number, hi: number) => lo + Math.random() * (hi - lo);
 
 /** Seconds of motion per state that still needs frames, and its fps cap. */
@@ -600,6 +613,7 @@ function ambientFps(state: FaceState, level: number): number {
       return 20;
     case "working":
     case "thinking":
+      return 24;
     case "approval":
       return 30;
     case "listening":
@@ -610,6 +624,8 @@ function ambientFps(state: FaceState, level: number): number {
 }
 
 const NO_GAZE: Vec = { x: 0, y: 0.3 };
+/** Seconds without pointer movement after which glances stop. */
+const DEEP_REST = 45;
 
 export class FaceSim {
   private input: SimInput;
@@ -621,7 +637,6 @@ export class FaceSim {
   private raf = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private last = 0;
-  private lastPaint = 0;
   private running = false;
 
   private state: FaceState;
@@ -738,7 +753,9 @@ export class FaceSim {
   }
 
   private emoteGap(): number {
-    return rand(14, 38) / (0.35 + this.input.face.motion.liveliness);
+    const now = performance.now() / 1000;
+    const rest = now - this.lastGazeAt > DEEP_REST ? 2 : 1;
+    return (rest * rand(14, 38)) / (0.35 + this.input.face.motion.liveliness);
   }
 
   private effectiveState(now: number): FaceState {
@@ -820,12 +837,15 @@ export class FaceSim {
       this.lastSaccade = now;
       this.jitter = { x: 0, y: 0 };
     }
-    if (state === "idle" && live > 0 && now > this.nextMicro) {
+    // Deep rest: the pointer has not moved for a while, so no glances; only
+    // blinks (and the odd habit) keep the face alive.
+    const awake = now - this.lastGazeAt < DEEP_REST;
+    if (state === "idle" && live > 0 && awake && now > this.nextMicro) {
       const a = 0.025 + 0.06 * live;
       this.jitter = { x: rand(-a, a), y: rand(-a, a) * 0.7 };
-      this.nextMicro = now + rand(0.7, 3.2) / (0.45 + live);
+      this.nextMicro = now + rand(2.2, 6.5) / (0.5 + live);
     }
-    if (state === "idle" && live > 0 && now - this.lastGazeAt > 5 && now > this.nextWander && !this.emote) {
+    if (state === "idle" && live > 0 && awake && now - this.lastGazeAt > 5 && now > this.nextWander && !this.emote) {
       this.wander = { to: { x: rand(-0.75, 0.75), y: rand(-0.35, 0.45) }, until: now + rand(0.6, 1.4) };
       this.nextWander = now + rand(5, 14) / (0.3 + live);
     }
@@ -911,7 +931,7 @@ export class FaceSim {
         }
         this.pose[ch] = x;
         this.vel[ch] = v;
-        const eps = GROUP[ch] === "head" || GROUP[ch] === "wobble" || ch.startsWith("b") ? 0.01 : 0.003;
+        const eps = EPS[ch] ?? 0.004;
         if (Math.abs(to - x) > eps || Math.abs(v) > eps * 8) moving = true;
       }
     }
@@ -920,20 +940,19 @@ export class FaceSim {
     const timeline = TIMELINE[this.state];
     const inTimeline = timeline !== undefined && st < timeline + 0.6;
     const fps = reduced ? (this.state === "listening" && this.level > 0.01 ? 30 : 0) : ambientFps(this.state, this.level);
-    const busy = moving || blink > 0 || this.blinkStart >= 0 || this.emote !== null || inTimeline;
+    // Fast things (a blink, an emote, a one-shot timeline) get every frame;
+    // the slow ambient motion of a state gets its capped rate.
+    const fast = blink > 0 || this.blinkStart >= 0 || this.emote !== null || inTimeline;
+    const capped = fps > 0 && !fast;
+    const busy = fast || (moving && fps === 0);
 
-    // Paint (capped for ambient-only motion).
-    const minGap = !busy && fps > 0 ? 1 / fps : 0;
-    if (now - this.lastPaint >= minGap - 0.002) {
-      this.lastPaint = now;
-      this.onFrame(this.makeFrame(now, blink, st));
-    }
+    this.onFrame(this.makeFrame(now, blink, st));
 
     if (busy) {
       this.raf = requestAnimationFrame(this.tick);
       return;
     }
-    if (fps > 0) {
+    if (capped) {
       this.timer = setTimeout(() => {
         this.timer = null;
         this.wake();
@@ -944,7 +963,7 @@ export class FaceSim {
     const nexts = [this.blinkAt];
     if (!reduced && this.state === "idle") {
       if (face.idle_emotes.length) nexts.push(this.nextEmote);
-      if (face.motion.liveliness > 0) {
+      if (face.motion.liveliness > 0 && now - this.lastGazeAt < DEEP_REST) {
         nexts.push(this.nextMicro);
         if (now - this.lastGazeAt > 5) nexts.push(this.nextWander);
         else nexts.push(this.lastGazeAt + 5.01);
@@ -952,7 +971,9 @@ export class FaceSim {
     }
     if (this.input.state === "idle" && this.input.autoSleep && face.motion.sleepy_after_min > 0)
       nexts.push(this.lastGazeAt + face.motion.sleepy_after_min * 60 + 0.01);
-    const wait = Math.max(0.016, Math.min(...nexts) - now);
+    // Only future moments count: a stale one must never turn into polling.
+    const future = nexts.filter((x) => x > now + 0.001);
+    const wait = future.length ? Math.max(0.016, Math.min(...future) - now) : 1;
     this.timer = setTimeout(() => {
       this.timer = null;
       this.wake();

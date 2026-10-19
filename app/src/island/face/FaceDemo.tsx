@@ -33,6 +33,12 @@ const fixedGaze: Vec | null = (() => {
   const [x, y] = raw.split(",").map(Number);
   return Number.isFinite(x) && Number.isFinite(y) ? { x: x!, y: y! } : null;
 })();
+/** ?calm=1 (no glances, no habits) and ?calm=2 (no blinks either): energy checks. */
+function calm(face: FaceConfig): FaceConfig {
+  const level = params.get("calm");
+  if (!level) return face;
+  return { ...face, idle_emotes: [], motion: { ...face.motion, liveliness: 0, blink: level === "2" ? 0 : face.motion.blink } };
+}
 const paramEmote = IDLE_EMOTES.find((e) => e === params.get("emote")) ?? null;
 
 const Pointer = createContext<PointerPos | null>(null);
@@ -54,7 +60,7 @@ function Pill(props: { preset: string; state: FaceState; size: number; still: bo
         style={compact ? { height: props.size, width: w + props.size * 1.4, borderRadius: `0 0 ${props.size * 0.42}px ${props.size * 0.42}px` } : { width: w + 24, height: props.size + 24 }}
       >
         <Face
-          config={presetFace(props.preset)}
+          config={calm(presetFace(props.preset))}
           state={props.state}
           gaze={gaze}
           size={props.size}
@@ -152,6 +158,9 @@ function Grid(props: { view: string; size: number; still: boolean; reduced: bool
   const preset = params.get("preset") ?? "mia";
   const state = (FACE_STATES.find((s) => s === params.get("state")) as FaceState) ?? "idle";
   const emote = paramEmote ? { kind: paramEmote, nonce: 1 } : null;
+  if (view === "one") {
+    return <Pill preset={preset} state={state} size={size} still={still} reduced={reduced} level={0.6} emote={emote} />;
+  }
   if (view === "presets") {
     return (
       <div className="fd-row">
