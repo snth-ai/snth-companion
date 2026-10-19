@@ -149,7 +149,8 @@ function isPlainObject(x: unknown): x is Record<string, unknown> {
 }
 
 function byteLength(x: unknown): number {
-  return new TextEncoder().encode(JSON.stringify(x)).length;
+  const json = JSON.stringify(x);
+  return json === undefined ? 0 : new TextEncoder().encode(json).length;
 }
 
 /** Returns a reason string, or null when the leaf value is fine. */
@@ -206,19 +207,19 @@ export type FaceResult = { ok: true; face: FaceConfig } | { ok: false; reason: s
 
 /** Strict check of a full FaceConfig (what the synth stores and sends). */
 export function validateFace(input: unknown): FaceResult {
-  const problem = checkNode(SPEC, input, "", false);
-  if (problem) return { ok: false, reason: problem };
   const size = byteLength(input);
   if (size > MAX_FACE_BYTES) return { ok: false, reason: `face: ${size} bytes, at most ${MAX_FACE_BYTES}` };
+  const problem = checkNode(SPEC, input, "", false);
+  if (problem) return { ok: false, reason: problem };
   return { ok: true, face: input as FaceConfig };
 }
 
 /** Strict check of a patch: the same rules, but every key may be missing. */
 export function validatePatch(input: unknown): { ok: true } | { ok: false; reason: string } {
-  const problem = checkNode(SPEC, input, "", true);
-  if (problem) return { ok: false, reason: problem };
   const size = byteLength(input);
   if (size > MAX_FACE_BYTES) return { ok: false, reason: `patch: ${size} bytes, at most ${MAX_FACE_BYTES}` };
+  const problem = checkNode(SPEC, input, "", true);
+  if (problem) return { ok: false, reason: problem };
   return { ok: true };
 }
 

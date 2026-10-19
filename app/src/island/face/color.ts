@@ -54,3 +54,22 @@ export function drain(hex: string, t: number): string {
   const grey = rgbToHex([y, y, y]);
   return darken(mix(hex, grey, 0.8 * t), 0.5 * t);
 }
+
+/** h in degrees, s and l 0..100. */
+export function hsl(h: number, s: number, l: number): string {
+  const hh = (((h % 360) + 360) % 360) / 360;
+  const ss = Math.min(100, Math.max(0, s)) / 100;
+  const ll = Math.min(100, Math.max(0, l)) / 100;
+  const q = ll < 0.5 ? ll * (1 + ss) : ll + ss - ll * ss;
+  const p = 2 * ll - q;
+  const ch = (t: number) => {
+    let x = t;
+    if (x < 0) x += 1;
+    if (x > 1) x -= 1;
+    if (x < 1 / 6) return p + (q - p) * 6 * x;
+    if (x < 1 / 2) return q;
+    if (x < 2 / 3) return p + (q - p) * (2 / 3 - x) * 6;
+    return p;
+  };
+  return rgbToHex([ch(hh + 1 / 3) * 255, ch(hh) * 255, ch(hh - 1 / 3) * 255]).toUpperCase();
+}

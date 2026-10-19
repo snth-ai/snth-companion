@@ -68,6 +68,11 @@ in-memory mock. The page shows the app inside a frame of the real window size
 each kind, add activity, start a working stream, drop the link, open a pairing
 link, switch language and theme.
 
+The island face (every look in every state, eyes on the mouse, the face
+editor) has its own page: `http://127.0.0.1:1420/src/island/face/demo.html`
+(`?view=grid|presets|states|editor`, more in `src/island/face/FaceDemo.tsx`);
+its schema tests run with `node --test src/island/face/*.test.mjs`.
+
 URL parameters stage a screen or a state directly:
 
 | Parameter | Values |
