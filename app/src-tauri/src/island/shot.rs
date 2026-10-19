@@ -83,7 +83,7 @@ pub async fn take(core: &connect_core::Core, data_dir: &Path, display: Option<u3
 async fn fallback(data_dir: &Path, display: Option<u32>) -> Result<Image, String> {
     let out = temp_file(data_dir, "jpg");
     let _ = std::fs::remove_file(&out);
-    let mut cmd = tokio::process::Command::new("/usr/sbin/screencapture");
+    let mut cmd = connect_core::proc::command("/usr/sbin/screencapture");
     // -x: no sound; -t jpg; -D: the display (1 = main).
     cmd.args(["-x", "-t", "jpg"]);
     if let Some(d) = display {

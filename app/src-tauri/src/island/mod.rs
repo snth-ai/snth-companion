@@ -772,7 +772,7 @@ pub async fn submit_text(ctx: &Arc<Ctx>, text: String) -> Result<(), String> {
 /// synth, in the owner's language. The synth uses its face tool itself.
 pub async fn ask_design(ctx: &Arc<Ctx>, synth_id: &str) -> Result<(), String> {
     let text = match ctx.lang() {
-        crate::i18n::Lang::Ru => "Придумай себе лицо для острова SNTH Connect на моём компьютере (инструмент connect_face): глаза, рот, цвета, аксессуар, как двигаешься. Такое, какое тебе по душе, и расскажи, что выбрала и почему.",
+        crate::i18n::Lang::Ru => "Придумай себе лицо для острова SNTH Connect на моём компьютере (инструмент connect_face): глаза, рот, цвета, аксессуар, как двигаешься. Такое, какое тебе по душе, и расскажи, что получилось и почему так.",
         _ => "Design your own face for the SNTH Connect island on my computer (your connect_face tool): eyes, mouth, colours, an accessory, how you move. Make it feel like you, and tell me what you chose and why.",
     };
     let msg = OwnerMessage { client_id: core_island::new_client_id(), mode: Mode::Text, text: text.into(), audio: None, images: vec![] };

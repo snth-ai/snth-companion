@@ -443,14 +443,18 @@ impl OwnerMessage {
     }
 }
 
-/// The synth's error for owner.message, as one of the UI's codes.
+/// The synth's error for owner.message, as one of the UI's codes. The
+/// synth answers `{"error":"<code>","reason":"<text>"}` (requests.rs makes
+/// that "<code>: <text>"); the code is matched exactly, the text is only
+/// detail. Codes: too_large, no_owner_session, busy, bad_request.
 pub fn send_error_of(e: &str) -> SendError {
-    let lower = e.to_ascii_lowercase();
-    for code in ["too_large", "no_owner_session", "busy"] {
-        if lower.starts_with(code) || lower.contains(&format!("\"{code}\"")) || lower.contains(&format!(" {code}")) {
-            return SendError::new(code, e);
-        }
+    let code = e.split(':').next().unwrap_or("").trim();
+    match code {
+        "too_large" | "no_owner_session" | "busy" => return SendError::new(code, e),
+        "bad_request" => return SendError::new("failed", e),
+        _ => {}
     }
+    let lower = e.to_ascii_lowercase();
     if lower.contains("needs an update") || lower.contains("unknown method") {
         return SendError::new("outdated", e);
     }

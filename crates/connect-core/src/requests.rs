@@ -106,7 +106,12 @@ impl LinkRequests {
             return; // late, or never ours
         };
         let answer = match msg.get("error").and_then(Value::as_str) {
-            Some(e) if !e.is_empty() => Err(clean_error(e)),
+            // A synth may put a code in `error` and the words in `reason`
+            // (the island's requests): "<code>: <reason>".
+            Some(e) if !e.is_empty() => match msg.get("reason").and_then(Value::as_str).filter(|r| !r.trim().is_empty()) {
+                Some(reason) => Err(clean_error(&format!("{e}: {reason}"))),
+                None => Err(clean_error(e)),
+            },
             _ => Ok(msg.get("result").cloned().unwrap_or(Value::Null)),
         };
         let _ = tx.send(answer);
@@ -206,6 +211,15 @@ mod tests {
         r.resolve(&json!({"type": "response", "id": first["id"], "result": {"code": "K7QW3MHX"}}));
         assert_eq!(a.await.unwrap().unwrap()["code"], "K7QW3MHX");
         assert_eq!(b.await.unwrap().unwrap_err(), "unavailable: the hub is down");
+
+        // A code and its words.
+        let c = tokio::spawn({
+            let r = r.clone();
+            async move { r.call("owner.message", json!({})).await }
+        });
+        let third = rx.recv().await.unwrap();
+        r.resolve(&json!({"type": "response", "id": third["id"], "error": "busy", "reason": "the last message is still running"}));
+        assert_eq!(c.await.unwrap().unwrap_err(), "busy: the last message is still running");
     }
 
     #[tokio::test]

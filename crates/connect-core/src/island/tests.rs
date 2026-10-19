@@ -212,19 +212,31 @@ async fn a_message_waits_only_for_accepted() {
 
 #[tokio::test]
 async fn the_synths_refusals_reach_the_island_as_codes() {
-    for (error, code) in [
-        ("too_large: 9000000 bytes", "too_large"),
-        ("no_owner_session", "no_owner_session"),
-        ("busy: the last message is still running", "busy"),
-        ("denied: unknown method \"owner.message\"", "outdated"),
-        ("something else", "failed"),
+    // The synth's shape: the code in `error`, the words in `reason`.
+    for (error, reason, code) in [
+        ("too_large", "9000000 bytes", "too_large"),
+        ("no_owner_session", "", "no_owner_session"),
+        ("busy", "the last message is still running", "busy"),
+        ("bad_request", "audio.mime", "failed"),
+        ("denied: unknown method \"owner.message\"", "", "outdated"),
+        ("something else", "", "failed"),
+        // Words that look like a code are not one.
+        ("failed", "the queue is busy", "failed"),
     ] {
         let (core, mut q) = linked(&[("mia", BOTH)]);
         let shared = core.shared();
         let call = tokio::spawn(async move { send(&shared, "mia", &voice(4000, 64)).await });
         let sent = q[0].recv().await.unwrap();
-        core.shared().slot("mia").unwrap().requests.resolve(&json!({"type": "response", "id": sent["id"], "error": error}));
-        assert_eq!(call.await.unwrap().unwrap_err().code, code, "{error}");
+        core.shared()
+            .slot("mia")
+            .unwrap()
+            .requests
+            .resolve(&json!({"type": "response", "id": sent["id"], "error": error, "reason": reason}));
+        let e = call.await.unwrap().unwrap_err();
+        assert_eq!(e.code, code, "{error}");
+        if !reason.is_empty() {
+            assert!(e.detail.contains(reason), "{e}");
+        }
     }
 }
 
@@ -308,7 +320,7 @@ async fn faces_are_read_set_and_cached_per_synth() {
         async move { set_face(&shared, "mia", json!({"eyes": {"shape": "square"}}), true).await }
     });
     let asked = q[0].recv().await.unwrap();
-    slot.requests.resolve(&json!({"type": "response", "id": asked["id"], "result": {"error": "invalid_face", "reason": "eyes.shape: one of round, oval"}}));
+    slot.requests.resolve(&json!({"type": "response", "id": asked["id"], "error": "invalid_face", "reason": "eyes.shape: one of round, oval"}));
     assert_eq!(set.await.unwrap().unwrap(), FaceSet::Invalid { reason: "eyes.shape: one of round, oval".into() });
     assert_eq!(core.face_of("mia"), Some(merged));
 
