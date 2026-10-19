@@ -1146,7 +1146,7 @@ export const en = {
       allow: "Allow",
       deny: "Don't allow",
       more: "Details",
-      approvalFrom: (n: string) => `${n} asks`,
+      approval: "Needs your permission",
       switchSynth: "Who listens",
       micOpen: "Open settings",
       micAllow: "Allow the microphone",

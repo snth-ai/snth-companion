@@ -15,13 +15,18 @@ import { backend } from "../backend";
 import type { IslandView } from "../backend/types";
 import { stringsFor } from "../i18n";
 import { shortcutText } from "../lib/format";
-import { Face, faceFor, type FaceState } from "./faceApi";
+import { Face, faceFor, faceWidth, type FaceState } from "./faceApi";
 
 /** How long the summary stays after the answer (TZ: 4-6 s). */
 const SUMMARY_FOR = 6000;
 const NOTICE_FOR = 6000;
 /** The open island. */
 const OPEN_W = 400;
+/** The face in the open island: big enough for the whole head. */
+const FACE_OPEN = 84;
+/** How long the face takes to grow or shrink (the shape's own spring is
+ * about as long). */
+const FACE_MS = 420;
 
 /** What the face shows, from what the island knows. */
 export function faceStateOf(v: IslandView, now: number): FaceState {
@@ -52,21 +57,16 @@ function useClock(active: boolean): number {
   return active ? now : Date.now();
 }
 
-function Wave(props: { level: number }) {
-  const bars = [0.55, 0.85, 1, 0.75, 0.5];
-  return (
-    <span className="isl-wave" aria-hidden="true">
-      {bars.map((k, i) => (
-        <i key={i} style={{ transform: `scaleY(${Math.max(0.15, Math.min(1, props.level * k * 1.4))})` }} />
-      ))}
-    </span>
-  );
-}
-
-function Glyph(props: { state: FaceState; level: number; sending: boolean }) {
+/** The right ear. Listening, a request, an error and driving have their
+ * own symbol beside the face's right eye (the mic meter, "?", "!", the
+ * pointer); the ear does not say them twice. */
+function Glyph(props: { state: FaceState; sending: boolean }) {
   switch (props.state) {
     case "listening":
-      return <Wave level={props.level} />;
+    case "approval":
+    case "error":
+    case "driving":
+      return null;
     case "accepted":
     case "done":
       return (
@@ -83,17 +83,41 @@ function Glyph(props: { state: FaceState; level: number; sending: boolean }) {
         </span>
       );
     case "working":
-    case "driving":
       return <span className="isl-ring" aria-hidden="true" />;
-    case "approval":
-      return <span className="isl-dot amber" aria-hidden="true" />;
-    case "error":
-      return <span className="isl-bang" aria-hidden="true">!</span>;
     case "offline":
       return <span className="isl-dot dim" aria-hidden="true" />;
     default:
       return props.sending ? <span className="isl-ring" aria-hidden="true" /> : null;
   }
+}
+
+/** 0 (closed) .. 1 (open), eased, on animation frames while it moves. */
+function useOpening(open: boolean): number {
+  const [t, setT] = useState(open ? 1 : 0);
+  const from = useRef(t);
+  useEffect(() => {
+    const target = open ? 1 : 0;
+    const reduce = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduce) {
+      from.current = target;
+      setT(target);
+      return;
+    }
+    const start = performance.now();
+    const begin = from.current;
+    let frame = 0;
+    const step = (now: number) => {
+      const k = Math.min(1, (now - start) / FACE_MS);
+      const eased = 1 - Math.pow(1 - k, 3);
+      const v = begin + (target - begin) * eased;
+      from.current = v;
+      setT(v);
+      if (k < 1) frame = requestAnimationFrame(step);
+    };
+    frame = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(frame);
+  }, [open]);
+  return t;
 }
 
 function mmss(ms: number): string {
@@ -148,6 +172,9 @@ export function IslandApp() {
   const noticeShown = Boolean(view?.notice && now - view.notice.at_ms < NOTICE_FOR);
   const open = Boolean(view && (view.hover || view.approval || view.text_open || view.hold || summaryShown || noticeShown));
 
+  const opening = useOpening(open);
+  const settled = opening === 0 || opening === 1;
+
   // The line of text takes the keyboard when it opens.
   useEffect(() => {
     if (view?.text_open) {
@@ -173,7 +200,8 @@ export function IslandApp() {
   const report = () => {
     const shape = shapeRef.current?.getBoundingClientRect();
     const face = faceRef.current?.getBoundingClientRect();
-    if (!shape || !face) return;
+    // Mid-growth the face is neither here nor there: report where it ends.
+    if (!shape || !face || !settled) return;
     const key = [shape.x, shape.y, shape.width, shape.height, face.x, face.y].map(Math.round).join(",");
     if (key === last.current) return;
     last.current = key;
@@ -204,7 +232,8 @@ export function IslandApp() {
   let status: ReactNode = null;
   let detail: ReactNode = null;
   const m = view.message;
-  if (view.paused) status = t.paused;
+  if (view.approval) status = t.approval;
+  else if (view.paused) status = t.paused;
   else if (view.synth && !view.synth.online) status = t.offline(name);
   else if (view.hold) status = (
     <>
@@ -236,7 +265,13 @@ export function IslandApp() {
   // The synth's own face, or the default look of its id.
   const face = faceFor(view.synth?.id ?? "", view.face);
   const accent = face.palette.accent;
-  const faceSize = Math.max(18, p.pill.h - 4);
+  // One face that grows from the left ear into the open island.
+  // Closed: as tall as the band and a little more (the face's own box has
+  // room around the eyes), about 34 px on a notch of 32.
+  const small = Math.max(22, Math.min(p.pill.h + 2, 36));
+  const faceSize = small + (FACE_OPEN - small) * opening;
+  const faceLeft = 8 + 8 * opening;
+  const faceTop = ((notchH - small) / 2) * (1 - opening) + (notchH + 2) * opening;
 
   return (
     <div className={`isl-root${open ? " open" : ""}`}>
@@ -246,28 +281,24 @@ export function IslandApp() {
         style={{ ["--accent" as string]: accent, left, width, height, borderBottomLeftRadius: open ? 24 : Math.min(12, p.pill.h / 2), borderBottomRightRadius: open ? 24 : Math.min(12, p.pill.h / 2) }}
       >
         <div className="isl-band" style={{ height: notchH }}>
-          <div className="isl-ear left" style={{ width: (p.pill.w - p.notch.w) / 2 }}>
-            {open ? null : (
-              <div ref={faceRef} className="isl-face">
-                <Face config={face} state={state} gaze={gaze} level={level} size={faceSize} compact label={name} />
-              </div>
-            )}
-          </div>
+          <div className="isl-ear left" style={{ width: (p.pill.w - p.notch.w) / 2 }} />
           <div className="isl-notch" style={{ width: p.notch.w }} />
           <div className="isl-ear right" style={{ width: (p.pill.w - p.notch.w) / 2 }}>
-            <Glyph state={state} level={level} sending={view.sending} />
+            <Glyph state={state} sending={view.sending} />
           </div>
+        </div>
+
+        <div ref={faceRef} className="isl-face" style={{ left: faceLeft, top: faceTop, height: faceSize }}>
+          <Face config={face} state={state} gaze={gaze} level={level} size={faceSize} label={name} />
         </div>
 
         <div ref={bodyRef} className="isl-body" aria-hidden={!open}>
           {open ? (
             <>
-              <div className="isl-head">
-                <div ref={faceRef} className="isl-face big">
-                  <Face config={face} state={state} gaze={gaze} level={level} size={56} compact={false} label={name} />
-                </div>
+              <div className="isl-head" style={{ paddingLeft: faceWidth(FACE_OPEN) + 6, minHeight: FACE_OPEN }}>
                 <div className="isl-text">
-                  <div className="isl-name">{name}</div>
+                  {/* A request may come from another linked synth: its name. */}
+                  <div className="isl-name">{approval?.synth ?? name}</div>
                   <div className="isl-status" role="status">
                     {status}
                   </div>
@@ -287,7 +318,6 @@ export function IslandApp() {
 
               {approval && quick ? (
                 <div className="isl-approval">
-                  <div className="isl-ask">{t.approvalFrom(approval.synth ?? name)}</div>
                   <div className="isl-ask-title">{quick.title}</div>
                   <div className="isl-row">
                     <button type="button" className="isl-btn" onClick={() => void backend.approvalAnswer(approval.id, false, "once").finally(refresh)}>

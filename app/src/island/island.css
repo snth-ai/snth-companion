@@ -91,11 +91,15 @@ html.island #root {
   height: 100%;
 }
 
+/* The face: one element for both the closed and the open island; it
+   grows from the left ear into the open island (IslandApp, useOpening). */
 .isl-face {
+  position: absolute;
+  z-index: 1;
   display: flex;
   align-items: center;
-  justify-content: center;
   line-height: 0;
+  pointer-events: none;
 }
 
 .isl-body {
@@ -111,7 +115,8 @@ html.island #root {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding-top: 6px;
+  padding-top: 2px;
+  box-sizing: border-box;
   animation: isl-in 0.32s ease both;
 }
 .isl-text {
@@ -163,10 +168,6 @@ html.island #root {
 .isl-approval {
   margin-top: 10px;
   animation: isl-in 0.3s ease both;
-}
-.isl-ask {
-  color: rgba(255, 255, 255, 0.6);
-  font-size: 12px;
 }
 .isl-ask-title {
   font-weight: 600;
@@ -271,21 +272,6 @@ html.island #root {
 }
 
 /* The right ear: what the synth is doing, in one glyph. */
-.isl-wave {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  height: 16px;
-}
-.isl-wave i {
-  display: block;
-  width: 3px;
-  height: 16px;
-  border-radius: 2px;
-  background: var(--accent);
-  transform-origin: center;
-  transition: transform 0.08s linear;
-}
 .isl-glyph {
   width: 16px;
   height: 16px;
@@ -323,16 +309,8 @@ html.island #root {
   height: 8px;
   border-radius: 50%;
 }
-.isl-dot.amber {
-  background: #ffb547;
-  animation: isl-pulse 1.4s ease-in-out infinite;
-}
 .isl-dot.dim {
   background: rgba(255, 255, 255, 0.25);
-}
-.isl-bang {
-  font-weight: 700;
-  color: #ff8a80;
 }
 
 @keyframes isl-in {
@@ -357,11 +335,6 @@ html.island #root {
     transform: rotate(360deg);
   }
 }
-@keyframes isl-pulse {
-  50% {
-    opacity: 0.35;
-  }
-}
 
 @media (prefers-reduced-motion: reduce) {
   .isl-shape {
@@ -375,8 +348,7 @@ html.island #root {
     animation: none;
   }
   .isl-dots i,
-  .isl-ring,
-  .isl-dot.amber {
+  .isl-ring {
     animation: none;
   }
 }

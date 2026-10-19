@@ -1144,7 +1144,7 @@ export const ru: Strings = {
       allow: "Разрешить",
       deny: "Не разрешать",
       more: "Подробнее",
-      approvalFrom: (n: string) => `${n} просит`,
+      approval: "Ждет разрешения",
       switchSynth: "Кто слушает",
       micOpen: "Открыть настройки",
       micAllow: "Разрешить микрофон",
