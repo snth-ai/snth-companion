@@ -215,6 +215,8 @@ pub struct Shared {
     pub(crate) cookies_extension_first: AtomicBool,
     /// Files being written chunk by chunk (rpc.rs `Transfers`).
     pub(crate) transfers: crate::rpc::Transfers,
+    /// Stops every running command of the command line (shell.rs).
+    pub(crate) shell: crate::shell::State,
 }
 
 impl Shared {
@@ -1017,6 +1019,7 @@ impl Core {
             browsers: crate::browser::Hub::default(),
             cookies_extension_first: AtomicBool::new(cfg!(windows)),
             transfers: crate::rpc::Transfers::default(),
+            shell: crate::shell::State::default(),
         });
         // A stored token means we are already paired: reflect it. The
         // synth url/id come back from settings.json (see above); the CLI
@@ -1073,6 +1076,10 @@ impl Core {
         if told {
             let _ = self.shared.settings_tx.send(rev);
         }
+        // The command line switched off: what runs now stops too.
+        if !self.shared.settings().shell.enabled {
+            self.shared.shell.stop_all();
+        }
         let _ = self.shared.events.send(CoreEvent::Settings { rev });
         rev
     }
@@ -1084,16 +1091,21 @@ impl Core {
     /// asks, never which apps, and a list the owner made by hand must not
     /// be lost to a click on a preset. Nor is the experiment: it says how
     /// the synth drives the computer, not when it may.
+    ///
+    /// The command line is off in every preset, so a preset turns it off
+    /// (the mode the owner chose for it stays for the next time).
     pub fn apply_preset(&self, preset: Preset) -> u64 {
         self.mutate_settings(|s| {
             let roots = s.files.roots.clone();
             let look = s.computer.look.clone();
             let apps = s.computer.apps.clone();
             let experiment = s.computer.experiment;
+            let shell_mode = s.shell.mode;
             *s = Settings::from_preset(preset, roots);
             s.computer.look = look;
             s.computer.apps = apps;
             s.computer.experiment = experiment;
+            s.shell.mode = shell_mode;
         })
     }
 
@@ -1229,6 +1241,7 @@ impl Core {
 
     pub async fn pause(&self) {
         self.shared.paused.store(true, Ordering::Release);
+        self.shared.shell.stop_all();
         self.shared.stop_cua().await;
         self.shared.set_link_state(LinkState::Paused, "paused by the owner");
         let _ = self.shared.events.send(CoreEvent::Paused { paused: true });

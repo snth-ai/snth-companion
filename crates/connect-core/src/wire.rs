@@ -65,6 +65,8 @@ pub fn capabilities_value(
         // sends 512 KiB chunks, one that does sizes them to it).
         "files": {"enabled": s.files.enabled, "roots": roots, "max_request_bytes": crate::rpc::MAX_REQUEST_LINE},
         "apps": crate::apps::wire_value(apps, &s.apps),
+        // The command line: added after the first release, like apps.
+        "shell": crate::shell::wire_value(&s.shell),
     })
 }
 

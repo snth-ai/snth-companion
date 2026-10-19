@@ -1,8 +1,9 @@
 //! `rpc` streams: sequential request/response calls (connect.md).
 //!
 //! Methods: files.list / files.stat / files.read / files.write,
-//! cookies.get, permission.request, device.info, and apps.<app>.<action>
-//! (every one of those goes through the one gate in apps/mod.rs). One stream serves any
+//! cookies.get, permission.request, device.info, apps.<app>.<action>
+//! (every one of those goes through the one gate in apps/mod.rs), and
+//! shell.exec (the one gate in shell.rs). One stream serves any
 //! number of sequential requests; the synth opens one per call and the
 //! app also serves many on one.
 
@@ -135,7 +136,22 @@ where
                 continue;
             }
         };
-        let reply = match dispatch(shared, &req).await {
+        // A command runs until it ends, unless the synth closes the
+        // stream first: that is its cancel. The synth sends nothing else
+        // while it waits, so the end of the stream is the only thing to
+        // watch for; a next request (bytes) is left for the next turn.
+        let result = if req.method == "shell.exec" {
+            let closed = async {
+                match s.fill_buf().await {
+                    Ok(b) if !b.is_empty() => std::future::pending::<()>().await,
+                    _ => {}
+                }
+            };
+            crate::shell::exec(shared, &req.params, closed).await
+        } else {
+            dispatch(shared, &req).await
+        };
+        let reply = match result {
             Ok(result) => json!({"id": req.id, "result": result}),
             Err(why) => {
                 logln!("rpc {}: {why}", req.method);
@@ -156,6 +172,7 @@ async fn dispatch(shared: &Arc<Shared>, req: &Request) -> Result<Value, String> 
         }
         "cookies.get" => cookies_get(shared, req).await,
         m if m.starts_with("apps.") => crate::apps::handle(shared, m, &req.params).await,
+        "shell.exec" => crate::shell::exec(shared, &req.params, std::future::pending::<()>()).await,
         "permission.request" => permission_request(shared, req).await,
         "device.info" => Ok(wire::device_info(
             &shared.device_id(),
@@ -453,6 +470,11 @@ async fn permission_request(shared: &Arc<Shared>, req: &Request) -> Result<Value
     if capability == crate::apps::CAP {
         return Err("denied: actions in the owner's apps are asked about one by one, when they happen".into());
     }
+    // Nor can a command be allowed ahead of time: the owner sees each one
+    // when it is about to run (or chose to be asked nothing).
+    if capability == crate::shell::CAP {
+        return Err("denied: commands are asked about one by one, when they run".into());
+    }
     let ask = ApprovalRequest::new(
         capability,
         scope,
@@ -561,6 +583,47 @@ mod tests {
             format!("request_too_large: {} bytes, max {MAX_REQUEST_LINE}", MAX_REQUEST_LINE + 1000)
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A command over a real stream: answered while the synth keeps the
+    /// stream open; killed when the synth closes its side.
+    #[tokio::test]
+    async fn shell_exec_runs_while_the_stream_is_open_and_stops_when_it_closes() {
+        use tokio::io::AsyncBufReadExt;
+        let core = testutil::core(testutil::Owner::new(Approval::deny()));
+        core.mutate_settings(|s| {
+            s.shell.enabled = true;
+            s.shell.mode = crate::settings::ShellMode::Auto;
+        });
+        let sleep = if crate::shell::os_shell().powershell { "Start-Sleep -Milliseconds 300; 'done'" } else { "sleep 0.3; echo done" };
+        let line = |command: &str| {
+            let mut l = serde_json::to_vec(&json!({"id": 5, "method": "shell.exec", "params": {"command": command}})).unwrap();
+            l.push(b'\n');
+            l
+        };
+
+        // Open: the answer comes when the command is done.
+        let (synth, app) = tokio::io::duplex(64 * 1024);
+        let shared = core.shared();
+        let server = tokio::spawn(async move { handle(BufReader::new(app), &shared).await });
+        let (rd, mut wr) = tokio::io::split(synth);
+        wr.write_all(&line(sleep)).await.unwrap();
+        let mut lines = BufReader::new(rd).lines();
+        assert!(lines.next_line().await.unwrap().unwrap().contains("\"ok\":true"));
+        let answer: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(answer["id"], 5);
+        assert_eq!(answer["result"]["exit_code"], 0, "{answer}");
+        wr.shutdown().await.unwrap();
+        server.await.unwrap();
+
+        // Closed right after the request: the command is stopped.
+        let long = if crate::shell::os_shell().powershell { "Start-Sleep -Seconds 30" } else { "sleep 30" };
+        let started = std::time::Instant::now();
+        let answers = serve(&core, line(long)).await;
+        assert!(started.elapsed() < std::time::Duration::from_secs(15));
+        assert_eq!(answers[1]["result"]["exit_code"], Value::Null);
+        let last = core.recent_journal().pop().unwrap();
+        assert_eq!(last.outcome, "cancelled: the synth went away");
     }
 
     #[tokio::test]

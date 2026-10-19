@@ -52,6 +52,7 @@ pub mod requests;
 pub mod rpc;
 pub mod secret;
 pub mod settings;
+pub mod shell;
 pub mod tcc;
 pub mod tcp;
 #[cfg(test)]
