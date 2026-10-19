@@ -185,7 +185,17 @@ writes are atomic.
   monthly byte cap, skip-on-metered, a journal line per connection.
 - **files**: list / stat / read / write (create / replace / append),
   read-only vs read-write roots, canonicalize-after-symlink confinement on
-  read AND create, no delete. See the TOCTOU note in `files.rs`.
+  read AND create, no delete. See the TOCTOU note in `files.rs`. With
+  ask-on-write the owner is asked once per file: the `append` chunks that
+  continue a write the owner allowed (same path, offset = the size after
+  the last chunk, within 10 minutes) are not asked again (`rpc::Transfers`).
+- **rpc request lines**: at most `rpc::MAX_REQUEST_LINE` (6 MiB, enough for
+  a 4 MiB `files.write` chunk in base64), told to the synth in the hello as
+  `capabilities.files.max_request_bytes`. A longer line is read to its end
+  (up to 64 MiB, so the synth finishes writing) and answered with ONE line
+  `{"id":null,"error":"request_too_large: <n> bytes, max <m>"}`, then the
+  stream is closed. Up to 0.1.11 the limit was 1 MiB and a longer line
+  closed the stream without an answer (synth bug #367).
 - **cookies**: per-domain grant (mode ask / ask-new / auto); one site at a
   time (a public suffix such as `com` is refused); two sources, a copy of the
   browser DB and the extension of a browser the owner linked; values never

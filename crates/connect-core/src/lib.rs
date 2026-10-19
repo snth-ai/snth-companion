@@ -54,6 +54,8 @@ pub mod secret;
 pub mod settings;
 pub mod tcc;
 pub mod tcp;
+#[cfg(test)]
+pub(crate) mod testutil;
 pub mod wire;
 pub mod ws_io;
 

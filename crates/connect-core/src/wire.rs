@@ -60,7 +60,10 @@ pub fn capabilities_value(
             "cua_version": cua_version,
             "status": cua_status,
         },
-        "files": {"enabled": s.files.enabled, "roots": roots},
+        // max_request_bytes: the longest rpc request line this app reads
+        // (added after the first release; a synth that does not know it
+        // sends 512 KiB chunks, one that does sizes them to it).
+        "files": {"enabled": s.files.enabled, "roots": roots, "max_request_bytes": crate::rpc::MAX_REQUEST_LINE},
         "apps": crate::apps::wire_value(apps, &s.apps),
     })
 }

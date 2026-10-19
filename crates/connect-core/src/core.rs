@@ -213,6 +213,8 @@ pub struct Shared {
     /// (Chrome and Edge on Windows); elsewhere the extension is the
     /// fallback.
     pub(crate) cookies_extension_first: AtomicBool,
+    /// Files being written chunk by chunk (rpc.rs `Transfers`).
+    pub(crate) transfers: crate::rpc::Transfers,
 }
 
 impl Shared {
@@ -1014,6 +1016,7 @@ impl Core {
             requests: crate::requests::LinkRequests::default(),
             browsers: crate::browser::Hub::default(),
             cookies_extension_first: AtomicBool::new(cfg!(windows)),
+            transfers: crate::rpc::Transfers::default(),
         });
         // A stored token means we are already paired: reflect it. The
         // synth url/id come back from settings.json (see above); the CLI
