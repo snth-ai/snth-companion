@@ -162,7 +162,7 @@ function placement(os: string): IslandPlacement {
   const notchW = real ? 185 : 184;
   const notchH = real ? 32 : os === "macos" ? 25 : 24;
   const w = 480;
-  const ear = 76;
+  const ear = 84;
   return {
     window: { x: 1512 / 2 - w / 2, y: 0, w, h: 300 },
     notch: { x: w / 2 - notchW / 2, y: 0, w: notchW, h: notchH },

@@ -22,9 +22,10 @@ use serde::{Deserialize, Serialize};
 pub const WINDOW_W: f64 = 480.0;
 pub const WINDOW_H: f64 = 300.0;
 
-/// Each ear beside the notch: room for the face on one side and the
+/// Each ear beside the notch: room for the face (about 70 px wide at the
+/// closed height, its state symbol included) on one side and the
 /// status on the other.
-pub const EAR_W: f64 = 64.0;
+pub const EAR_W: f64 = 84.0;
 
 /// The notch a Mac without one is drawn as if it had: about the notch of
 /// a 14" MacBook Pro.

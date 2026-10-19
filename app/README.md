@@ -497,7 +497,7 @@ talks to `<platform>/api/app/v1/*` only. There is no override in the UI.
   - Placement (`geometry.rs`, unit-tested): the screen with the menu bar.
     With a notch (`safeAreaInsets.top` > 0 and both `auxiliaryTop*Area`),
     the window is centred on the notch and the closed island is the notch
-    plus two 76 pt ears (face left, status right), as tall as the notch;
+    plus two 84 pt ears (face left, status right), as tall as the notch;
     without one the same shape is drawn as if there were a 184 pt notch, as
     tall as the menu bar. Placed again on
     `NSApplicationDidChangeScreenParametersNotification`.
