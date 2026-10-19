@@ -31,6 +31,8 @@ pub enum UiEvent {
     /// `ui_ready` and show the confirmation screen. Nothing is linked
     /// until the owner clicks there.
     PairLink,
+    /// The island asked the main window to show one of its screens.
+    OpenScreen { screen: String },
 }
 
 pub fn emit(app: &AppHandle, event: UiEvent) {

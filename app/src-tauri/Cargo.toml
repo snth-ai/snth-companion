@@ -26,7 +26,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 connect-core = { path = "../../crates/connect-core" }
 connect-host = { path = "../../crates/connect-host" }
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+# macos-private-api: a transparent window on macOS (the island draws its
+# own black shape, the rest of its window is see-through).
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-deep-link = "2"
 tauri-plugin-autostart = "2"
@@ -39,6 +41,11 @@ serde.workspace = true
 serde_json.workspace = true
 keyring.workspace = true
 directories.workspace = true
+base64.workspace = true
+# The island's screenshot: read the PNG the helper writes, scale it to the
+# protocol's 2560 px and send it as JPEG. Already in the build (Tauri's
+# icons); only the JPEG codec is new.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [target.'cfg(unix)'.dependencies]
 # access(2): can the app replace itself where it runs (updates.rs)?
@@ -47,7 +54,15 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 # crashlog.rs: the load address of the executable, and a stderr handle for
 # an app without a console. Already in the build (connect-host uses it).
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_LibraryLoader"] }
+# The island (island/panel.rs): the pointer's position, a window that is
+# never activated and stays out of screenshots.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
+
+# The island's microphone (island/audio.rs): CoreAudio on macOS, WASAPI on
+# Windows. Not on Linux, where the island is not shown (and ALSA would
+# need system headers in the build).
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+cpal = "0.18"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Two calls of SafariServices about the app's own Safari extension: is it
@@ -57,3 +72,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 # exception that reaches Rust aborts the app (the 0.1.7 Logins crash).
 objc2 = { version = "0.6", features = ["exception"] }
 block2 = "0.6"
+# The island's panel (island/panel.rs): geometry types for the NSScreen and
+# NSWindow calls. In the build already (Tauri's window layer), with these
+# features on.
+objc2-foundation = "0.3"

@@ -36,6 +36,15 @@ export const IconFolder = () => (
   </Svg>
 );
 
+/** The island: a pill at the top edge with two eyes. */
+export const IconIsland = () => (
+  <Svg>
+    <path d="M2.5 2.5h11v2.2a3.3 3.3 0 0 1-3.3 3.3H5.8a3.3 3.3 0 0 1-3.3-3.3V2.5Z" />
+    <path d="M6.2 5h.01M9.8 5h.01" strokeLinecap="round" strokeWidth="2" />
+    <path d="M5 11.5c1.9 1.4 4.1 1.4 6 0" strokeLinecap="round" />
+  </Svg>
+);
+
 export const IconApps = () => (
   <Svg>
     <rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1.2" />

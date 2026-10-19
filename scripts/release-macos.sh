@@ -284,6 +284,13 @@ codesign -d --entitlements - --xml "$APP" 2>/dev/null | grep -F "com.apple.secur
     die "the signed app lacks the com.apple.security.automation.apple-events entitlement (app/src-tauri/Entitlements.plist, bundle.macOS.entitlements in tauri.conf.json)"
 /usr/libexec/PlistBuddy -c 'Print :NSAppleEventsUsageDescription' "$APP/Contents/Info.plist" >/dev/null 2>&1 ||
     die "the built app has no NSAppleEventsUsageDescription (app/src-tauri/Info.plist)"
+# The island's hold-to-talk keys: without the entitlement the hardened
+# runtime refuses the microphone outright, and without the usage sentence
+# macOS does not even ask.
+codesign -d --entitlements - --xml "$APP" 2>/dev/null | grep -F "com.apple.security.device.audio-input" >/dev/null ||
+    die "the signed app lacks the com.apple.security.device.audio-input entitlement (app/src-tauri/Entitlements.plist)"
+/usr/libexec/PlistBuddy -c 'Print :NSMicrophoneUsageDescription' "$APP/Contents/Info.plist" >/dev/null 2>&1 ||
+    die "the built app has no NSMicrophoneUsageDescription (app/src-tauri/Info.plist)"
 note "entitled to ask for control of other apps (Automation), with its usage sentence"
 
 # The Safari extension: present, signed like the app, sandboxed (Safari loads

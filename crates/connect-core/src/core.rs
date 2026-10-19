@@ -91,6 +91,12 @@ pub enum CoreEvent {
     /// The name of the computer-control task that is running changed (or
     /// there is none any more): see `Core::computer_task`.
     ComputerTask,
+    /// The synth told the island about a message the owner sent from here
+    /// (island.rs, `island.event`).
+    Island(crate::island::IslandEvent),
+    /// A synth's face changed in the cache (read from it, set by the owner,
+    /// or changed by the synth itself).
+    Face { synth_id: String },
 }
 
 /// After a failed start of our daemon the next try waits: 5 s, 15 s, 1 min,
@@ -241,6 +247,12 @@ pub struct Shared {
     pub(crate) transfers: crate::rpc::Transfers,
     /// Stops every running command of the command line (shell.rs).
     pub(crate) shell: crate::shell::State,
+    /// The synths whose face was read (or set) in this run (island.rs).
+    pub(crate) faces_read: Mutex<std::collections::HashSet<String>>,
+    /// Where the synth last put its own pointer on the screen (screen
+    /// points, top-left origin, as the driver takes them) and when: the
+    /// island's eyes follow it while the synth drives. Memory only.
+    agent_cursor: Mutex<Option<(f64, f64, Instant)>>,
 }
 
 impl Shared {
@@ -779,6 +791,24 @@ impl Shared {
         task.as_ref().filter(|(_, at)| at.elapsed() < TASK_LABEL_TTL).map(|(label, _)| label.clone())
     }
 
+    /// The owner's island settings.
+    pub fn island(&self) -> crate::island::IslandSettings {
+        self.persisted.read().unwrap().island.clone()
+    }
+
+    /// The synth moved its pointer to (x, y), screen points.
+    pub(crate) fn note_agent_cursor(&self, x: f64, y: f64) {
+        if x.is_finite() && y.is_finite() {
+            *self.agent_cursor.lock().unwrap() = Some((x, y, Instant::now()));
+        }
+    }
+
+    /// Where the synth's pointer is, if it moved it in the last 10 s.
+    pub fn agent_cursor(&self) -> Option<(f64, f64)> {
+        let at = self.agent_cursor.lock().unwrap();
+        at.filter(|(_, _, t)| t.elapsed() < Duration::from_secs(10)).map(|(x, y, _)| (x, y))
+    }
+
     /// The look flags our running daemon was started with; None when no
     /// daemon of ours runs.
     pub async fn cua_daemon_look(&self) -> Option<Vec<String>> {
@@ -980,7 +1010,8 @@ impl Shared {
             let before = (persisted.identities.len(), persisted.grants.len());
             persisted.identities.retain(|i| i.synth_id != id);
             persisted.grants.retain(|g| g.synth_id != id);
-            if before != (persisted.identities.len(), persisted.grants.len()) {
+            let face = persisted.faces.remove(&id).is_some();
+            if before != (persisted.identities.len(), persisted.grants.len()) || face {
                 self.save_locked(&persisted);
             }
         }
@@ -1337,6 +1368,8 @@ impl Core {
             cookies_extension_first: AtomicBool::new(cfg!(windows)),
             transfers: crate::rpc::Transfers::default(),
             shell: crate::shell::State::default(),
+            faces_read: Mutex::new(std::collections::HashSet::new()),
+            agent_cursor: Mutex::new(None),
         });
         Core { shared }
     }
@@ -1418,6 +1451,88 @@ impl Core {
             s.computer.experiment = experiment;
             s.shell.mode = shell_mode;
         })
+    }
+
+    // --- the island (island.rs) ---
+
+    pub fn island(&self) -> crate::island::IslandSettings {
+        self.shared.island()
+    }
+
+    /// Change the island settings. Switching the island on or off is the
+    /// one change the synth hears of (`capabilities.island`): it moves
+    /// `settings_rev` and every link sends its settings again. The main
+    /// synth and the keys are the owner's own business.
+    pub fn set_island(&self, f: impl FnOnce(&mut crate::island::IslandSettings)) -> crate::island::IslandSettings {
+        let (rev, told, now) = {
+            let mut p = self.shared.persisted.write().unwrap();
+            let before = p.island.enabled;
+            f(&mut p.island);
+            p.island.normalize();
+            let told = p.island.enabled != before;
+            if told {
+                p.rev += 1;
+            }
+            if let Some(path) = &self.shared.settings_path {
+                let _ = settings::save(path, &p);
+            }
+            (p.rev, told, p.island.clone())
+        };
+        if told {
+            let _ = self.shared.settings_tx.send(rev);
+        }
+        let _ = self.shared.events.send(CoreEvent::Settings { rev });
+        now
+    }
+
+    /// The island as the UI shows it: the settings, the main synth, the
+    /// faces, which synths take island requests.
+    pub fn island_view(&self) -> crate::island::IslandView {
+        let settings = self.shared.island();
+        let links = self.shared.slots();
+        crate::island::IslandView {
+            main_synth: settings.main_synth_of(&links).map(|l| l.synth_id.clone()),
+            faces: self.shared.persisted.read().unwrap().faces.clone(),
+            supported: links.iter().map(|l| (l.synth_id.clone(), crate::island::supports(l))).collect(),
+            settings,
+        }
+    }
+
+    /// The synth the island's keys talk to right now.
+    pub fn island_main(&self) -> Option<Arc<LinkSlot>> {
+        self.shared.island().main_synth_of(&self.shared.slots())
+    }
+
+    /// One message from the owner (voice, screenshot and voice, text) to
+    /// this synth. Ok(message_id) once the synth accepted it.
+    pub async fn owner_message(&self, synth_id: &str, msg: &crate::island::OwnerMessage) -> Result<String, crate::island::SendError> {
+        crate::island::send(&self.shared, synth_id, msg).await
+    }
+
+    /// Read a synth's face into the cache.
+    pub async fn face_refresh(&self, synth_id: &str) -> Result<(), String> {
+        let slot = self.shared.slot(synth_id).ok_or("unknown_synth")?;
+        crate::island::refresh_face(&self.shared, &slot).await
+    }
+
+    /// The owner's editor saved a face (whole, or a patch).
+    pub async fn face_set(&self, synth_id: &str, face: serde_json::Value, patch: bool) -> Result<crate::island::FaceSet, String> {
+        crate::island::set_face(&self.shared, synth_id, face, patch).await
+    }
+
+    /// A picture of the screen for the island (see
+    /// `cua_apps::Directory::desktop_picture`). Err("not_installed")
+    /// while the app has no helper of its own yet.
+    pub async fn desktop_picture(&self, out: &std::path::Path, max_edge: u32) -> Result<serde_json::Value, String> {
+        if self.shared.cua_installer.is_some() && !std::path::Path::new(&self.shared.cua_bin_now()).is_file() {
+            return Err("not_installed".into());
+        }
+        self.shared.cua_dir.desktop_picture(out, max_edge).await
+    }
+
+    /// The cached face of a synth (None: the default preset of its id).
+    pub fn face_of(&self, synth_id: &str) -> Option<serde_json::Value> {
+        self.shared.persisted.read().unwrap().faces.get(synth_id).cloned()
     }
 
     /// The owner's picker: every app the driver lists on this computer,

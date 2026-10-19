@@ -1920,3 +1920,20 @@ details.more .more-body {
   max-height: 140px;
   overflow-y: auto;
 }
+
+/* The Island screen. */
+.island-face {
+  padding: 14px 16px;
+}
+.island-face-foot {
+  min-height: 18px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+.island-ask {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Backend, UiEvent } from "./types";
+import type { Backend, IslandSignal, IslandView, UiEvent } from "./types";
 
 const CHANNEL = "connect:event";
 
@@ -65,6 +65,38 @@ export const tauriBackend: Backend = {
   setDeveloper: (enabled) => invoke("set_developer", { enabled }),
   diagnostics: () => invoke("diagnostics"),
   openExternal: (target) => invoke("open_external", { target }),
+
+  islandSet: (enabled, mainSynth) => invoke("island_set", { enabled, mainSynth }),
+  islandHotkeySet: (which, accelerator) => invoke("island_hotkey_set", { which, accelerator }),
+  islandHotkeyReset: (which) => invoke("island_hotkey_reset", { which }),
+  faceRefresh: (synthId) => invoke("face_refresh", { synthId }),
+  faceSet: (synthId, face, patch) => invoke("face_set", { synthId, face, patch }),
+  islandAskDesign: (synthId) => invoke("island_ask_design", { synthId }),
+  islandMic: () => invoke("island_mic"),
+
+  islandView: () => invoke("island_view"),
+  islandLayout: (hit, faceX, faceY) => invoke("island_layout", { hit, faceX, faceY }),
+  islandTextSubmit: (text) => invoke("island_text_submit", { text }),
+  islandTextCancel: () => invoke("island_text_cancel"),
+  islandSelectSynth: (synthId) => invoke("island_select_synth", { synthId }),
+  islandStop: () => invoke("island_stop"),
+  islandOpenApp: () => invoke("island_open_app"),
+  subscribeIsland(listener) {
+    let stopped = false;
+    const offs: Array<() => void> = [];
+    const on = <T,>(name: string, map: (payload: T) => IslandSignal) =>
+      void listen<T>(name, (e) => listener(map(e.payload))).then((fn) => {
+        if (stopped) fn();
+        else offs.push(fn);
+      });
+    on<IslandView>("island:view", (view) => ({ type: "view", view }));
+    on<{ x: number; y: number; agent: boolean }>("island:gaze", (g) => ({ type: "gaze", ...g }));
+    on<number>("island:level", (level) => ({ type: "level", level }));
+    return () => {
+      stopped = true;
+      offs.forEach((fn) => fn());
+    };
+  },
 
   subscribe(listener) {
     let stopped = false;

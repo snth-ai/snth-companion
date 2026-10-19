@@ -551,10 +551,26 @@ pub async fn filter_scoped(
     shared
         .journal()
         .record(Entry::new("computer", "tools/call", tool, "ok"));
+    // Where the synth's pointer goes on the screen, for the island's eyes:
+    // a call with screen coordinates (no window to be relative to).
+    if let Some((x, y)) = screen_point(&msg) {
+        shared.note_agent_cursor(x, y);
+    }
     match serde_json::to_vec(&msg) {
         Ok(b) => Gate::Forward(b),
         Err(_) => Gate::Drop("cannot re-serialize"),
     }
+}
+
+/// The screen point of a call that names one: `x`/`y` with no window
+/// or process they would be relative to (`move_cursor`, a click on the
+/// desktop).
+fn screen_point(msg: &Value) -> Option<(f64, f64)> {
+    let args = msg.pointer("/params/arguments")?;
+    if args.get("window_id").is_some() || args.get("pid").is_some() {
+        return None;
+    }
+    Some((args.get("x")?.as_f64()?, args.get("y")?.as_f64()?))
 }
 
 /// Another synth drives the computer: one plain line, as `unavailable`
@@ -624,6 +640,15 @@ mod tests {
         assert_eq!(plain["error"]["data"]["class"], "owner_policy");
         // The stream closing for new settings is not a refusal.
         assert!(jsonrpc_unavailable(Value::from(2), REOPEN)["error"].get("data").is_none());
+    }
+
+    #[test]
+    fn a_point_on_the_screen_is_told_from_a_point_in_a_window() {
+        let call = |args: Value| json!({"method": "tools/call", "params": {"name": "move_cursor", "arguments": args}});
+        assert_eq!(screen_point(&call(json!({"session": "t", "x": 10, "y": 20.5}))), Some((10.0, 20.5)));
+        assert_eq!(screen_point(&call(json!({"x": 10, "y": 20, "window_id": 3}))), None);
+        assert_eq!(screen_point(&call(json!({"x": 10, "y": 20, "pid": 3}))), None);
+        assert_eq!(screen_point(&call(json!({"x": 10}))), None);
     }
 
     #[test]

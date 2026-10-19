@@ -63,6 +63,22 @@ const COMMANDS: &[&str] = &[
     "set_developer",
     "diagnostics",
     "open_external",
+    // the island: settings (main window)
+    "island_set",
+    "island_hotkey_set",
+    "island_hotkey_reset",
+    "face_refresh",
+    "face_set",
+    "island_ask_design",
+    // the island window
+    "island_view",
+    "island_layout",
+    "island_text_submit",
+    "island_text_cancel",
+    "island_select_synth",
+    "island_stop",
+    "island_open_app",
+    "island_mic",
 ];
 
 fn main() {

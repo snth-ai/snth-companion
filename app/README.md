@@ -16,14 +16,19 @@ at the end.
 
 ```
 app/
-  index.html, approval.html   the two pages (main window, approval window)
+  index.html, approval.html, island.html
+                the three pages (main window, approval window, the island)
   src/
     backend/    types.ts (the contract), tauri.ts (real), mock.ts (in-memory)
     i18n/       en.ts, ru.ts: every string the UI shows
     lib/        store.tsx (state), format.ts (journal lines, sizes, shortcuts)
     ui/         controls.tsx, icons.tsx
     screens/    Onboarding, Status, Internet, Computer, Files, Apps,
-                Logins, Activity, General, HelperStatus
+                Island, Logins, Activity, General, HelperStatus
+    island/     IslandApp.tsx (the island window), IslandStage.tsx (its
+                browser review stage), faceApi.ts (the one door to the
+                face module), face/ (the face: renderer, schema, presets,
+                editor; its own README lines)
     approval/   ApprovalView.tsx (the request window)
     MockStage.tsx   browser-only frame + review controls
     styles/app.css
@@ -33,6 +38,9 @@ app/
     src/approvals.rs   the Approver the core asks through
     src/actions.rs     pause / resume / quit / deep link / stop shortcut
     src/windows.rs     main + approval windows, navigation guard
+    src/island/        the island: window + panel (panel.rs), notch math
+                       (geometry.rs), hold keys (hold.rs), microphone
+                       (audio.rs), screenshot (shot.rs), the rest (mod.rs)
     src/tray.rs        tray icon and menu
     src/updates.rs     automatic updates of the app itself
     src/menu.rs        macOS application menu (clean Cmd+Q, Edit menu)
@@ -68,6 +76,11 @@ in-memory mock. The page shows the app inside a frame of the real window size
 each kind, add activity, start a working stream, drop the link, open a pairing
 link, switch language and theme.
 
+The island face (every look in every state, eyes on the mouse, the face
+editor) has its own page: `http://127.0.0.1:1420/src/island/face/demo.html`
+(`?view=grid|presets|states|editor`, more in `src/island/face/FaceDemo.tsx`);
+its schema tests run with `node --test src/island/face/*.test.mjs`.
+
 URL parameters stage a screen or a state directly:
 
 | Parameter | Values |
@@ -102,6 +115,8 @@ URL parameters stage a screen or a state directly:
 | `account` | the platform account: `signed_out` (first run, nothing linked: "Sign in with SNTH" waits about 2 s in the "browser", then shows the consent screen for Mia and Maya), `consent` (signed in, the consent screen), `two` (signed in, Mia and Maya linked), `none` (signed in, no synths: the code field), `repair` (two linked, Maya refused her token). Without it: signed out, Mia linked with a code, as before |
 | `login` | with `account=signed_out`: the sign-in fails, `denied` (Cancel in the browser) or `expired` |
 | `connectfail` | with `account=consent`: linking Maya fails, `connect_unavailable`, `synth_outdated`, `synth_unreachable` |
+| `island` | the Island screen (with `screen=island`): `off` (default), `on`, `outdated` (the synth is older than the island), `taken` (another app holds the talk key), `micdenied`, `two` (with `account=two`: Maya listens to the keys), `nolink` (on, Mia offline: the keys are released). On `island.html` (the island window on a pretend desktop): `idle` (default), `hover`, `listening`, `screen`, `sending`, `accepted`, `thinking`, `working`, `driving`, `done`, `error`, `approval`, `text`, `offline`, `outdated`, `micdenied`, `asking`, `paused`, `two`, `shot`; with `notch=0` (a Mac without a notch) and `os=windows`. The strip under the desktop plays a hold, a line of text, an answer, a request |
+| `faceset` | `invalid`: the synth refuses every face the editor saves |
 | `lang` | `en`, `ru` |
 | `theme` | `light`, `dark` |
 | `os` | `macos` (default), `windows`, `linux`. Apps follows it: the Mac apps are listed only with `macos` |
@@ -121,7 +136,8 @@ Examples: `?screen=logins`, `?screen=logins&logins=offline&ext=closed&os=windows
 `?screen=general&health=nodaemon&os=windows`,
 `?screen=apps&apps=noperm&messages=on`, `?screen=apps&os=windows`,
 `?approval=message&lang=ru`, `?screen=general&developer=1`, `?approval=shell&lang=ru`.
-`/approval.html` is the approval window's own page.
+`/approval.html` is the approval window's own page, `/island.html` the
+island's (`?island=listening`, `?island=done&lang=ru`, `?island=idle&notch=0`).
 
 In the mock pairing step: any 6 digits work; `000000` is "not valid",
 `111111` is "expired", `222222` is "server unreachable", `444444` is a new
@@ -464,6 +480,70 @@ talks to `<platform>/api/app/v1/*` only. There is no override in the UI.
   the synth (or replaces the token of a synth that is linked already).
   `snth://login?...` is the platform's answer to the app's own sign-in and
   is acted on only with the state the app is waiting for.
+- The island (test feature, off by default; `src/island/`, connect-core
+  `island.rs`, the protocol in the synth's `docs/connect.md`, "Island").
+  - Window: a third window `island` (island.html), transparent, no frame,
+    created only while the island is on and a synth is linked. macOS: the
+    window is turned into a non-activating NSPanel (`panel.rs`: its class
+    switched to a run-time subclass of NSPanel, `NonactivatingPanel` style,
+    level `NSMainMenuWindowLevel + 3`, `canJoinAllSpaces | stationary |
+    ignoresCycle | fullScreenAuxiliary`, never hidden on deactivate, no
+    shadow, `NSWindowSharingNone`), done with objc2 directly rather than
+    the `tauri-nspanel` git dependency; every send is inside
+    `exception::catch`. It never activates the app or takes the focus, and
+    is not in the Dock, Cmd-Tab or Mission Control. Windows: an
+    always-on-top tool window with `WS_EX_NOACTIVATE`, content-protected
+    (`WDA_EXCLUDEFROMCAPTURE`). Linux: not shown.
+  - Placement (`geometry.rs`, unit-tested): the screen with the menu bar.
+    With a notch (`safeAreaInsets.top` > 0 and both `auxiliaryTop*Area`),
+    the window is centred on the notch and the closed island is the notch
+    plus two 84 pt ears (face left, status right), as tall as the notch;
+    without one the same shape is drawn as if there were a 184 pt notch, as
+    tall as the menu bar. Placed again on
+    `NSApplicationDidChangeScreenParametersNotification`.
+  - Clicks: the webview reports the shape and the face centre
+    (`island_layout`); a poller in Rust reads the pointer (macOS
+    `CGEventGetLocation`, Windows `GetCursorPos`) only while the island is
+    shown, 30 Hz while it moves and 5 Hz at rest, switches
+    `set_ignore_cursor_events` as it crosses the shape (hover opens the
+    island), and sends `island:gaze` (a vector from the face, -1..1) only
+    when the target moved. While the main synth drives the computer the
+    eyes follow the synth's own pointer (`move_cursor` or a desktop click
+    through the pipe, kept 10 s by the core).
+  - Keys (`hold.rs`): defaults macOS Option+Space (talk), Option+Shift+Space
+    (talk + screenshot), Control+Option+Space (text); Windows
+    Ctrl+Alt+Space, Ctrl+Alt+Shift+Space, Ctrl+Alt+Enter (Alt+Space is the
+    window menu, Ctrl+Space the input method, Win+ belongs to the shell).
+    Registered only while the island is on, the main synth is linked and
+    the app is not paused; otherwise other apps get them. A hold under
+    300 ms sends nothing, two minutes ends a hold. The stop shortcut is
+    registered next to them (it no longer unregisters everything).
+  - Voice (`audio.rs`): cpal, mono, resampled to 16 kHz on the fly, WAV
+    16-bit (the synth's Gemini speech-to-text takes it as it is; two minutes
+    are 3.8 MB), a level for the face every 50 ms. macOS: recorded only
+    after `AVCaptureDevice` says the microphone is allowed (asked once,
+    `NSMicrophoneUsageDescription`, entitlement
+    `com.apple.security.device.audio-input`, checked by the release
+    script).
+  - Screenshot (`shot.rs`): at the press, the app's own helper runtime
+    (`get_desktop_state`, the same direct runtime that reads the list of
+    apps, never the synth's pipe); macOS falls back to `screencapture -D`
+    on the display under the pointer. Scaled to 2560 px, JPEG 80. The
+    island is excluded from capture and made invisible for the moment.
+  - Sending: `owner.message` on the main synth's control stream (a request
+    line; waits only for `accepted`, 90 s; one retry with the same
+    client_id after a dropped link). One message at a time. `island.event`
+    (rpc) moves the face: accepted, thinking, working, done with the
+    summary for 6 s (channel named), error.
+  - Faces: cached per synth in settings.json (`faces`), read with
+    `face.get` when a synth that announces `island` links, saved with
+    `face.set` from the editor on the Island screen, replaced live by
+    `island.event kind=face`. A synth without a face shows the default
+    preset of its id.
+  - Island screen: on/off, who listens, the three keys (recorder,
+    conflicts with each other and the stop shortcut, a system check,
+    default), the microphone, the face editor and "Ask <name> to design
+    their own face" (a line of text through `owner.message`).
 - Webview permissions: `build.rs` lists every app command, which makes Tauri
   enforce `capabilities/*.json` per window. The main window gets the app's
   commands and the event listener; the approval window gets five commands.
@@ -712,6 +792,14 @@ then split off), so it waits for the release manager.
 
 ## Not verified
 
+- The island, live. Unit-tested: the notch arithmetic, the hold state
+  machine, the WAV and resampler, the JPEG scaling, owner.message and its
+  limits and errors, faces, island.event. Built (debug app) on macOS. Never
+  done on a real machine: the panel over a full-screen app and on every
+  Space, clicks through the transparent part, a real notch, a screen
+  change, the microphone prompt and a real recording, the helper's
+  `get_desktop_state` picture (and which display it takes), the island out
+  of the picture, the keys on Windows, a whole round trip with a synth.
 - Sign-in through the platform, and several synths at once, end to end. The
   core is tested against a fake platform (PKCE, the state check, consent,
   the sync adding and dropping synths, a revoked app token, sign-out, a

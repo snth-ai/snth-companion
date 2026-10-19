@@ -169,6 +169,20 @@ function appsWording(req: ApprovalRequest, s: Strings): Wording {
   return { ...words, spans, hint, labels };
 }
 
+/** For the island: the request's title and the shortest answer that
+ * allows it (the window's first choice), so the island can offer Allow
+ * and Don't allow without the window. A request this version does not
+ * understand is not offered there (`unknown`). */
+export function quickAnswer(
+  req: ApprovalRequest,
+  s: Strings,
+  name: string,
+): { title: string; duration: AnswerDuration; hours?: number; unknown: boolean } {
+  const words = wording(req, s, name, false);
+  const first = ANSWER[words.spans[0] ?? "once"];
+  return { title: words.title, duration: first.duration, hours: first.hours, unknown: Boolean(words.unknown) };
+}
+
 function Details(props: { items: ApprovalDetail[]; s: Strings }) {
   const a = props.s.approval.apps;
   if (props.items.length === 0) return null;

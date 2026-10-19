@@ -12,6 +12,7 @@ mod browsers;
 mod commands;
 mod crashlog;
 mod i18n;
+mod island;
 mod logins;
 #[cfg(target_os = "macos")]
 mod menu;
@@ -149,6 +150,8 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
         browser_link: Mutex::new(None),
         vault: logins::VaultCache::default(),
         safari: safari::Safari::detect(|exe| logins::stays_put(exe, false)),
+        stop_shortcut: Mutex::new(None),
+        island: island::Island::default(),
     });
     app.manage(ctx.clone());
 
@@ -161,7 +164,10 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
     // Subscribe before the link starts so no event is missed.
     spawn_event_forwarder(ctx.clone());
     spawn_link(ctx.clone(), shutdown_rx.clone());
-    spawn_helper(ctx.clone(), shutdown_rx.clone());
+    // The island's demo (a debug build only) has no use for the helper.
+    if !island::demo() {
+        spawn_helper(ctx.clone(), shutdown_rx.clone());
+    }
     // The SNTH Vault extension: serve its helper, and tell the installed
     // browsers where that helper is (only while linked to a synth; this
     // also follows the app after an update or a move).
@@ -183,7 +189,7 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
     // window was hidden: stay in the tray, unless there is something the
     // owner has to do first (pair or finish onboarding).
     let asked_hidden = resume_hidden.unwrap_or_else(|| std::env::args().any(|a| a == HIDDEN_FLAG));
-    let hidden = asked_hidden && onboarded && core.is_paired();
+    let hidden = (asked_hidden && onboarded && core.is_paired()) || island::demo();
     ctx.updates.started_hidden.store(hidden, Ordering::Release);
     ctx.updates.window_was_shown.store(!hidden, Ordering::Release);
     windows::create_main(&handle, !hidden)?;
@@ -197,6 +203,9 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
     // The stop shortcut. Another app may own the combination; the General
     // screen shows that and lets the owner pick another.
     let _ = actions::set_stop_shortcut(&ctx, &stop_shortcut);
+    // The island (off by default): its window and keys follow the
+    // settings and the links from here on.
+    island::spawn(ctx.clone());
 
     // snth://pair?code=...
     #[cfg(any(windows, target_os = "linux"))]
@@ -325,6 +334,8 @@ fn spawn_event_forwarder(ctx: Arc<Ctx>) {
                         tray::refresh(&ctx);
                         ui::emit(&ctx.app, UiEvent::State);
                     }
+                    // The island follows its own events (island/mod.rs).
+                    Ok(CoreEvent::Island(_)) => {}
                     Ok(_) | Err(RecvError::Lagged(_)) => {
                         tray::refresh(&ctx);
                         ui::emit(&ctx.app, UiEvent::State);
@@ -365,12 +376,17 @@ fn main() {
         ))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _shortcut, event| {
-                    // The only shortcut the app registers is "stop".
-                    if event.state() != ShortcutState::Pressed {
+                .with_handler(|app, shortcut, event| {
+                    let Some(ctx) = ctx_of(app) else { return };
+                    // The island's hold keys: both the press and the release.
+                    if let Some(kind) = ctx.island.kind_of(shortcut.id()) {
+                        island::on_key(&ctx, kind, event.state());
                         return;
                     }
-                    let Some(ctx) = ctx_of(app) else { return };
+                    // Else it is "stop".
+                    if event.state() != ShortcutState::Pressed || !actions::is_stop_shortcut(&ctx, shortcut.id()) {
+                        return;
+                    }
                     tauri::async_runtime::spawn(async move {
                         if !ctx.core.link_brief().paused {
                             actions::pause(&ctx).await;
@@ -440,11 +456,25 @@ fn main() {
             commands::set_developer,
             commands::diagnostics,
             commands::open_external,
+            commands::island_set,
+            commands::island_hotkey_set,
+            commands::island_hotkey_reset,
+            commands::face_refresh,
+            commands::face_set,
+            commands::island_ask_design,
+            commands::island_view,
+            commands::island_layout,
+            commands::island_text_submit,
+            commands::island_text_cancel,
+            commands::island_select_synth,
+            commands::island_stop,
+            commands::island_open_app,
+            commands::island_mic,
         ])
         .on_window_event(|window, event| {
             // The main window came up: a good moment to read the account.
             if let WindowEvent::Focused(true) = event {
-                if window.label() != windows::APPROVAL {
+                if window.label() == windows::MAIN {
                     if let Some(ctx) = ctx_of(window.app_handle()) {
                         ctx.account_wake.notify_one();
                     }
@@ -464,6 +494,9 @@ fn main() {
                         }
                         windows::hide_approval(app);
                     }
+                    // The island has no close button; it goes with its
+                    // switch on the Island screen.
+                    island::WINDOW => {}
                     _ => windows::hide_main(app),
                 }
             }

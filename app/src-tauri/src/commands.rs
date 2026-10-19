@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use connect_core::pairing::normalize_code;
 use connect_core::{Approval, Core, Duration_, Entry, InstallState, Preset, Settings};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::DialogExt;
 
@@ -1015,6 +1015,14 @@ pub fn open_external(ctx: Cx<'_>, target: String) -> Result<(), String> {
         "privacy_full_disk" => {
             "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
         }
+        // The island's microphone.
+        "privacy_microphone" => {
+            if cfg!(windows) {
+                "ms-settings:privacy-microphone"
+            } else {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+            }
+        }
         "helper" => "https://cua.ai/docs/cua-driver",
         // Where the SNTH Vault extension is installed from.
         "vault_extension" => extension.as_str(),
@@ -1022,6 +1030,154 @@ pub fn open_external(ctx: Cx<'_>, target: String) -> Result<(), String> {
         _ => return Err("unknown_target".into()),
     };
     run_detached(open_argv(url))
+}
+
+// --- the island ---
+
+/// The island's settings: switch it on or off, choose the main synth.
+#[tauri::command]
+pub async fn island_set(ctx: Cx<'_>, enabled: Option<bool>, main_synth: Option<String>) -> Result<UiState, String> {
+    if enabled == Some(true) && !crate::island::supported_os() {
+        return Err("unsupported".into());
+    }
+    if let Some(id) = &main_synth {
+        if !id.is_empty() && !ctx.core.link_ids().contains(id) {
+            return Err("unknown_synth".into());
+        }
+    }
+    let before = ctx.core.island();
+    let now = ctx.core.set_island(|i| {
+        if let Some(on) = enabled {
+            i.enabled = on;
+        }
+        if let Some(id) = main_synth {
+            i.main_synth = id;
+        }
+    });
+    // Just switched on: read every linked synth's face.
+    if now.enabled && !before.enabled {
+        for id in ctx.core.link_ids() {
+            let core = ctx.core.clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = core.face_refresh(&id).await;
+            });
+        }
+    }
+    crate::island::sync(&ctx);
+    Ok(build_state(&ctx).await)
+}
+
+/// Change one hold key ("" = off). Err: "bad_shortcut", "conflict:<key>"
+/// (another island key or "stop"), "shortcut_unavailable" (another app
+/// holds it), "unknown_key".
+#[tauri::command]
+pub async fn island_hotkey_set(ctx: Cx<'_>, which: String, accelerator: String) -> Result<UiState, String> {
+    let kind = connect_core::island::HotkeyKind::parse(&which).ok_or("unknown_key")?;
+    let accelerator = accelerator.trim().to_string();
+    crate::island::check_hotkey(&ctx, kind, &accelerator)?;
+    ctx.core.set_island(|i| i.hotkeys.set(kind, accelerator));
+    crate::island::sync(&ctx);
+    Ok(build_state(&ctx).await)
+}
+
+/// Put one hold key back to this system's default.
+#[tauri::command]
+pub async fn island_hotkey_reset(ctx: Cx<'_>, which: String) -> Result<UiState, String> {
+    let kind = connect_core::island::HotkeyKind::parse(&which).ok_or("unknown_key")?;
+    let default = connect_core::island::Hotkeys::default().get(kind).to_string();
+    crate::island::check_hotkey(&ctx, kind, &default)?;
+    ctx.core.set_island(|i| i.hotkeys.set(kind, default));
+    crate::island::sync(&ctx);
+    Ok(build_state(&ctx).await)
+}
+
+/// Read a synth's face again (the editor opens).
+#[tauri::command]
+pub async fn face_refresh(ctx: Cx<'_>, synth_id: String) -> Result<UiState, String> {
+    ctx.core.face_refresh(&synth_id).await?;
+    Ok(build_state(&ctx).await)
+}
+
+/// The owner's editor saved a face: `face.set` on the synth.
+#[tauri::command]
+pub async fn face_set(ctx: Cx<'_>, synth_id: String, face: serde_json::Value, patch: bool) -> Result<connect_core::island::FaceSet, String> {
+    ctx.core.face_set(&synth_id, face, patch).await
+}
+
+/// "Ask <name> to design their own face".
+#[tauri::command]
+pub async fn island_ask_design(ctx: Cx<'_>, synth_id: String) -> Result<(), String> {
+    crate::island::ask_design(&ctx, &synth_id).await
+}
+
+/// The island window: everything it shows.
+#[tauri::command]
+pub fn island_view(ctx: Cx<'_>) -> crate::island::View {
+    crate::island::view(&ctx)
+}
+
+/// The island window: which part takes clicks, where the face is.
+#[tauri::command]
+pub fn island_layout(ctx: Cx<'_>, hit: crate::island::geometry::Rect, face_x: f64, face_y: f64) {
+    crate::island::layout(&ctx, hit, (face_x, face_y));
+}
+
+/// The island window: Enter in the line of text.
+#[tauri::command]
+pub async fn island_text_submit(ctx: Cx<'_>, text: String) -> Result<(), String> {
+    crate::island::submit_text(&ctx, text).await
+}
+
+/// The island window: Esc in the line of text.
+#[tauri::command]
+pub fn island_text_cancel(ctx: Cx<'_>) {
+    crate::island::close_text(&ctx);
+}
+
+/// The island window: the switcher picks another main synth.
+#[tauri::command]
+pub async fn island_select_synth(ctx: Cx<'_>, synth_id: String) -> Result<(), String> {
+    if !ctx.core.link_ids().contains(&synth_id) {
+        return Err("unknown_synth".into());
+    }
+    ctx.core.set_island(|i| i.main_synth = synth_id);
+    crate::island::sync(&ctx);
+    Ok(())
+}
+
+/// The island window: "stop" (the same as the stop shortcut: pause).
+#[tauri::command]
+pub async fn island_stop(ctx: Cx<'_>) -> Result<(), String> {
+    if !ctx.core.link_brief().paused {
+        actions::pause(&ctx).await;
+        ui::notify_paused(&ctx.app);
+    }
+    Ok(())
+}
+
+/// The island window: open the app (its Island screen).
+#[tauri::command]
+pub fn island_open_app(ctx: Cx<'_>) {
+    windows::show_main(&ctx.app);
+    ui::emit(&ctx.app, UiEvent::OpenScreen { screen: "island".into() });
+}
+
+/// The island window: the microphone's privacy settings (after a no), or
+/// make the system ask (before any answer).
+#[tauri::command]
+pub fn island_mic(ctx: Cx<'_>) -> Result<(), String> {
+    match crate::island::audio::permission() {
+        crate::island::audio::MicPermission::NotAsked => {
+            let app = ctx.app.clone();
+            crate::island::audio::request_permission(Box::new(move |_| {
+                if let Some(ctx) = app.try_state::<Arc<Ctx>>() {
+                    crate::island::emit_view(&ctx);
+                }
+            }));
+            Ok(())
+        }
+        _ => open_external(ctx, "privacy_microphone".into()),
+    }
 }
 
 /// The system's way to open an address in the default browser.

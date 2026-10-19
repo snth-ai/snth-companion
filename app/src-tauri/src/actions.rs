@@ -102,14 +102,31 @@ pub fn handle_deep_link(ctx: &Arc<Ctx>, url: &str) {
 /// text is not a shortcut).
 pub fn set_stop_shortcut(ctx: &Arc<Ctx>, accelerator: &str) -> Result<(), String> {
     let gs = ctx.app.global_shortcut();
-    let _ = gs.unregister_all();
+    // Only the stop shortcut: the island's keys are registered next to it.
+    if let Some(old) = ctx.stop_shortcut.lock().unwrap().take() {
+        let _ = gs.unregister(old);
+    }
     *ctx.shortcut_active.lock().unwrap() = false;
     if accelerator.trim().is_empty() {
         return Ok(());
     }
     let shortcut = Shortcut::from_str(accelerator).map_err(|e| format!("bad_shortcut: {e}"))?;
+    // One of the island's keys already: not a second time.
+    let island = ctx.core.island().hotkeys;
+    let mine = connect_core::island::canonical(accelerator);
+    if connect_core::island::HotkeyKind::ALL.iter().any(|k| connect_core::island::canonical(island.get(*k)) == mine)
+        && ctx.island.keys_active()
+    {
+        return Err("shortcut_unavailable: an island key".into());
+    }
     gs.register(shortcut)
         .map_err(|e| format!("shortcut_unavailable: {e}"))?;
+    *ctx.stop_shortcut.lock().unwrap() = Some(shortcut);
     *ctx.shortcut_active.lock().unwrap() = true;
     Ok(())
+}
+
+/// Is this the stop shortcut?
+pub fn is_stop_shortcut(ctx: &Ctx, id: u32) -> bool {
+    ctx.stop_shortcut.lock().unwrap().is_some_and(|s| s.id() == id)
 }

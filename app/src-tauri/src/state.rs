@@ -84,6 +84,11 @@ pub struct Ctx {
     /// The Safari extension that ships inside this app (macOS): whether
     /// this copy carries it, whether the owner switched it on.
     pub safari: crate::safari::Safari,
+    /// The stop shortcut as registered now (only it is released when it
+    /// changes: the island's keys are registered next to it).
+    pub stop_shortcut: Mutex<Option<tauri_plugin_global_shortcut::Shortcut>>,
+    /// The island: its window, its keys, the message on its way.
+    pub island: crate::island::Island,
 }
 
 impl Ctx {
@@ -153,6 +158,22 @@ pub struct PrefsDto {
     pub developer: bool,
 }
 
+/// The Island screen.
+#[derive(Debug, Clone, Serialize)]
+pub struct IslandDto {
+    /// The island can be shown on this system (macOS, Windows).
+    pub available: bool,
+    #[serde(flatten)]
+    pub core: connect_core::island::IslandView,
+    /// This system's default keys (for "reset").
+    pub defaults: connect_core::island::Hotkeys,
+    /// The keys are registered with the system right now.
+    pub keys_active: bool,
+    /// A key the system would not give ("taken", "bad"), by key.
+    pub key_problems: std::collections::HashMap<connect_core::island::HotkeyKind, String>,
+    pub mic: crate::island::audio::MicPermission,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AppInfo {
     pub version: String,
@@ -204,6 +225,8 @@ pub struct UiState {
     /// The platform account: signed in or not, the sign-in in progress,
     /// the account's synths.
     pub account: connect_core::account::AccountView,
+    /// The island (the Island screen).
+    pub island: IslandDto,
     pub prefs: PrefsDto,
     pub app: AppInfo,
 }
@@ -245,6 +268,14 @@ pub async fn build_state(ctx: &Ctx) -> UiState {
         look_support: ctx.core.look_support(),
         logins: crate::logins::state(ctx),
         account: ctx.core.account_view(),
+        island: IslandDto {
+            available: crate::island::supported_os(),
+            core: ctx.core.island_view(),
+            defaults: connect_core::island::Hotkeys::default(),
+            keys_active: ctx.island.keys_active(),
+            key_problems: ctx.island.problems(),
+            mic: crate::island::audio::permission(),
+        },
         prefs: PrefsDto {
             onboarded: prefs.onboarded,
             language: prefs.language,
