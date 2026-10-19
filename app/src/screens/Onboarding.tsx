@@ -1,26 +1,32 @@
-// First run, and again after unlinking: welcome, code, confirmation, then
-// the choices that decide what the synth may do. Nothing is linked before
-// the Connect click on the confirmation step, and nothing is allowed
-// before a preset is applied.
+// First run, and again after unlinking: welcome (sign in with SNTH, or a
+// code from the bot), then the account's consent screen or the code's
+// confirmation, then the choices that decide what the synth may do.
+// Nothing is linked before a Connect click, and nothing is allowed before
+// a preset is applied. These choices are made once: a second synth joins
+// without them.
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { backend } from "../backend";
 import type { Preset, SuggestedRoot } from "../backend/types";
 import { hostOf, shortPath, summarize } from "../lib/format";
-import { useStore } from "../lib/store";
+import { synthsNames, useStore } from "../lib/store";
 import { Notice, Switch } from "../ui/controls";
 import { IconCheck, IconFolder, IconPlus, IconX } from "../ui/icons";
 import { HelperStatus } from "./HelperStatus";
+import { AccountNote, claimError, CodeInput } from "./Pairing";
 
-export type Step = "welcome" | "code" | "confirm" | "preset" | "folders" | "computer" | "done";
+/** "account": the browser sign-in and what follows it (waiting, the
+ * consent screen, an account with no synths yet). */
+export type Step = "welcome" | "code" | "confirm" | "account" | "preset" | "folders" | "computer" | "done";
 const ORDER: Step[] = ["welcome", "code", "confirm", "preset", "folders", "computer", "done"];
-const BEFORE_LINK: Step[] = ["welcome", "code", "confirm"];
+const BEFORE_LINK: Step[] = ["welcome", "code", "confirm", "account"];
 
 type Choice = Exclude<Preset, "custom">;
 
 function Frame(props: { step: Step; center?: boolean; children: ReactNode; foot: ReactNode }) {
   const { s } = useStore();
-  const index = ORDER.indexOf(props.step);
+  // The account's screens stand where the code's confirmation stands.
+  const index = ORDER.indexOf(props.step === "account" ? "confirm" : props.step);
   return (
     <div className="onb">
       <div className={`onb-body${props.center ? " center" : ""}`}>
@@ -37,8 +43,12 @@ function Frame(props: { step: Step; center?: boolean; children: ReactNode; foot:
 export function Onboarding(props: { initialStep?: Step }) {
   const { state, s, name, act, edit, linkCode, takeLinkCode } = useStore();
   const t = s.onboarding;
+  const a = s.account;
   const paired = state.core.paired;
   const settings = state.core.settings;
+  const account = state.account;
+  const login = account.login;
+  const loginBusy = login.phase === "waiting" || login.phase === "exchanging";
 
   const [step, setStep] = useState<Step>(() => {
     if (props.initialStep) return props.initialStep;
@@ -56,25 +66,46 @@ export function Onboarding(props: { initialStep?: Step }) {
   const [autostart, setAutostart] = useState(true);
   const codeRef = useRef<HTMLInputElement>(null);
 
-  // The link state decides which half of the flow can be shown.
-  const shown: Step = paired ? (BEFORE_LINK.includes(step) ? "preset" : step) : BEFORE_LINK.includes(step) ? step : "welcome";
+  // Where a cancelled confirmation goes back to: the code field it came from.
+  const [codeFrom, setCodeFrom] = useState<"code" | "account">("code");
+  const [accountCode, setAccountCode] = useState("");
 
-  const claim = async (value: string, viaLink: boolean) => {
+  // The link state decides which half of the flow can be shown. Before a
+  // link, a sign-in under way or a signed-in account shows the account's
+  // screens instead of the welcome.
+  const beforeLink: Step = BEFORE_LINK.includes(step) ? step : "welcome";
+  const shown: Step = paired
+    ? BEFORE_LINK.includes(step)
+      ? "preset"
+      : step
+    : (beforeLink === "welcome" || beforeLink === "account") && (loginBusy || account.signed_in)
+      ? "account"
+      : beforeLink === "account"
+        ? "welcome"
+        : beforeLink;
+
+  const claim = async (value: string, viaLink: boolean, from: "code" | "account" = "code") => {
     setBusy(true);
     setError(null);
     try {
       await backend.pairBegin(value, hub.trim() || undefined);
       const next = await backend.getState();
       setFromLink(viaLink);
+      setCodeFrom(from);
       await act(async () => next);
       setStep("confirm");
     } catch (e) {
-      const key = String(e).split(":")[0]!.trim();
-      setError(t.errors[key] ?? t.errors.hub_error!);
-      setStep("code");
+      setError(claimError(e, t.errors));
+      setStep(from);
     } finally {
       setBusy(false);
     }
+  };
+
+  const signIn = () => {
+    setError(null);
+    setStep("account");
+    void backend.openExternal("platform_login").then(() => act(() => backend.getState()));
   };
 
   // A `snth://pair` link: ask the hub who the code belongs to and show the
@@ -113,9 +144,14 @@ export function Onboarding(props: { initialStep?: Step }) {
         step="welcome"
         center
         foot={
-          <button type="button" className="btn primary large" onClick={() => setStep("code")}>
-            {t.start}
-          </button>
+          <>
+            <button type="button" className="btn large" onClick={() => setStep("code")}>
+              {a.haveCode}
+            </button>
+            <button type="button" className="btn primary large" onClick={signIn}>
+              {a.signIn}
+            </button>
+          </>
         }
       >
         <div className="onb-welcome">
@@ -124,7 +160,169 @@ export function Onboarding(props: { initialStep?: Step }) {
           {t.welcomeBody.map((line) => (
             <p key={line}>{line}</p>
           ))}
+          <p>{a.signInNote}</p>
+          {login.phase === "failed" ? (
+            <p className="error-text" role="alert">
+              {a.failed[login.code] ?? a.failedOther}
+            </p>
+          ) : null}
         </div>
+      </Frame>
+    );
+  }
+
+  if (shown === "account") {
+    // In the browser: signing in and allowing SNTH Connect there.
+    if (loginBusy) {
+      return (
+        <Frame
+          step="account"
+          center
+          foot={
+            <>
+              <button type="button" className="btn" onClick={() => void act(() => backend.loginCancel()).then(() => setStep("welcome"))}>
+                {s.common.cancel}
+              </button>
+              <button type="button" className="btn primary" disabled={login.phase === "exchanging"} onClick={() => void backend.openExternal("platform_login")}>
+                {a.openAgain}
+              </button>
+            </>
+          }
+        >
+          <div className="onb-welcome">
+            <img className="onb-icon" src="/app-icon.png" alt="" />
+            <h1>{login.phase === "exchanging" ? a.exchanging : a.waitingTitle}</h1>
+            <p>{a.waitingBody}</p>
+          </div>
+        </Frame>
+      );
+    }
+
+    const email = account.account?.email ?? "";
+    const otherAccount = (
+      <button type="button" className="btn quiet" disabled={busy} onClick={() => void act(() => backend.signOut()).then(() => setStep("welcome"))}>
+        {a.otherAccount}
+      </button>
+    );
+
+    if (account.synths === null) {
+      return (
+        <Frame
+          step="account"
+          foot={
+            <>
+              {otherAccount}
+              <button type="button" className="btn primary" disabled={busy} onClick={() => void act(() => backend.accountSync())}>
+                {a.checkAgain}
+              </button>
+            </>
+          }
+        >
+          <h1>{a.consentAccount(email)}</h1>
+          <p className="onb-lead" aria-live="polite">
+            {account.sync_error ? a.syncFailed : a.checking}
+          </p>
+        </Frame>
+      );
+    }
+
+    if (account.synths.length === 0) {
+      return (
+        <Frame
+          step="account"
+          foot={
+            <>
+              {otherAccount}
+              <button type="button" className="btn" disabled={busy} onClick={() => void act(() => backend.accountSync())}>
+                {a.checkAgain}
+              </button>
+              <button
+                type="button"
+                className="btn primary"
+                disabled={busy || accountCode.length !== 6}
+                onClick={() => void claim(accountCode, false, "account")}
+              >
+                {busy ? t.checking : s.common.continue}
+              </button>
+            </>
+          }
+        >
+          <h1>{a.noSynthsTitle}</h1>
+          <p className="onb-lead">{a.consentAccount(email)}</p>
+          <p className="onb-lead">{a.noSynthsBody}</p>
+          <CodeInput
+            value={accountCode}
+            onChange={(next) => {
+              setAccountCode(next);
+              setError(null);
+            }}
+            onSubmit={() => void claim(accountCode, false, "account")}
+            busy={busy}
+            error={error ?? (account.sync_error ? a.syncFailed : null)}
+          />
+        </Frame>
+      );
+    }
+
+    const names = s.common.names(account.synths.map((x) => x.name || x.synth_id));
+    return (
+      <Frame
+        step="account"
+        foot={
+          <>
+            {otherAccount}
+            <button
+              type="button"
+              className="btn primary"
+              disabled={busy}
+              onClick={() => {
+                setBusy(true);
+                setError(null);
+                void act(() => backend.accountConnect()).then((ok) => {
+                  setBusy(false);
+                  // Moves on once a link exists; a synth that could not be
+                  // connected says why on its row.
+                  if (ok) setStep("preset");
+                  else setError(s.common.failed);
+                });
+              }}
+            >
+              {busy ? a.connecting : a.connect}
+            </button>
+          </>
+        }
+      >
+        <h1>{a.consentTitle}</h1>
+        <p className="onb-lead">{a.consentAccount(email)}</p>
+        <div className="group facts">
+          {account.synths.map((x) => (
+            <div className="row" key={`${x.hub_id}/${x.synth_id}`}>
+              <span className="row-text">
+                <span style={{ fontWeight: 600 }}>{x.name || x.synth_id}</span>
+                {x.error ? (
+                  <span className="error-text" role="alert" style={{ display: "block", fontSize: 13 }}>
+                    {a.synthError(x.error, x.name || x.synth_id, x.reason)}
+                  </span>
+                ) : null}
+              </span>
+            </div>
+          ))}
+          <div className="row">
+            <span className="row-label">{t.confirmComputer}</span>
+            <span className="row-text">{state.app.device_name}</span>
+          </div>
+        </div>
+        <p className="onb-lead" style={{ fontSize: 13 }}>
+          {a.consentBody(names)}
+        </p>
+        <p className="onb-lead" style={{ fontSize: 13 }}>
+          {a.consentLater}
+        </p>
+        {error ? (
+          <p className="error-text" role="alert" style={{ fontSize: 13 }}>
+            {error}
+          </p>
+        ) : null}
       </Frame>
     );
   }
@@ -144,33 +342,17 @@ export function Onboarding(props: { initialStep?: Step }) {
       >
         <h1>{t.codeTitle}</h1>
         <p className="onb-lead">{t.codeBody}</p>
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (code.length === 6 && !busy) void claim(code, false);
+        <CodeInput
+          value={code}
+          onChange={(next) => {
+            setCode(next);
+            setError(null);
           }}
-        >
-          <input
-            ref={codeRef}
-            className="code-input"
-            inputMode="numeric"
-            autoComplete="one-time-code"
-            aria-label={t.codeLabel}
-            aria-invalid={error !== null}
-            placeholder="000000"
-            value={code}
-            disabled={busy}
-            onChange={(e) => {
-              setCode(e.target.value.replace(/\D/g, "").slice(0, 6));
-              setError(null);
-            }}
-          />
-        </form>
-        {error ? (
-          <p className="error-text" role="alert" style={{ fontSize: 13 }}>
-            {error}
-          </p>
-        ) : null}
+          onSubmit={() => void claim(code, false)}
+          busy={busy}
+          error={error}
+          inputRef={codeRef}
+        />
         <details className="more" style={{ marginTop: 22 }}>
           <summary>{t.advanced}</summary>
           <div className="more-body">
@@ -200,12 +382,13 @@ export function Onboarding(props: { initialStep?: Step }) {
     const cancel = () => {
       void backend.pairCancel().then(() => act(() => backend.getState()));
       setCode("");
-      setStep("code");
+      setAccountCode("");
+      setStep(codeFrom);
     };
     if (!pending) {
       // The claimed code is gone (the app restarted, or it was cancelled).
       return (
-        <Frame step="confirm" foot={back("code")}>
+        <Frame step="confirm" foot={back(codeFrom)}>
           <h1>{t.codeTitle}</h1>
           <p className="onb-lead">{t.errors.code_expired}</p>
         </Frame>
@@ -236,12 +419,12 @@ export function Onboarding(props: { initialStep?: Step }) {
           </>
         }
       >
-        <h1>{t.confirmTitle(pending.synth_id)}</h1>
+        <h1>{t.confirmTitle(pending.synth_name || pending.synth_id)}</h1>
         <div className="group facts">
           <div className="row">
             <span className="row-label">{t.confirmSynth}</span>
             <span className="row-text selectable" style={{ fontWeight: 600 }}>
-              {pending.synth_id}
+              {pending.synth_name || pending.synth_id}
             </span>
           </div>
           <div className="row">
@@ -256,6 +439,11 @@ export function Onboarding(props: { initialStep?: Step }) {
         <p className="onb-lead" style={{ fontSize: 13 }}>
           {t.confirmBody}
         </p>
+        {pending.linked_to_account !== null ? (
+          <div style={{ marginTop: 14 }}>
+            <AccountNote pending={pending} />
+          </div>
+        ) : null}
         {fromLink ? (
           <div style={{ marginTop: 14 }}>
             <Notice kind="warn">{t.confirmFromLink}</Notice>
@@ -459,7 +647,9 @@ export function Onboarding(props: { initialStep?: Step }) {
       }
     >
       <h1>{t.doneTitle}</h1>
-      <p className="onb-lead">{t.doneBody(name, where)}</p>
+      <p className="onb-lead">
+        {state.core.links.length > 1 ? t.doneBodyMany(synthsNames(state, s), where) : t.doneBody(name, where)}
+      </p>
       <h2 className="section-title" style={{ marginTop: 18 }}>
         {enabled.length > 0 ? t.doneOn : t.doneNothing}
       </h2>

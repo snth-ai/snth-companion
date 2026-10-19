@@ -90,6 +90,20 @@ export function MockStage(props: { approvalOnly?: boolean }) {
         ))}
       </div>
       <div className="mock-bar">
+        {/* The SNTH account: each scenario reloads the page with it. */}
+        {(["signed_out", "consent", "two", "none", "repair"] as const).map((scenario) => (
+          <button
+            key={scenario}
+            type="button"
+            className="btn small"
+            aria-pressed={params.get("account") === scenario}
+            onClick={() => setParam("account", params.get("account") === scenario ? null : scenario)}
+          >
+            account: {scenario}
+          </button>
+        ))}
+      </div>
+      <div className="mock-bar">
         <button type="button" className="btn small" onClick={() => mockBackend.simulateActivity()}>
           {s.activity}
         </button>

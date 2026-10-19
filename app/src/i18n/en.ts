@@ -20,6 +20,9 @@ export const en = {
     details: "Details",
     yourSynth: "SNTH",
     failed: "That did not work. Try again.",
+    /** "Mia", "Mia and Maya", "Mia, Maya and Lev". */
+    names: (list: string[]) => (list.length < 2 ? (list[0] ?? "") : `${list.slice(0, -1).join(", ")} and ${list[list.length - 1]}`),
+    synthsCount: (count: number) => plural(count, "synth", "synths"),
   },
 
   units: {
@@ -46,6 +49,7 @@ export const en = {
     paused: "Paused",
     unpaired: "Not linked",
     repair: "Needs relinking",
+    needs_repair: "Needs relinking",
     working: "Working now",
   },
 
@@ -53,6 +57,7 @@ export const en = {
     pause: "Pause everything",
     resume: "Resume",
     pauseTitle: (n: string) => `Stops ${n} at once. Nothing runs on this computer until you resume.`,
+    pauseTitleMany: "Stops every synth at once. Nothing runs on this computer until you resume.",
     shortcut: (keys: string) => `or press ${keys}`,
   },
 
@@ -67,6 +72,7 @@ export const en = {
     lastActivity: (ago: string) => `Last activity ${ago}`,
     neverActive: (n: string) => `Nothing yet. What ${n} does on this computer will show up here.`,
     allowedTitle: (n: string) => `What ${n} may do here`,
+    allowedTitleMany: "What your synths may do here",
     today: "Today",
     todayNothing: "Nothing today.",
     todayNet: (count: number, size: string) => `${plural(count, "connection", "connections")}, ${size}`,
@@ -80,8 +86,11 @@ export const en = {
     resume: "Resume",
     repairTitle: "This computer needs to be linked again",
     repairBody: (n: string) =>
-      `${n} no longer recognizes this computer, for example because it was removed on the synth's side. Unlink here, then connect again with a new code.`,
-    repairAction: "Unlink and start over",
+      `${n} no longer recognizes this computer, for example because it was removed on the synth's side. Connect again in General.`,
+    repairAction: "Open General",
+    synthsTitle: "Synths",
+    driver: (n: string) => `${n} is controlling the computer`,
+    driverTitle: "One synth at a time: the others can look, but wait with clicks and typing until it is done.",
     sum: {
       off: "Off",
       shellAsk: "Asks you before every command",
@@ -512,6 +521,7 @@ export const en = {
   activity: {
     lead: (n: string) =>
       `What ${n} did on this computer, newest first. The contents of pages, files, messages and notes are never recorded.`,
+    leadMany: "What your synths did on this computer, newest first. Each line says which synth it was. The contents of pages, files, messages and notes are never recorded.",
     all: "All",
     net: "Internet",
     cookies: "Logins",
@@ -827,6 +837,9 @@ export const en = {
       hub_error: "The pairing server answered with an error. Try again in a minute.",
       bad_hub_url: "The pairing server address must start with https://",
       already_linked: "This computer is already linked. Unlink it first in General.",
+      platform_unreachable: "Could not reach SNTH. Check your internet connection and try again.",
+      rate_limited: "Too many tries. Wait a minute and try again.",
+      signed_out: "You were signed out of SNTH. Sign in again, then enter the code.",
     } as Record<string, string>,
     confirmTitle: (n: string) => `Connect this computer to ${n}?`,
     confirmSynth: "Synth",
@@ -836,6 +849,9 @@ export const en = {
     confirmFromLink: "This request came from a link you opened. Continue only if you just asked your synth for it.",
     connect: "Connect",
     connecting: "Connecting...",
+    linkedElsewhere: (n: string) =>
+      `${n} belongs to another SNTH account, so it is not added to yours. This computer still connects to it.`,
+    addedToAccount: (n: string) => `${n} is also added to your SNTH account.`,
     alreadyLinkedTitle: "This computer is already linked",
     alreadyLinkedBody: (n: string) =>
       `A link asked to connect this computer, but it is already linked to ${n}. Nothing was changed. To link it to another synth, unlink first in General.`,
@@ -872,10 +888,91 @@ export const en = {
     computerLater: "You can finish this later in Computer control.",
     doneTitle: "All set",
     doneBody: (n: string, where: string) => `This computer is linked to ${n}. SNTH Connect keeps running in ${where}.`,
+    doneBodyMany: (names: string, where: string) => `This computer is linked to ${names}. SNTH Connect keeps running in ${where}.`,
     doneOn: "Switched on:",
     doneNothing: "Nothing is switched on yet.",
     doneAutostart: "Open SNTH Connect at login",
     finish: "Done",
+  },
+
+  account: {
+    signIn: "Sign in with SNTH",
+    haveCode: "I have a code from the bot",
+    signInNote: "Your computer connects to every synth in your account at once.",
+    waitingTitle: "Finish in your browser",
+    waitingBody: "We opened SNTH in your browser. Sign in there and allow SNTH Connect, then come back here.",
+    exchanging: "Signing you in...",
+    openAgain: "Open again",
+    failed: {
+      denied: "You cancelled the sign-in in the browser.",
+      expired: "The sign-in took too long. Start it again.",
+      state_mismatch: "That sign-in was not started from this window. Start it again.",
+      exchange_failed: "The sign-in did not go through. Try again.",
+      platform_unreachable: "Could not reach SNTH. Check your internet connection and try again.",
+    } as Record<string, string>,
+    failedOther: "The sign-in did not work. Try again.",
+    checking: "Looking up your synths...",
+    consentTitle: "Connect this computer?",
+    consentAccount: (email: string) => `Account ${email}`,
+    consentBody: (names: string) => `This computer connects to ${names}. Nothing is allowed yet: you choose that in the next steps.`,
+    consentLater: "Synths you add to the account later connect by themselves. You can disconnect any of them in General.",
+    connect: "Connect",
+    connecting: "Connecting...",
+    otherAccount: "Use another account",
+    noSynthsTitle: "No synths in your account yet",
+    noSynthsBody: "Ask your synth in Telegram to connect your computer, and enter the 6-digit code here. The synth is added to your account too.",
+    checkAgain: "Check again",
+    syncFailed: "Could not reach SNTH right now.",
+    title: "Account",
+    signedInAs: (email: string) => email,
+    signedInDesc: "New synths of this account connect to this computer by themselves.",
+    signOut: "Sign out...",
+    signOutTitle: "Sign out of SNTH?",
+    signOutBody: "This computer will disconnect from every synth of the account. Synths connected with a code from the bot stay connected.",
+    signOutConfirm: "Sign out",
+    signingOut: "Signing out...",
+    signInDesc: "Connect this computer to every synth of your account at once.",
+    signInButton: "Sign in...",
+    waitingShort: "Waiting for the browser...",
+    synthsTitle: "Synths",
+    viaAccount: "Through your account",
+    viaCode: "With a code from the bot",
+    notHere: "Not connected on this computer",
+    connectOne: "Connect",
+    disconnect: "Disconnect...",
+    disconnectTitle: (n: string) => `Disconnect from ${n}?`,
+    disconnectBody: (n: string) =>
+      `${n} can no longer reach this computer. The answers you gave ${n} and the browsers linked to it are cleared here. Your settings and the other synths stay.`,
+    disconnectAccount: (n: string) => `${n} stays in your account. You can connect it again here.`,
+    disconnectConfirm: "Disconnect",
+    disconnecting: "Disconnecting...",
+    reconnect: "Connect again",
+    reconnecting: "Connecting...",
+    newCodeTitle: (n: string) => `New code for ${n}`,
+    newCodeBody: (n: string) => `Ask ${n} in Telegram to connect your computer and enter the 6-digit code it sends.`,
+    addTitle: "Add a synth",
+    addDesc: "With a 6-digit code: ask a synth in Telegram to connect your computer.",
+    addButton: "Add...",
+    unlinkAll: "Unlink from all synths",
+    unlinkAllKey: "The keys that let your synths reach this computer",
+    unlinkAllDesc: (names: string) => `Ends the connection with ${names}.`,
+    unlinkAllTitle: "Unlink this computer from every synth?",
+    forSynth: (n: string) => `for ${n}`,
+    whichSynthTitle: (browser: string) => `Link ${browser} to which synth?`,
+    whichSynthBody: "Passwords you share from this browser go to the vault of the synth you pick.",
+    vaultOf: "Vault of",
+    synthError: (code: string, n: string, reason: string | null) => {
+      switch (code) {
+        case "connect_unavailable":
+          return reason ? `SNTH Connect is off on ${n}: "${reason}"` : `SNTH Connect is off on ${n}.`;
+        case "synth_outdated":
+          return `${n} needs an update before it can connect through your account. A code from the bot works meanwhile.`;
+        case "synth_unreachable":
+          return `${n} did not answer. SNTH Connect tries again by itself.`;
+        default:
+          return `Could not connect to ${n}.`;
+      }
+    },
   },
 
   approval: {

@@ -9,7 +9,7 @@ import { useCallback, useEffect, useState } from "react";
 import { backend } from "../backend";
 import type { AppPermission, AppStatus, AppsMode, Grant } from "../backend/types";
 import { grantTime } from "../lib/format";
-import { useStore } from "../lib/store";
+import { grantSynth, useStore } from "../lib/store";
 import type { Strings } from "../i18n";
 import { ChoiceList, Notice, Section, Switch, SwitchRow } from "../ui/controls";
 import { IconCheck, IconWarning } from "../ui/icons";
@@ -217,10 +217,11 @@ export function Apps() {
         <Section title={s.remembered.title} note={a.mode === "ask" ? t.rememberedUnused : undefined}>
           <div className="group">
             {grants.map((g) => (
-              <div className="item" key={g.scope}>
+              <div className="item" key={`${g.synth_id}/${g.scope}`}>
                 <span className="item-text selectable">{rememberedLabel(g, s)}</span>
+                {grantSynth(state, g) ? <span className="tag">{grantSynth(state, g)}</span> : null}
                 <span className="item-sub">{grantTime(g, s, lang)}</span>
-                <button type="button" className="btn small" onClick={() => void act(() => backend.revokeGrant("apps", g.scope))}>
+                <button type="button" className="btn small" onClick={() => void act(() => backend.revokeGrant("apps", g.scope, g.synth_id))}>
                   {s.cookies.revoke}
                 </button>
               </div>

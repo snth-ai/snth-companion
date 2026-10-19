@@ -1,7 +1,71 @@
 // The shapes the shell sends. They mirror `connect_core` (Snapshot,
 // Settings, Entry) and `app/src-tauri/src/state.rs` (UiState).
 
-export type LinkState = "unpaired" | "connecting" | "linked" | "reconnecting" | "paused";
+export type LinkState = "unpaired" | "connecting" | "linked" | "reconnecting" | "paused" | "needs_repair";
+/** How a link to a synth was made: through the SNTH account, or with a
+ * code from the synth's bot. */
+export type LinkSource = "account" | "code";
+
+/** One synth this computer is linked to. */
+export interface LinkBrief {
+  synth_id: string;
+  /** The friendly name (from the synth or the account); null until known. */
+  synth_name: string | null;
+  synth_url: string;
+  synth_version: string | null;
+  state: LinkState;
+  source: LinkSource;
+  /** Why the link is not up, in the core's words (diagnostics only). */
+  detail: string;
+  /** The account's hub of this synth, when the account knows it. */
+  hub_id: string | null;
+}
+
+/** The SNTH account this computer is signed in with. */
+export interface AccountInfo {
+  id: string;
+  email: string;
+  name: string;
+}
+
+/** One synth of the account, from the platform's last answer. */
+export interface AccountSynth {
+  hub_id: string;
+  synth_id: string;
+  name: string;
+  avatar_url: string | null;
+  /** This computer has a link to it. */
+  linked: boolean;
+  /** The owner disconnected it here: the sync does not reconnect it by itself. */
+  skipped: boolean;
+  /** Connecting this computer to it failed on the last try (then linked is
+   * false): "connect_unavailable" (Connect is off on that synth; `reason`
+   * is the synth's own text), "synth_outdated", "synth_unreachable" (tried
+   * again at the next sync), or another short code. */
+  error: string | null;
+  reason: string | null;
+}
+
+/** Sign-in through the browser. */
+export type LoginPhase =
+  | { phase: "idle" }
+  | { phase: "waiting"; started_at: number }
+  | { phase: "exchanging" }
+  | { phase: "failed"; code: "denied" | "expired" | "state_mismatch" | "exchange_failed" | "platform_unreachable" | string };
+
+export interface AccountState {
+  signed_in: boolean;
+  account: AccountInfo | null;
+  login: LoginPhase;
+  /** null = never fetched. */
+  synths: AccountSynth[] | null;
+  /** The owner clicked "Connect" on the consent screen on this computer:
+   * new synths of the account connect by themselves from then on. */
+  consented: boolean;
+  last_sync: number | null;
+  sync_error: string | null;
+  platform_url: string;
+}
 export type NetMode = "all" | "ask" | "list";
 export type CookiesMode = "ask" | "ask_new" | "auto";
 export type ComputerMode = "ask" | "auto" | "away";
@@ -176,6 +240,13 @@ export interface AppsStatus {
 }
 
 export interface Snapshot {
+  /** Every synth this computer is linked to. */
+  links: LinkBrief[];
+  /** The name of the synth that controls the computer right now (one at a
+   * time); null when nobody does. */
+  computer_driver: string | null;
+  /** Derived: paused > linked (any) > connecting (any) > reconnecting (any)
+   * > needs_repair (all) > unpaired. */
   link_state: LinkState;
   paired: boolean;
   synth_id: string | null;
@@ -218,6 +289,9 @@ export type HelperState =
   | { state: "failed"; code: HelperFailCode; detail: string };
 
 export interface Grant {
+  /** The synth the answer was given to (answers are kept per synth). */
+  synth_id: string;
+  synth_name: string | null;
   capability: string;
   scope: string;
   /** 0 = always, -1 = until the app quits, else the unix second it ends. */
@@ -227,6 +301,13 @@ export interface Grant {
 export interface Pending {
   synth_id: string;
   synth_url: string;
+  synth_name: string | null;
+  /** Only when the code went through the signed-in account: the synth is
+   * now in the account (true) or belongs to another account (false). */
+  linked_to_account: boolean | null;
+  /** "synth_linked_elsewhere": the synth belongs to another account; the
+   * link to this computer still works. */
+  reason: string | null;
 }
 
 /** A browser we know by name, or "browser" for one we do not. */
@@ -265,6 +346,9 @@ export interface BrowserRow {
   last_seen: number;
   /** Safari's row only. For a "missing" row it says what is left to do. */
   safari: SafariInfo | null;
+  /** The synth a linked browser belongs to. */
+  synth_id: string | null;
+  synth_name: string | null;
 }
 
 /** One login the synth's vault holds. Never the login itself. */
@@ -290,6 +374,8 @@ export interface LoginsState {
   /** The browser link is being served by this copy of the app. */
   link_ready: boolean;
   vault: VaultView;
+  /** The synth whose vault `vault` describes. */
+  vault_synth: string | null;
 }
 
 export interface UiState {
@@ -310,6 +396,8 @@ export interface UiState {
   look_support: LookSupport;
   /** The Logins page: the browsers and what the synth's vault holds. */
   logins: LoginsState;
+  /** The SNTH account. */
+  account: AccountState;
   prefs: {
     onboarded: boolean;
     /** "en" / "ru" when the owner picked one; null = follow the system. */
@@ -352,6 +440,8 @@ export interface Entry {
   cwd?: string;
   exit_code?: number;
   duration_ms?: number;
+  /** The synth this line is about (its name); absent for the app's own lines. */
+  synth?: string;
 }
 
 /** One fact of the action the owner is asked about, shown in full. */
@@ -373,6 +463,8 @@ export interface ApprovalRequest {
   /** What may be remembered: anything, only "always" for this exact
    * scope, or nothing. */
   remember: "any" | "always" | "never";
+  /** The name of the synth that asks; null when it is not a synth (a browser). */
+  synth: string | null;
   asked_at_ms: number;
   expires_at_ms: number;
 }
@@ -428,7 +520,10 @@ export type ExternalTarget =
   | "vault_extension"
   /** Safari's settings, at the extension that ships in this app. */
   | "safari_extension"
-  | "releases";
+  | "releases"
+  /** Sign in with SNTH: the shell builds the address, starts (or reuses) a
+   * waiting sign-in and opens the browser. Again = "open again". */
+  | "platform_login";
 
 export type UiEvent =
   | { type: "state" }
@@ -450,7 +545,13 @@ export interface Backend {
   pairBegin(code: string, hubUrl?: string): Promise<Pending>;
   pairConfirm(): Promise<UiState>;
   pairCancel(): Promise<void>;
+  /** Disconnect from every synth. */
   unpair(): Promise<UiState>;
+  /** Disconnect from one synth. */
+  unpairSynth(synthId: string): Promise<UiState>;
+  /** A link the synth refused: an account link gets a fresh key; a code
+   * link rejects with "needs_code" (a new code from the bot replaces it). */
+  reconnectSynth(synthId: string): Promise<UiState>;
   finishOnboarding(autostart: boolean): Promise<UiState>;
 
   applyPreset(preset: Exclude<Preset, "custom">): Promise<UiState>;
@@ -461,7 +562,16 @@ export interface Backend {
   pickFolder(write: boolean): Promise<UiState | null>;
   removeRoot(path: string): Promise<UiState>;
   setRootWrite(path: string, write: boolean): Promise<UiState>;
-  revokeGrant(capability: string, scope: string): Promise<UiState>;
+  revokeGrant(capability: string, scope: string, synthId: string): Promise<UiState>;
+
+  /** Stop waiting for the browser sign-in. */
+  loginCancel(): Promise<UiState>;
+  /** Consent: connect this computer to every synth of the account. */
+  accountConnect(): Promise<UiState>;
+  /** Ask the platform again for the account's synths. */
+  accountSync(): Promise<UiState>;
+  /** Sign out: the account's links end here; links made with a code stay. */
+  signOut(): Promise<UiState>;
 
   pause(): Promise<UiState>;
   resume(): Promise<UiState>;
@@ -486,14 +596,14 @@ export interface Backend {
   appsRequestPermission(app: string): Promise<void>;
 
   /** Ask the synth which sites its vault holds a login for. */
-  loginsRefresh(): Promise<UiState>;
+  loginsRefresh(synthId: string | null): Promise<UiState>;
   /** Ask Safari again whether the owner switched the extension on. */
   safariCheck(): Promise<UiState>;
   /** Remove one saved login from the synth's vault. */
-  vaultForget(site: string): Promise<UiState>;
+  vaultForget(site: string, synthId: string | null): Promise<UiState>;
   /** Link a browser whose extension is connected. The click is the
    * owner's confirmation. Rejects with the reason's code. */
-  browserLink(install: string): Promise<UiState>;
+  browserLink(install: string, synthId: string | null): Promise<UiState>;
   browserUnlink(install: string): Promise<UiState>;
   /** Take a browser that is gone off the list. */
   browserForget(install: string): Promise<UiState>;

@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { backend } from "../backend";
-import type { HealthItem, HealthReport, ShellMode, UiState } from "../backend/types";
+import type { HealthItem, HealthReport, LinkBrief, ShellMode, UiState } from "../backend/types";
 import { acceleratorFromEvent, formatClock, hostOf, shortcutKeys } from "../lib/format";
-import { useStore } from "../lib/store";
+import { linkName, synthsNames, useStore } from "../lib/store";
 import { ChoiceList, Keys, More, Notice, Row, Section, Segmented, Sheet, SwitchRow } from "../ui/controls";
 import { IconBlock, IconCheck, IconX } from "../ui/icons";
+import { PairSheet } from "./Pairing";
 import { Remembered } from "./Remembered";
 
 type LangChoice = "system" | "en" | "ru";
@@ -411,6 +412,13 @@ function Diagnostics() {
     [t.diagSynth, core.synth_version ?? "-"],
     [t.diagLink, state.link_detail ? `${linkText} (${state.link_detail})` : linkText],
     [t.diagAddress, hostOf(core.synth_url) || "-"],
+    // Every synth on its own line once there is more than one.
+    ...(core.links.length > 1
+      ? core.links.map((l): [string, string] => [
+          linkName(l),
+          `${s.link[l.state]}, ${hostOf(l.synth_url)}, ${l.synth_version ?? "-"}${l.detail ? ` (${l.detail})` : ""}`,
+        ])
+      : []),
     [t.diagComputer, state.app.device_name],
     [t.diagKey, state.app.secret_store],
     [t.diagHub, hostOf(state.app.hub_url)],
@@ -447,12 +455,243 @@ function Diagnostics() {
   );
 }
 
+/** The SNTH account on this computer: who is signed in, and signing out
+ * (every synth of the account disconnects; code links stay). Signed out,
+ * a way to sign in, since a computer on a code link may want the rest of
+ * the account too. */
+function Account() {
+  const { state, s, act } = useStore();
+  const a = s.account;
+  const account = state.account;
+  const login = account.login;
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  if (!account.signed_in) {
+    const waiting = login.phase === "waiting" || login.phase === "exchanging";
+    return (
+      <Section title={a.title}>
+        <div className="group">
+          <Row
+            title={a.signIn}
+            desc={
+              <>
+                {waiting ? a.waitingShort : a.signInDesc}
+                {login.phase === "failed" ? (
+                  <span className="error-text" style={{ display: "block" }}>
+                    {a.failed[login.code] ?? a.failedOther}
+                  </span>
+                ) : null}
+              </>
+            }
+          >
+            {waiting ? (
+              <>
+                <button type="button" className="btn small" onClick={() => void act(() => backend.loginCancel())}>
+                  {s.common.cancel}
+                </button>
+                <button type="button" className="btn small" onClick={() => void backend.openExternal("platform_login")}>
+                  {a.openAgain}
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                className="btn"
+                onClick={() => void backend.openExternal("platform_login").then(() => act(() => backend.getState()))}
+              >
+                {a.signInButton}
+              </button>
+            )}
+          </Row>
+        </div>
+      </Section>
+    );
+  }
+
+  const signOut = async () => {
+    setBusy(true);
+    await act(() => backend.signOut());
+    setBusy(false);
+    setConfirming(false);
+  };
+
+  return (
+    <Section title={a.title}>
+      <div className="group">
+        <Row title={a.signedInAs(account.account?.email ?? "")} desc={account.sync_error ? a.syncFailed : a.signedInDesc}>
+          <button type="button" className="btn" onClick={() => setConfirming(true)}>
+            {a.signOut}
+          </button>
+        </Row>
+      </div>
+      {confirming ? (
+        <Sheet
+          title={a.signOutTitle}
+          onCancel={() => (busy ? undefined : setConfirming(false))}
+          actions={
+            <>
+              <button type="button" className="btn" data-autofocus disabled={busy} onClick={() => setConfirming(false)}>
+                {s.common.cancel}
+              </button>
+              <button type="button" className="btn danger solid" disabled={busy} onClick={() => void signOut()}>
+                {busy ? a.signingOut : a.signOutConfirm}
+              </button>
+            </>
+          }
+        >
+          <p style={{ marginTop: 10, lineHeight: 1.45 }}>{a.signOutBody}</p>
+        </Sheet>
+      ) : null}
+    </Section>
+  );
+}
+
+/** Every synth this computer is linked to: how its link stands, where it
+ * came from, disconnecting it, and connecting it again when it no longer
+ * knows this computer. Plus the account's synths that were disconnected
+ * here, and adding a synth with a code. */
+function Synths() {
+  const { state, s, act } = useStore();
+  const a = s.account;
+  const links = state.core.links;
+  // The account's synths with no link here: disconnected by the owner, or
+  // connecting failed (with the reason).
+  const skipped = (state.account.synths ?? []).filter((x) => !x.linked && (x.skipped || x.error !== null));
+  const [leaving, setLeaving] = useState<LinkBrief | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  const [codeFor, setCodeFor] = useState<LinkBrief | "new" | null>(null);
+
+  const reconnect = async (l: LinkBrief) => {
+    setBusy(l.synth_id);
+    setFailed(null);
+    try {
+      await act(async () => {
+        try {
+          return await backend.reconnectSynth(l.synth_id);
+        } catch (e) {
+          // A link made with a code has no account to get a new key from:
+          // a new code from the bot replaces it.
+          if (String(e).startsWith("needs_code")) {
+            setCodeFor(l);
+            return null;
+          }
+          setFailed(l.synth_id);
+          throw e;
+        }
+      });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const disconnect = async () => {
+    if (!leaving) return;
+    setBusy(leaving.synth_id);
+    await act(() => backend.unpairSynth(leaving.synth_id));
+    setBusy(null);
+    setLeaving(null);
+  };
+
+  return (
+    <Section title={a.synthsTitle}>
+      <div className="group">
+        {links.map((l) => {
+          const st = state.core.paused ? "paused" : l.state;
+          return (
+            <Row
+              key={l.synth_id}
+              title={linkName(l)}
+              desc={
+                <>
+                  {s.link[st]}, {(l.source === "account" ? a.viaAccount : a.viaCode).toLowerCase()}
+                  {failed === l.synth_id ? (
+                    <span className="error-text" style={{ display: "block" }}>
+                      {s.common.failed}
+                    </span>
+                  ) : null}
+                </>
+              }
+            >
+              {l.state === "needs_repair" ? (
+                <button type="button" className="btn small strong" disabled={busy !== null} onClick={() => void reconnect(l)}>
+                  {busy === l.synth_id ? a.reconnecting : a.reconnect}
+                </button>
+              ) : null}
+              <button type="button" className="btn small" disabled={busy !== null} onClick={() => setLeaving(l)}>
+                {a.disconnect}
+              </button>
+            </Row>
+          );
+        })}
+        {skipped.map((x) => (
+          <Row
+            key={`${x.hub_id}/${x.synth_id}`}
+            title={x.name || x.synth_id}
+            desc={x.error ? <span className="error-text">{a.synthError(x.error, x.name || x.synth_id, x.reason)}</span> : a.notHere}
+          >
+            {x.error && !x.skipped ? (
+              <button type="button" className="btn small" disabled={busy !== null} onClick={() => void act(() => backend.accountSync())}>
+                {a.checkAgain}
+              </button>
+            ) : (
+              <button type="button" className="btn small" disabled={busy !== null} onClick={() => void act(() => backend.accountConnect())}>
+                {a.connectOne}
+              </button>
+            )}
+          </Row>
+        ))}
+        <Row title={a.addTitle} desc={a.addDesc}>
+          <button type="button" className="btn small" onClick={() => setCodeFor("new")}>
+            {a.addButton}
+          </button>
+        </Row>
+      </div>
+
+      {leaving ? (
+        <Sheet
+          title={a.disconnectTitle(linkName(leaving))}
+          onCancel={() => (busy ? undefined : setLeaving(null))}
+          actions={
+            <>
+              <button type="button" className="btn" data-autofocus disabled={busy !== null} onClick={() => setLeaving(null)}>
+                {s.common.cancel}
+              </button>
+              <button type="button" className="btn danger solid" disabled={busy !== null} onClick={() => void disconnect()}>
+                {busy ? a.disconnecting : a.disconnectConfirm}
+              </button>
+            </>
+          }
+        >
+          <p style={{ marginTop: 10, lineHeight: 1.45 }}>{a.disconnectBody(linkName(leaving))}</p>
+          {leaving.source === "account" ? (
+            <p className="muted" style={{ marginTop: 10, lineHeight: 1.45 }}>
+              {a.disconnectAccount(linkName(leaving))}
+            </p>
+          ) : null}
+        </Sheet>
+      ) : null}
+
+      {codeFor ? (
+        <PairSheet
+          title={codeFor === "new" ? a.addTitle : a.newCodeTitle(linkName(codeFor))}
+          body={codeFor === "new" ? s.onboarding.codeBody : a.newCodeBody(linkName(codeFor))}
+          onClose={() => setCodeFor(null)}
+        />
+      ) : null}
+    </Section>
+  );
+}
+
 export function General() {
   const { state, s, lang, name, act } = useStore();
   const t = s.general;
   const [confirming, setConfirming] = useState(false);
   const [unlinking, setUnlinking] = useState(false);
   const [autostartFailed, setAutostartFailed] = useState(false);
+  const several = state.core.links.length > 1;
+  const names = synthsNames(state, s);
   const choice: LangChoice = state.prefs.language === "en" || state.prefs.language === "ru" ? state.prefs.language : "system";
   const where = state.app.os === "macos" ? t.whereMac : t.whereOther;
 
@@ -471,6 +710,9 @@ export function General() {
   return (
     <>
       <h1 className="page-title">{s.nav.general}</h1>
+
+      <Account />
+      <Synths />
 
       <Section>
         <div className="group">
@@ -527,7 +769,7 @@ export function General() {
 
       <Section>
         <div className="group">
-          <Row title={t.unlink} desc={t.unlinkDesc(name)}>
+          <Row title={several ? s.account.unlinkAll : t.unlink} desc={several ? s.account.unlinkAllDesc(names) : t.unlinkDesc(name)}>
             <button type="button" className="btn danger" onClick={() => setConfirming(true)}>
               {t.unlinkButton}
             </button>
@@ -539,7 +781,7 @@ export function General() {
 
       {confirming ? (
         <Sheet
-          title={t.unlinkTitle(name)}
+          title={several ? s.account.unlinkAllTitle : t.unlinkTitle(name)}
           onCancel={() => (unlinking ? undefined : setConfirming(false))}
           actions={
             <>
@@ -554,7 +796,7 @@ export function General() {
         >
           <p style={{ marginTop: 10 }}>{t.unlinkErases}</p>
           <ul className="sheet-list">
-            {t.unlinkItems(name).map((item) => (
+            {(several ? [s.account.unlinkAllKey, ...t.unlinkItems(name).slice(1)] : t.unlinkItems(name)).map((item) => (
               <li key={item}>
                 <IconX />
                 <span>{item}</span>

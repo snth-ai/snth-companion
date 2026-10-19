@@ -239,6 +239,8 @@ export interface Line {
   refused: boolean;
   count: number;
   bytes: number;
+  /** The synth the line is about; "" for the app's own lines. */
+  synth: string;
 }
 
 function refusalReason(outcome: string, s: Strings): string {
@@ -281,7 +283,7 @@ function siteOf(target: string): string {
   return port && port !== "443" && port !== "80" ? `${host}:${port}` : host;
 }
 
-export function describeEntry(entry: Entry, s: Strings, lang: Lang): Omit<Line, "key" | "count"> {
+export function describeEntry(entry: Entry, s: Strings, lang: Lang): Omit<Line, "key" | "count" | "synth"> {
   const j = s.journal;
   const ok = entry.outcome === "ok";
   const refused = entry.outcome.startsWith("denied");
@@ -398,14 +400,15 @@ export function buildLines(entries: Entry[], s: Strings, lang: Lang): Line[] {
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i]!;
     const d = describeEntry(entry, s, lang);
+    const synth = entry.synth ?? "";
     const prev = lines[lines.length - 1];
-    if (prev && prev.kind === d.kind && prev.text === d.text && prev.refused === d.refused && prev.time - d.time < 120) {
+    if (prev && prev.kind === d.kind && prev.text === d.text && prev.refused === d.refused && prev.synth === synth && prev.time - d.time < 120) {
       prev.count += 1;
       prev.bytes += d.bytes;
       if (d.kind === "net" && !d.refused && prev.bytes > 0) prev.note = formatBytes(prev.bytes, s, lang);
       continue;
     }
-    lines.push({ ...d, key: `${entry.time}-${i}`, count: 1 });
+    lines.push({ ...d, synth, key: `${entry.time}-${i}`, count: 1 });
   }
   return lines;
 }

@@ -1,7 +1,7 @@
 import { useMemo, type ReactNode } from "react";
 import { backend } from "../backend";
 import { describeEntry, formatAgo, formatBytes, summarize, todayCounters } from "../lib/format";
-import { useActiveEntry, useNow, useStore } from "../lib/store";
+import { linkName, synthsNames, useActiveEntry, useNow, useStore } from "../lib/store";
 import { Notice, Section } from "../ui/controls";
 import { IconApps, IconChevron, IconCookie, IconFolder, IconGlobe, IconPause, IconPlay, IconPointer, IconBlock, IconTerminal } from "../ui/icons";
 import type { Screen } from "../App";
@@ -17,6 +17,10 @@ export function Status(props: { go: (screen: Screen) => void }) {
   const today = useMemo(() => todayCounters(journal), [journal]);
   const last = journal[journal.length - 1];
 
+  const links = core.links;
+  const several = links.length > 1;
+  const title = several ? synthsNames(state, s) : name;
+  const repair = links.filter((l) => l.state === "needs_repair");
   const linkLine =
     core.link_state === "linked" || core.paused
       ? s.status.onThisComputer(state.app.device_name)
@@ -89,7 +93,7 @@ export function Status(props: { go: (screen: Screen) => void }) {
 
   return (
     <>
-      <h1 className="page-title">{name}</h1>
+      <h1 className="page-title">{title}</h1>
       <p className="page-lead">{linkLine}</p>
 
       {/* macOS: running from the download or a disk image. Worth saying on
@@ -100,8 +104,8 @@ export function Status(props: { go: (screen: Screen) => void }) {
         </div>
       ) : null}
 
-      {state.needs_repair ? (
-        <div style={{ marginTop: 16 }}>
+      {repair.map((l) => (
+        <div style={{ marginTop: 16 }} key={l.synth_id}>
           <Notice
             kind="danger"
             title={s.status.repairTitle}
@@ -111,10 +115,10 @@ export function Status(props: { go: (screen: Screen) => void }) {
               </button>
             }
           >
-            {s.status.repairBody(name)}
+            {s.status.repairBody(linkName(l))}
           </Notice>
         </div>
-      ) : null}
+      ))}
 
       {core.paused ? (
         <div className="paused-block" role="status">
@@ -142,15 +146,43 @@ export function Status(props: { go: (screen: Screen) => void }) {
             {/* The name the synth gave its computer task: its own words,
                 cut by the app to what the helper shows under the pointer. */}
             {active && active.capability === "computer" && core.computer_task ? (
-              <div className="now-task" title={s.status.taskTitle(name)}>
+              <div className="now-task" title={s.status.taskTitle(core.computer_driver ?? name)}>
                 {s.status.task(core.computer_task)}
+              </div>
+            ) : null}
+            {/* One synth controls the computer at a time; with more than one
+                linked, say which. */}
+            {several && core.computer_driver ? (
+              <div className="now-task" title={s.status.driverTitle}>
+                {s.status.driver(core.computer_driver)}
               </div>
             ) : null}
           </div>
         </div>
       )}
 
-      <Section title={s.status.allowedTitle(name)}>
+      {several ? (
+        <Section title={s.status.synthsTitle}>
+          <div className="group">
+            {links.map((l) => {
+              const st = core.paused ? "paused" : l.state;
+              const dot = st === "linked" ? "ok" : st === "needs_repair" ? "danger" : st === "paused" ? "warn" : "";
+              return (
+                <button type="button" className="row" key={l.synth_id} onClick={() => props.go("general")}>
+                  <span className={`dot ${dot}`} />
+                  <span className="row-text">
+                    <span className="row-title">{linkName(l)}</span>
+                  </span>
+                  <span className="row-value">{core.computer_driver === linkName(l) ? s.status.driver(linkName(l)) : s.link[st]}</span>
+                  <IconChevron />
+                </button>
+              );
+            })}
+          </div>
+        </Section>
+      ) : null}
+
+      <Section title={several ? s.status.allowedTitleMany : s.status.allowedTitle(name)}>
         <div className="group">
           {rows.map((r) => (
             <button type="button" className="row" key={r.screen} onClick={() => props.go(r.screen)}>

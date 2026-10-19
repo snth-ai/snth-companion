@@ -57,11 +57,24 @@
 //        (failed takes &step=check|download|install; blocked takes
 //         &block=translocated|read_only|package; flow plays a whole
 //         automatic update: check, download, ready)
+//   &account=signed_out|consent|two|none|repair
+//        (the SNTH account: signed_out = first run, not signed in, nothing
+//         linked; consent = signed in, the consent screen for Mia and Maya;
+//         two = signed in, Mia and Maya both linked; none = signed in, no
+//         synths in the account yet; repair = two linked, Maya needs a new
+//         key. Without it: not signed in, Mia linked with a code.
+//         "Sign in with SNTH" plays the browser: waiting, then signed in.
+//         &login=denied|expired makes that sign-in fail.
+//         &connectfail=connect_unavailable|synth_outdated|synth_unreachable
+//         makes connecting to Maya fail with that error.)
 //   &lang=en|ru  &theme=light|dark  &os=macos|windows|linux
 //
 // Nothing here touches the network, the disk or the real computer.
 
 import type {
+  AccountState,
+  AccountSynth,
+  LinkBrief,
   AnswerDuration,
   AppChoice,
   AppId,
@@ -392,8 +405,8 @@ function seedJournal(): Entry[] {
   ];
 }
 
-type ApprovalKind = Omit<ApprovalRequest, "id" | "asked_at_ms" | "expires_at_ms" | "details" | "remember"> &
-  Partial<Pick<ApprovalRequest, "details" | "remember">>;
+type ApprovalKind = Omit<ApprovalRequest, "id" | "asked_at_ms" | "expires_at_ms" | "details" | "remember" | "synth"> &
+  Partial<Pick<ApprovalRequest, "details" | "remember" | "synth">>;
 
 const LONG_MESSAGE =
   "Hi Anna! I am running about twenty minutes late, the train stood still outside the station. Please start without me and order the usual for both of us.\n\nIf the table is not ready, wait inside, it is cold today. I will text again when I am two stops away.";
@@ -635,6 +648,8 @@ function stagedSafari(os: string): BrowserRow | null {
       enabled: heard || stage === "on" ? "on" : stage === "moved" ? "translocated" : stage === "unknown" ? "unknown" : "off",
       standalone: stage === "both",
     },
+    synth_id: linked ? "mia" : null,
+    synth_name: linked ? "Mia" : null,
   };
 }
 
@@ -658,6 +673,8 @@ function stagedChromium(os: string): Pick<LoginsState, "browsers" | "link_ready"
     all_sites: false,
     last_seen: state === "missing" ? 0 : now() - 120,
     safari: null,
+    synth_id: state === "linked" ? "mia" : null,
+    synth_name: state === "linked" ? "Mia" : null,
   });
   const edge = os === "linux" ? [] : ["edge"];
   switch (params.get("ext")) {
@@ -683,6 +700,43 @@ function stagedChromium(os: string): Pick<LoginsState, "browsers" | "link_ready"
         ],
       };
   }
+}
+
+/** The synths the mock knows: an account's and the ones a code points at. */
+const SYNTHS: Record<string, { name: string; url: string; version: string; hub: string }> = {
+  mia: { name: "Mia", url: "https://mia.snth.ai", version: "v0.6.170", hub: "hub-1" },
+  maya: { name: "Maya", url: "https://maya.snth.ai", version: "v0.6.168", hub: "hub-1" },
+  lev: { name: "Lev", url: "https://lev.snth.ai", version: "v0.6.170", hub: "hub-2" },
+};
+
+function linkOf(id: string, source: LinkBrief["source"], state: LinkBrief["state"] = "linked"): LinkBrief {
+  const known = SYNTHS[id]!;
+  return {
+    synth_id: id,
+    synth_name: state === "connecting" && source === "code" ? null : known.name,
+    synth_url: known.url,
+    synth_version: state === "linked" ? known.version : null,
+    state,
+    source,
+    detail: state === "linked" ? `linked to ${known.name}` : state === "needs_repair" ? "synth refused: HTTP 401 (re-pair needed)" : "dialing",
+    hub_id: source === "account" ? known.hub : null,
+  };
+}
+
+function accountSynth(id: string, linked: boolean): AccountSynth {
+  const known = SYNTHS[id]!;
+  return { hub_id: known.hub, synth_id: id, name: known.name, avatar_url: null, linked, skipped: false, error: null, reason: null };
+}
+
+function signedOut(): AccountState {
+  return { signed_in: false, account: null, login: { phase: "idle" }, synths: null, consented: false, last_sync: null, sync_error: null, platform_url: "https://platform.snth.ai" };
+}
+
+const ACCOUNT = { id: "acc_7f3a", email: "alex@example.com", name: "Alex" };
+
+/** Which synths the account has, by `account=` (two by default). */
+function accountSynthIds(): string[] {
+  return params.get("account") === "none" ? [] : ["mia", "maya"];
 }
 
 class MockBackend implements Backend {
@@ -728,8 +782,17 @@ class MockBackend implements Backend {
     settings.computer.look = stagedLook();
     // The preview window exists on macOS only.
     if (os !== "macos") settings.computer.look.preview_window = false;
+    const g = (capability: string, scope: string, until: number, synth = "mia"): Grant => ({
+      synth_id: synth,
+      synth_name: SYNTHS[synth]?.name ?? null,
+      capability,
+      scope,
+      until,
+    });
     this.state = {
       core: {
+        links: [linkOf("mia", "code")],
+        computer_driver: null,
         link_state: "linked",
         paired: true,
         synth_id: "mia",
@@ -755,19 +818,20 @@ class MockBackend implements Backend {
       helper_retry_at: null,
       update: { phase: "idle", auto: true, configured: true, blocked: null, last_checked: now() - 3600, updated_from: null },
       grants: [
-        { capability: "cookies", scope: "youtube.com", until: 0 },
-        { capability: "cookies", scope: "github.com", until: now() + 5 * 3600 },
-        { capability: "cookies", scope: "notion.so", until: -1 },
-        { capability: "net", scope: "aviasales.ru", until: now() + 2400 },
-        { capability: "computer", scope: "task", until: now() + 3000 },
-        { capability: "apps", scope: "calendar.create", until: 0 },
-        { capability: "apps", scope: "shortcuts.run:Morning Routine", until: 0 },
-        ...(os === "macos" ? [{ capability: "apps", scope: "messages.send:+79165550101", until: 0 }] : []),
+        g("cookies", "youtube.com", 0),
+        g("cookies", "github.com", now() + 5 * 3600),
+        g("cookies", "notion.so", -1),
+        g("net", "aviasales.ru", now() + 2400),
+        g("computer", "task", now() + 3000),
+        g("apps", "calendar.create", 0),
+        g("apps", "shortcuts.run:Morning Routine", 0),
+        ...(os === "macos" ? [g("apps", "messages.send:+79165550101", 0)] : []),
       ],
       apps: offeredApps(os, settings),
       look_support: lookSupport(os),
       // The vault is asked when the Logins page opens (`loginsRefresh`).
-      logins: { ...stagedBrowsers(os), vault: { state: "unknown" } },
+      logins: { ...stagedBrowsers(os), vault: { state: "unknown" }, vault_synth: "mia" },
+      account: signedOut(),
       prefs: {
         onboarded: true,
         language: params.get("lang"),
@@ -831,12 +895,10 @@ class MockBackend implements Backend {
       s.grants = [];
       s.core.settings = offSettings();
       if (step <= 3) {
-        s.core.paired = false;
-        s.core.link_state = "unpaired";
-        s.core.synth_id = s.core.synth_name = s.core.synth_url = s.core.synth_version = null;
+        s.core.links = [];
         s.link_detail = "no pairing";
         this.journal = [];
-        if (step === 3) s.pending = { synth_id: "mia", synth_url: "https://mia.snth.ai" };
+        if (step === 3) s.pending = { synth_id: "mia", synth_url: "https://mia.snth.ai", synth_name: null, linked_to_account: null, reason: null };
       } else if (step >= 5) {
         s.core.settings = presetSettings("careful", []);
         if (step >= 6) {
@@ -851,26 +913,22 @@ class MockBackend implements Backend {
     switch (state) {
       case "paused":
         s.core.paused = true;
-        s.core.link_state = "paused";
         s.link_detail = "paused by the owner";
         break;
       case "connecting":
-        s.core.link_state = "connecting";
-        s.link_detail = "dialing";
+        this.setLink(0, "connecting", "dialing");
         break;
       case "offline":
-        s.core.link_state = "reconnecting";
-        s.link_detail = "connect: no answer in 15s";
+        this.setLink(0, "reconnecting", "connect: no answer in 15s");
         break;
       case "repair":
-        s.core.link_state = "reconnecting";
-        s.link_detail = "synth refused: HTTP 401 (re-pair needed)";
-        s.needs_repair = true;
+        this.setLink(0, "needs_repair", "synth refused: HTTP 401 (re-pair needed)");
         break;
       case "working":
         // The synth named its task; the label is its own text, cut as the
         // helper cuts it under the pointer.
         s.core.computer_task = (params.get("task") ?? "Mia: flights").slice(0, 28);
+        s.core.computer_driver = "Mia";
         this.startWork();
         break;
       case "empty":
@@ -892,6 +950,44 @@ class MockBackend implements Backend {
         s.app.metered_detection = true;
         break;
     }
+
+    switch (params.get("account")) {
+      case "signed_out":
+        s.core.links = [];
+        s.prefs.onboarded = false;
+        s.grants = [];
+        s.core.settings = offSettings();
+        s.logins.vault_synth = null;
+        this.journal = [];
+        break;
+      case "consent":
+      case "none":
+        s.core.links = [];
+        s.prefs.onboarded = false;
+        s.grants = [];
+        s.core.settings = offSettings();
+        s.logins.vault_synth = null;
+        this.journal = [];
+        s.account = { ...signedOut(), signed_in: true, account: { ...ACCOUNT }, synths: accountSynthIds().map((id) => accountSynth(id, false)), last_sync: now() - 20 };
+        break;
+      case "two":
+      case "repair":
+        s.core.links = [linkOf("mia", "account"), linkOf("maya", "account", params.get("account") === "repair" ? "needs_repair" : "linked")];
+        s.account = {
+          ...signedOut(),
+          signed_in: true,
+          account: { ...ACCOUNT },
+          synths: [accountSynth("mia", true), accountSynth("maya", true)],
+          consented: true,
+          last_sync: now() - 140,
+        };
+        s.grants.push({ synth_id: "maya", synth_name: "Maya", capability: "cookies", scope: "booking.com", until: 0 });
+        s.grants.push({ synth_id: "maya", synth_name: "Maya", capability: "computer", scope: "task", until: -1 });
+        // The journal speaks for two synths now.
+        this.journal = this.journal.map((e, i) => (e.capability === "app" ? e : { ...e, synth: i % 3 === 0 ? "Maya" : "Mia" }));
+        break;
+    }
+    if (params.get("account") === "repair") s.link_detail = "synth refused: HTTP 401 (re-pair needed)";
 
     const mac = s.app.os === "macos";
     switch (params.get("cua")) {
@@ -1002,8 +1098,86 @@ class MockBackend implements Backend {
     window.setTimeout(() => this.listeners.forEach((l) => l(event)), 0);
   }
 
+  /** The old one-synth fields, as the shell derives them from the links. */
+  private derive() {
+    const c = this.state.core;
+    const links = c.links;
+    const first = links[0];
+    c.paired = links.length > 0;
+    c.synth_id = first?.synth_id ?? null;
+    c.synth_name = first?.synth_name ?? null;
+    c.synth_url = first?.synth_url ?? null;
+    c.synth_version = first?.synth_version ?? null;
+    const any = (st: string) => links.some((l) => l.state === st);
+    c.link_state =
+      links.length === 0
+        ? "unpaired"
+        : c.paused
+          ? "paused"
+          : any("linked")
+            ? "linked"
+            : any("connecting")
+              ? "connecting"
+              : any("reconnecting")
+                ? "reconnecting"
+                : "needs_repair";
+    this.state.needs_repair = links.length > 0 && links.every((l) => l.state === "needs_repair");
+    const account = this.state.account;
+    if (account.synths) {
+      for (const a of account.synths) a.linked = links.some((l) => l.synth_id === a.synth_id);
+    }
+  }
+
   private snapshot(): UiState {
+    this.derive();
     return structuredClone(this.state);
+  }
+
+  /** One link changes state (a later step of the mock's story). */
+  private setLink(index: number, state: LinkBrief["state"], detail: string) {
+    const link = this.state.core.links[index];
+    if (!link) return;
+    link.state = state;
+    link.detail = detail;
+    if (state === "linked") {
+      const known = SYNTHS[link.synth_id];
+      link.synth_name = known?.name ?? link.synth_name;
+      link.synth_version = known?.version ?? link.synth_version;
+    }
+    this.state.link_detail = detail;
+  }
+
+  /** A new link comes up after a moment, as the real one does. */
+  private bringUp(id: string) {
+    window.setTimeout(() => {
+      const i = this.state.core.links.findIndex((l) => l.synth_id === id);
+      if (i < 0 || this.state.core.links[i]!.state !== "connecting") return;
+      this.setLink(i, "linked", `linked to ${SYNTHS[id]?.name ?? id}`);
+      this.emit({ type: "state" });
+    }, 1500);
+  }
+
+  /** Nothing is linked any more: back to a fresh start, as the shell does. */
+  private resetIfEmpty() {
+    if (this.state.core.links.length > 0) return;
+    this.stopWork();
+    this.approvals = [];
+    this.state.core.paused = false;
+    this.state.core.settings = offSettings();
+    this.state.core.computer_driver = null;
+    this.refreshApps();
+    this.state.grants = [];
+    this.state.prefs.onboarded = false;
+    this.state.link_detail = "unpaired";
+    this.state.logins.vault_synth = null;
+    this.state.logins.vault = { state: "unknown" };
+  }
+
+  /** The synth that gets this line or request: one of the linked ones. */
+  private someSynth(): string | undefined {
+    const links = this.state.core.links.filter((l) => l.state === "linked");
+    if (links.length < 2) return links[0]?.synth_name ?? undefined;
+    return links[Math.floor(Math.random() * links.length)]!.synth_name ?? undefined;
   }
 
   private async reply<T>(value: T, ms = 60): Promise<T> {
@@ -1027,6 +1201,8 @@ class MockBackend implements Backend {
       ...(bytes === undefined ? {} : { bytes }),
       ...(count === undefined ? {} : { count }),
     };
+    const synth = capability === "vault" ? undefined : this.someSynth();
+    if (synth && this.state.core.links.length > 1) entry.synth = synth;
     this.journal.push(entry);
     if (capability === "net" && bytes) this.state.core.egress_bytes += bytes;
     this.emit({ type: "journal", entry });
@@ -1046,6 +1222,8 @@ class MockBackend implements Backend {
     const request: ApprovalRequest = {
       details: [],
       remember: "any",
+      // A browser asks for itself; everything else is a synth asking.
+      synth: base.capability === "vault" ? null : (this.someSynth() ?? "Mia"),
       ...base,
       id: this.nextApproval++,
       asked_at_ms: Date.now(),
@@ -1065,7 +1243,7 @@ class MockBackend implements Backend {
   }
 
   simulateActivity() {
-    if (this.state.core.paused || !this.state.core.paired) return;
+    if (this.state.core.paused || this.state.core.links.length === 0) return;
     const samples: Array<[string, string, string, string, number?]> = [
       ["net", "dial", "www.booking.com:443", "ok", 1_800_000],
       ["net", "dial", "maps.googleapis.com:443", "ok", 420_000],
@@ -1113,9 +1291,8 @@ class MockBackend implements Backend {
   }
 
   simulateLink(state: "linked" | "connecting" | "reconnecting") {
-    if (!this.state.core.paired) return;
-    this.state.core.link_state = state;
-    this.state.link_detail = state === "linked" ? "linked to Mia" : "connect: no answer in 15s";
+    if (this.state.core.links.length === 0) return;
+    this.setLink(0, state, state === "linked" ? `linked to ${this.state.core.links[0]!.synth_name ?? "Mia"}` : "connect: no answer in 15s");
     this.emit({ type: "state" });
   }
 
@@ -1142,14 +1319,26 @@ class MockBackend implements Backend {
 
   async pairBegin(code: string, hubUrl?: string) {
     await this.reply(null, 700);
-    if (this.state.core.paired) throw "already_linked";
     const digits = code.replace(/\D/g, "");
     if (digits.length !== 6) throw "bad_code";
     if (hubUrl && !hubUrl.startsWith("https://")) throw "bad_hub_url";
     if (digits === "000000") throw "code_not_found: code not found";
     if (digits === "111111") throw "code_expired: code expired";
-    if (digits === "222222") throw "hub_unreachable: could not reach hub";
-    this.state.pending = { synth_id: "mia", synth_url: "https://mia.snth.ai" };
+    if (digits === "222222") throw this.state.account.signed_in ? "platform_unreachable: could not reach the platform" : "hub_unreachable: could not reach hub";
+    if (digits === "555555") throw "rate_limited: too many attempts";
+    // 444444: a new code for a synth that is linked already (its key is
+    // replaced). Otherwise the next synth this computer has no link to.
+    const linked = this.state.core.links.map((l) => l.synth_id);
+    const id = digits === "444444" && linked.length > 0 ? linked[0]! : (["mia", "maya", "lev"].find((x) => !linked.includes(x)) ?? "lev");
+    const viaAccount = this.state.account.signed_in;
+    const elsewhere = viaAccount && digits === "333333";
+    this.state.pending = {
+      synth_id: id,
+      synth_url: SYNTHS[id]!.url,
+      synth_name: viaAccount ? SYNTHS[id]!.name : null,
+      linked_to_account: viaAccount ? !elsewhere : null,
+      reason: elsewhere ? "synth_linked_elsewhere" : null,
+    };
     return structuredClone(this.state.pending);
   }
 
@@ -1157,26 +1346,25 @@ class MockBackend implements Backend {
     if (!this.state.pending) throw "no pending pairing to confirm";
     const p = this.state.pending;
     this.state.pending = null;
-    Object.assign(this.state.core, {
-      paired: true,
-      synth_id: p.synth_id,
-      synth_name: null,
-      synth_url: p.synth_url,
-      link_state: "connecting",
-      paused: false,
-      settings: offSettings(),
-    });
-    this.refreshApps();
-    this.state.prefs.onboarded = false;
-    this.state.grants = [];
-    window.setTimeout(() => {
-      if (!this.state.core.paired) return;
-      this.state.core.link_state = "linked";
-      this.state.core.synth_name = "Mia";
-      this.state.core.synth_version = "v0.6.170";
-      this.state.link_detail = "linked to Mia";
-      this.emit({ type: "state" });
-    }, 1500);
+    const first = this.state.core.links.length === 0;
+    const viaAccount = p.linked_to_account === true;
+    const link = linkOf(p.synth_id, viaAccount ? "account" : "code", "connecting");
+    const at = this.state.core.links.findIndex((l) => l.synth_id === p.synth_id);
+    if (at >= 0) this.state.core.links[at] = link;
+    else this.state.core.links.push(link);
+    if (viaAccount && this.state.account.synths && !this.state.account.synths.some((a) => a.synth_id === p.synth_id)) {
+      this.state.account.synths.push(accountSynth(p.synth_id, true));
+    }
+    if (first) {
+      // Only the first link starts from nothing allowed and onboarding.
+      this.state.core.paused = false;
+      this.state.core.settings = offSettings();
+      this.refreshApps();
+      this.state.prefs.onboarded = false;
+      this.state.grants = [];
+      this.state.logins.vault_synth = p.synth_id;
+    }
+    this.bringUp(p.synth_id);
     return this.changed();
   }
 
@@ -1187,23 +1375,143 @@ class MockBackend implements Backend {
 
   async unpair() {
     await this.reply(null, 500);
-    this.stopWork();
-    this.approvals = [];
-    Object.assign(this.state.core, {
-      paired: false,
-      link_state: "unpaired",
-      synth_id: null,
-      synth_name: null,
-      synth_url: null,
-      synth_version: null,
-      paused: false,
-      settings: offSettings(),
-    });
-    this.refreshApps();
-    this.state.grants = [];
+    for (const l of this.state.core.links) this.forgetSynth(l.synth_id);
+    this.state.core.links = [];
     this.state.needs_repair = false;
-    this.state.prefs.onboarded = false;
-    this.state.link_detail = "unpaired";
+    this.resetIfEmpty();
+    return this.changed();
+  }
+
+  /** What leaves with one synth: its answers and its browsers. */
+  private forgetSynth(id: string) {
+    this.state.grants = this.state.grants.filter((g) => g.synth_id !== id);
+    for (const b of this.state.logins.browsers) {
+      if (b.synth_id === id) {
+        b.state = "installed";
+        b.sites = [];
+        b.synth_id = null;
+        b.synth_name = null;
+      }
+    }
+    if (this.state.logins.vault_synth === id) {
+      this.state.logins.vault_synth = this.state.core.links.find((l) => l.synth_id !== id)?.synth_id ?? null;
+      this.state.logins.vault = { state: "unknown" };
+    }
+    const a = this.state.account.synths?.find((x) => x.synth_id === id);
+    if (a) a.skipped = true;
+  }
+
+  async unpairSynth(synthId: string) {
+    await this.reply(null, 400);
+    this.forgetSynth(synthId);
+    this.state.core.links = this.state.core.links.filter((l) => l.synth_id !== synthId);
+    this.resetIfEmpty();
+    return this.changed();
+  }
+
+  async reconnectSynth(synthId: string) {
+    await this.reply(null, 600);
+    const i = this.state.core.links.findIndex((l) => l.synth_id === synthId);
+    if (i < 0) throw "not_linked";
+    if (this.state.core.links[i]!.source === "code") throw "needs_code";
+    this.setLink(i, "connecting", "dialing");
+    this.bringUp(synthId);
+    return this.changed();
+  }
+
+  // --- the SNTH account ---
+
+  private loginTimer: number | undefined;
+
+  /** "Sign in with SNTH": the browser opens; the mock plays the owner
+   * signing in there after a moment. */
+  private startLogin() {
+    const account = this.state.account;
+    if (account.login.phase !== "waiting") account.login = { phase: "waiting", started_at: now() };
+    window.clearTimeout(this.loginTimer);
+    this.loginTimer = window.setTimeout(() => {
+      if (this.state.account.login.phase !== "waiting") return;
+      const fail = params.get("login");
+      if (fail === "denied" || fail === "expired") {
+        this.state.account.login = { phase: "failed", code: fail };
+        this.emit({ type: "state" });
+        return;
+      }
+      this.state.account.login = { phase: "exchanging" };
+      this.emit({ type: "state" });
+      window.setTimeout(() => {
+        const linked = this.state.core.links.map((l) => l.synth_id);
+        this.state.account = {
+          ...this.state.account,
+          signed_in: true,
+          account: { ...ACCOUNT },
+          login: { phase: "idle" },
+          synths: accountSynthIds().map((id) => accountSynth(id, linked.includes(id))),
+          last_sync: now(),
+          sync_error: null,
+        };
+        this.emit({ type: "state" });
+      }, 600);
+    }, 1500);
+  }
+
+  loginCancel() {
+    window.clearTimeout(this.loginTimer);
+    this.state.account.login = { phase: "idle" };
+    return this.changed();
+  }
+
+  async accountConnect() {
+    const account = this.state.account;
+    if (!account.signed_in || !account.synths) throw "signed_out";
+    await this.reply(null, 700);
+    const first = this.state.core.links.length === 0;
+    const fail = params.get("connectfail");
+    for (const a of account.synths) {
+      a.skipped = false;
+      a.error = null;
+      a.reason = null;
+      // One link per synth: a code link becomes the account's link.
+      const have = this.state.core.links.find((l) => l.synth_id === a.synth_id);
+      if (have) {
+        have.source = "account";
+        have.hub_id = a.hub_id;
+        continue;
+      }
+      if (fail && a.synth_id === "maya") {
+        a.error = fail;
+        a.reason = fail === "connect_unavailable" ? "SNTH Connect is switched off for this synth by its owner." : null;
+        continue;
+      }
+      this.state.core.links.push(linkOf(a.synth_id, "account", "connecting"));
+      this.bringUp(a.synth_id);
+    }
+    account.consented = true;
+    if (first && this.state.core.links.length > 0) {
+      this.state.core.settings = offSettings();
+      this.refreshApps();
+      this.state.prefs.onboarded = false;
+      this.state.grants = [];
+      this.state.logins.vault_synth = this.state.core.links[0]!.synth_id;
+    }
+    return this.changed();
+  }
+
+  async accountSync() {
+    const account = this.state.account;
+    if (!account.signed_in) throw "signed_out";
+    await this.reply(null, 600);
+    account.last_sync = now();
+    account.sync_error = null;
+    return this.changed();
+  }
+
+  async signOut() {
+    await this.reply(null, 500);
+    for (const l of this.state.core.links.filter((x) => x.source === "account")) this.forgetSynth(l.synth_id);
+    this.state.core.links = this.state.core.links.filter((l) => l.source !== "account");
+    this.state.account = signedOut();
+    this.resetIfEmpty();
     return this.changed();
   }
 
@@ -1285,8 +1593,8 @@ class MockBackend implements Backend {
     return this.changed();
   }
 
-  revokeGrant(capability: string, scope: string) {
-    this.state.grants = this.state.grants.filter((g) => !(g.capability === capability && g.scope === scope));
+  revokeGrant(capability: string, scope: string, synthId: string) {
+    this.state.grants = this.state.grants.filter((g) => !(g.capability === capability && g.scope === scope && g.synth_id === synthId));
     // A site taken back here is taken back in the browsers too.
     if (capability === "cookies") {
       for (const b of this.state.logins.browsers) b.sites = b.sites.filter((s) => s !== scope);
@@ -1297,12 +1605,21 @@ class MockBackend implements Backend {
   // --- logins: the synth's vault and the browsers ---
 
   /** The synth answers after a moment (or not at all, with `logins=asking`). */
-  async loginsRefresh() {
+  async loginsRefresh(synthId: string | null) {
     if (params.get("logins") === "asking") return new Promise<UiState>(() => undefined);
-    const offline = this.state.core.link_state !== "linked" && this.state.core.link_state !== "paused";
+    const links = this.state.core.links;
+    const chosen = links.find((l) => l.synth_id === synthId) ?? links.find((l) => l.synth_id === this.state.logins.vault_synth) ?? links[0];
+    const switched = chosen?.synth_id !== this.state.logins.vault_synth;
+    this.state.logins.vault_synth = chosen?.synth_id ?? null;
+    const offline = !chosen || (chosen.state !== "linked" && !this.state.core.paused);
     const staged = stagedVault();
+    if (staged.state === "ready" && chosen && chosen.synth_id !== "mia") {
+      // Another synth's vault holds other logins.
+      staged.sites = [{ site: "airbnb.com", has_totp: false, updated: now() - 9 * DAY, last_used: now() - 2 * DAY, use_count: 4 }];
+      staged.devices = 1;
+    }
     // What was removed in this session stays removed.
-    const previous = this.state.logins.vault;
+    const previous = switched ? ({ state: "unknown" } as VaultView) : this.state.logins.vault;
     this.state.logins.vault = offline ? { state: "offline" } : previous.state === "ready" && staged.state === "ready" ? previous : staged;
     return this.reply(this.snapshot(), 450);
   }
@@ -1325,7 +1642,7 @@ class MockBackend implements Backend {
     return this.reply(this.snapshot(), 120);
   }
 
-  vaultForget(site: string) {
+  vaultForget(site: string, _synthId: string | null) {
     const vault = this.state.logins.vault;
     if (vault.state === "ready") vault.sites = vault.sites.filter((s) => s.site !== site);
     this.record("vault", "vault.forget", site, "ok");
@@ -1333,7 +1650,7 @@ class MockBackend implements Backend {
     return this.reply(this.snapshot(), 300);
   }
 
-  async browserLink(install: string) {
+  async browserLink(install: string, synthId: string | null) {
     const outcome = params.get("link") ?? "ok";
     await new Promise((r) => window.setTimeout(r, 700));
     const row = this.state.logins.browsers.find((b) => b.install === install);
@@ -1343,6 +1660,9 @@ class MockBackend implements Backend {
       throw outcome;
     }
     row.state = "linked";
+    const to = this.state.core.links.find((l) => l.synth_id === synthId) ?? this.state.core.links[0];
+    row.synth_id = to?.synth_id ?? null;
+    row.synth_name = to?.synth_name ?? null;
     this.record("vault", "vault.pair", row.name, "ok");
     this.emit({ type: "state" });
     return this.snapshot();
@@ -1353,6 +1673,8 @@ class MockBackend implements Backend {
     if (row) {
       row.state = "installed";
       row.sites = [];
+      row.synth_id = null;
+      row.synth_name = null;
       this.record("vault", "vault.unpair", row.name, "ok");
     }
     this.emit({ type: "state" });
@@ -1370,13 +1692,11 @@ class MockBackend implements Backend {
     for (const a of this.approvals) this.emit({ type: "approval_closed", id: a.id });
     this.approvals = [];
     this.state.core.paused = true;
-    this.state.core.link_state = "paused";
     return this.changed();
   }
 
   resume() {
     this.state.core.paused = false;
-    this.state.core.link_state = "linked";
     return this.changed();
   }
 
@@ -1393,8 +1713,9 @@ class MockBackend implements Backend {
     const kept = req.remember === "any" || (req.remember === "always" && duration === "always");
     if (allow && duration !== "once" && kept) {
       const until = duration === "always" ? 0 : duration === "session" ? -1 : now() + (hours ?? 1) * 3600;
-      const grant: Grant = { capability: req.capability, scope: req.scope, until };
-      this.state.grants = this.state.grants.filter((g) => !(g.capability === grant.capability && g.scope === grant.scope));
+      const link = this.state.core.links.find((l) => l.synth_name === req.synth) ?? this.state.core.links[0];
+      const grant: Grant = { synth_id: link?.synth_id ?? "", synth_name: link?.synth_name ?? null, capability: req.capability, scope: req.scope, until };
+      this.state.grants = this.state.grants.filter((g) => !(g.capability === grant.capability && g.scope === grant.scope && g.synth_id === grant.synth_id));
       this.state.grants.push(grant);
     }
     this.recordAnswer(req, allow);
@@ -1408,7 +1729,11 @@ class MockBackend implements Backend {
     if (req.capability === "vault") {
       // The browser that asked is linked once the owner says yes.
       const row = this.state.logins.browsers.find((b) => b.name === req.scope && b.state === "installed");
-      if (allow && row) row.state = "linked";
+      if (allow && row) {
+        row.state = "linked";
+        row.synth_id = this.state.core.links[0]?.synth_id ?? null;
+        row.synth_name = this.state.core.links[0]?.synth_name ?? null;
+      }
       this.record("vault", "vault.pair", req.scope, allow ? "ok" : "denied: owner");
     } else if (req.capability === "cookies") {
       const viaBrowser = req.details.some((d) => d.key === "browser_step");
@@ -1664,7 +1989,8 @@ class MockBackend implements Backend {
         "",
         `linked: ${c.paired} (state ${c.link_state}, paused ${c.paused})`,
         `link detail: ${this.state.link_detail}`,
-        `synth: ${c.synth_id ?? "-"} (version ${c.synth_version ?? "-"})`,
+        ...c.links.map((l) => `synth: ${l.synth_id} (${l.source}, state ${l.state}, version ${l.synth_version ?? "-"})`),
+        `account: ${this.state.account.signed_in ? "signed in" : "not signed in"}`,
         `settings revision: ${c.settings_rev}, preset ${c.settings.preset}`,
         `Cua Driver: ${c.cua_version || "not installed"} (status ${c.cua_status})`,
       ].join("\n"),
@@ -1674,6 +2000,10 @@ class MockBackend implements Backend {
   openExternal(target: string) {
     console.info(`[mock] would open: ${target}`);
     if (target === "safari_extension") this.safariSteps = Math.max(this.safariSteps, 1);
+    if (target === "platform_login") {
+      this.startLogin();
+      this.emit({ type: "state" });
+    }
     return this.reply(undefined);
   }
 }
