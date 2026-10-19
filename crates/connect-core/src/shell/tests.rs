@@ -21,7 +21,9 @@ fn tmp(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("connect-shell-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::canonicalize(&dir).unwrap()
+    // Plain, the way the owner and the synth write a path (Windows
+    // canonicalizes to the \\?\ form).
+    crate::files::plain(&std::fs::canonicalize(&dir).unwrap())
 }
 
 fn req(command: &str, timeout: Duration) -> Request {
@@ -83,7 +85,7 @@ async fn the_working_folder_is_the_one_asked_for() {
     r.cwd = dir.clone();
     let run = run_now(&r).await;
     let got = PathBuf::from(text(&run.stdout.data).trim());
-    assert_eq!(std::fs::canonicalize(got).unwrap(), dir);
+    assert_eq!(crate::files::plain(&std::fs::canonicalize(got).unwrap()), dir);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
