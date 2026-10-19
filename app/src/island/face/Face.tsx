@@ -173,7 +173,8 @@ function drawFace(face: FaceConfig, fr: Frame, compact: boolean, reduced: boolea
   const thick = compact ? 1.3 : 1;
 
   const glow = clamp(face.eyes.glow + P.glow, 0, 1);
-  const blush = clamp(face.cheeks.blush + P.blush, 0, 1);
+  // A face set to no blush never blushes; the states only add to faces that do.
+  const blush = face.cheeks.blush > 0 ? clamp(face.cheeks.blush + P.blush, 0, 1) : 0;
 
   // Whole-eye shift with the gaze: small for eyes with an iris, large for flat ones.
   const gx = clamp(P.gx, -1.2, 1.2);
@@ -406,7 +407,7 @@ function drawFace(face: FaceConfig, fr: Frame, compact: boolean, reduced: boolea
             <path d={e.upper} fill="#000000" />
           </g>
         </mask>
-        {glow > 0.01 ? <ellipse rx={f(hx * 1.9)} ry={f(hy * 1.9)} fill={url("glow")} opacity={glow * (0.4 + 0.6 * e.contentOp)} /> : null}
+        {glow > 0.01 ? <ellipse rx={f(hx * 1.9)} ry={f(hy * 1.9)} fill={url("glow")} opacity={glow * (0.25 + 0.75 * smooth(e.aperture / 0.7))} /> : null}
         {lidVisible ? (
           <g clipPath={`url(#${clipId})`} opacity={e.contentOp}>
             <g transform={local(s)}>
