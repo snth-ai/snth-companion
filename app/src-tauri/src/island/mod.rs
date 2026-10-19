@@ -66,6 +66,14 @@ const MESSAGE_FORGET: Duration = Duration::from_secs(20 * 60);
 /// A notice (offline, the microphone, a failed send) stays this long.
 const NOTICE_FOR: Duration = Duration::from_secs(6);
 
+/// A debug build started with `SNTH_ISLAND_DEMO=1` shows the island
+/// without a linked synth, with no main window and no helper install: to
+/// look at the window and measure what it costs at rest. Never in a
+/// release build.
+pub fn demo() -> bool {
+    cfg!(debug_assertions) && std::env::var("SNTH_ISLAND_DEMO").as_deref() == Ok("1")
+}
+
 /// The island only exists where it can be drawn properly.
 pub fn supported_os() -> bool {
     cfg!(any(target_os = "macos", windows))
@@ -290,7 +298,7 @@ pub fn emit_view(ctx: &Ctx) {
 /// anything that may change them. Never on the main thread.
 pub fn sync(ctx: &Arc<Ctx>) {
     let settings = ctx.core.island();
-    let want_window = supported_os() && settings.enabled && ctx.core.is_paired();
+    let want_window = supported_os() && ((settings.enabled && ctx.core.is_paired()) || demo());
     if want_window {
         ensure_window(ctx);
     } else {
@@ -377,6 +385,16 @@ fn relayout_main_thread(ctx: &Arc<Ctx>) {
     let placement = geometry::place(&screen);
     let changed = ctx.island.inner.lock().unwrap().placement != Some(placement);
     if changed {
+        connect_core::logln!(
+            "island: placed at {:.0},{:.0} {:.0}x{:.0}, {} notch {:.0}x{:.0}",
+            placement.window.x,
+            placement.window.y,
+            placement.window.w,
+            placement.window.h,
+            if placement.real_notch { "real" } else { "drawn" },
+            placement.notch.w,
+            placement.notch.h
+        );
         panel::place(&w, &placement);
         ctx.island.inner.lock().unwrap().placement = Some(placement);
         let _ = w.emit_to(WINDOW, VIEW_EVENT, view(ctx));

@@ -164,7 +164,10 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
     // Subscribe before the link starts so no event is missed.
     spawn_event_forwarder(ctx.clone());
     spawn_link(ctx.clone(), shutdown_rx.clone());
-    spawn_helper(ctx.clone(), shutdown_rx.clone());
+    // The island's demo (a debug build only) has no use for the helper.
+    if !island::demo() {
+        spawn_helper(ctx.clone(), shutdown_rx.clone());
+    }
     // The SNTH Vault extension: serve its helper, and tell the installed
     // browsers where that helper is (only while linked to a synth; this
     // also follows the app after an update or a move).
@@ -186,7 +189,7 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
     // window was hidden: stay in the tray, unless there is something the
     // owner has to do first (pair or finish onboarding).
     let asked_hidden = resume_hidden.unwrap_or_else(|| std::env::args().any(|a| a == HIDDEN_FLAG));
-    let hidden = asked_hidden && onboarded && core.is_paired();
+    let hidden = (asked_hidden && onboarded && core.is_paired()) || island::demo();
     ctx.updates.started_hidden.store(hidden, Ordering::Release);
     ctx.updates.window_was_shown.store(!hidden, Ordering::Release);
     windows::create_main(&handle, !hidden)?;
