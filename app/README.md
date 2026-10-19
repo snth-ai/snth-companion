@@ -99,6 +99,9 @@ URL parameters stage a screen or a state directly:
 | `cua` | the helper: `ready` (default), `checking`, `downloading` (frozen at 42%), `installing` (plays the whole automatic install, about 7 s), `verifying`, `failed` (with `why=offline`, `download`, `checksum`, `disk`, `verify`, `unsupported`, `timeout`); the macOS permissions: `noperm`, `half` |
 | `update` | the app's own updates: `checking`, `downloading` (frozen at 40%), `ready` (downloaded, waiting for a quiet moment), `available` (the setting is off), `applying`, `applied` (first run after an update), `failed` (with `step=check`, `download`, `install`), `blocked` (with `block=translocated`, `read_only`, `package`), `flow` (plays check, download, ready), `off`, `unconfigured` |
 | `pair` | a 6-digit code: behaves as if `snth://pair?code=...` was opened |
+| `account` | the platform account: `signed_out` (first run, nothing linked: "Sign in with SNTH" waits about 2 s in the "browser", then shows the consent screen for Mia and Maya), `consent` (signed in, the consent screen), `two` (signed in, Mia and Maya linked), `none` (signed in, no synths: the code field), `repair` (two linked, Maya refused her token). Without it: signed out, Mia linked with a code, as before |
+| `login` | with `account=signed_out`: the sign-in fails, `denied` (Cancel in the browser) or `expired` |
+| `connectfail` | with `account=consent`: linking Maya fails, `connect_unavailable`, `synth_outdated`, `synth_unreachable` |
 | `lang` | `en`, `ru` |
 | `theme` | `light`, `dark` |
 | `os` | `macos` (default), `windows`, `linux`. Apps follows it: the Mac apps are listed only with `macos` |
@@ -121,8 +124,12 @@ Examples: `?screen=logins`, `?screen=logins&logins=offline&ext=closed&os=windows
 `/approval.html` is the approval window's own page.
 
 In the mock pairing step: any 6 digits work; `000000` is "not valid",
-`111111` is "expired", `222222` is "server unreachable". In General, the
-shortcut `Ctrl/Cmd+Shift+Q` is "taken by another app".
+`111111` is "expired", `222222` is "server unreachable", `444444` is a new
+key for a synth that is linked already, `555555` is "too many tries",
+`333333` (signed in) is a synth of another account. In General, the
+shortcut `Ctrl/Cmd+Shift+Q` is "taken by another app". Examples:
+`?account=signed_out`, `?account=two&screen=general&lang=ru`,
+`?account=repair`, `?account=consent&connectfail=synth_outdated`.
 
 ## Build
 
@@ -295,10 +302,61 @@ environment variable `SNTH_HUB_URL` is set when the Rust crate is compiled
 release script and the workflow if set there). The onboarding screen has a
 hidden "Advanced" override that accepts only `https://` addresses.
 
+### Platform address
+
+The owner's account lives on the platform: `https://platform.snth.ai`
+unless `SNTH_PLATFORM_URL` is set when the Rust crate is compiled
+(`state::PLATFORM_URL`). Sign-in opens `<platform>/connect/login`, the app
+talks to `<platform>/api/app/v1/*` only. There is no override in the UI.
+
 ## How the shell is put together
 
-- One `Core`, built in `setup`. The link runs under a small supervisor that
-  restarts it after a new pairing (`Core::run_link` returns after an unlink).
+- One `Core`, built in `setup`. The computer can be linked to several synths
+  at once (every synth of the owner's account, plus any linked with a code):
+  one link per synth, each with its own reconnect loop. A small supervisor
+  in `main.rs` starts `Core::run_slot` for every link at start and again
+  after each new pairing (`relink`; a second call for a running link
+  returns at once). A loop ends when its link is removed. The policy, the
+  journal, the approvals, computer control and the browser link are the
+  computer's, shared by every link.
+- Pairing, two ways (`connect-core/src/account.rs`, the core README has the
+  whole account in "Pairing and the platform account"):
+  - **Sign in with SNTH** (the first screen's main button). The webview
+    calls `open_external("platform_login")`; Rust makes the state and the
+    PKCE verifier, builds the address and opens the browser (the same call
+    again, within 10 minutes, opens the same sign-in: "Open again"). The
+    platform sends the browser to `snth://login?code=...&state=...`;
+    `actions::handle_deep_link` hands it to `Core::login_complete`, which
+    ignores (and journals) a state it is not waiting for, exchanges the
+    code for the app's token (keychain, `account_token`) and reads the
+    account's synths. The owner confirms on the consent screen
+    (`account_connect`): every synth of the account is linked. With no
+    synths yet, the screen takes a code from a bot.
+  - **A code from the bot** (`/connect_computer`, the second button):
+    `pair_begin` then `pair_confirm`, as before. While signed in, the code
+    goes to the platform (`/api/app/v1/link-code`), which also ties the
+    synth to the account when it is free.
+  - Only the computer's FIRST link resets the settings, pauses the core and
+    runs the onboarding steps (preset, folders, computer control). A second
+    link changes no setting. A code for a synth that is linked already
+    replaces that link's token (the way back from "needs relinking").
+  - The account is read again (`account::spawn_sync`) at start, every 10
+    minutes and when the main window gets focus (at most once a minute):
+    a new synth of the account is linked with a notification ("This
+    computer is connected to Maya"), unless the owner disconnected it here;
+    a synth that left the account is unlinked; a refused app token (the
+    owner removed this computer in the platform) signs the app out: the
+    links made through the account go, links made with a code stay.
+  - General has the account (email, Sign out with a confirmation) and the
+    list of synths: the state of each link, "Disconnect" (that synth only:
+    its token, its remembered answers and its browsers go; settings and the
+    other links stay), and "Connect again" for a link its synth refused
+    (an account link gets a fresh token; a code link asks for a new code).
+    When the last link goes, the settings are reset and the next link runs
+    the onboarding again.
+- A synth that refuses this computer's token (HTTP 401) is not dialed
+  again: its link reads `needs_repair` until it has a new token. An account
+  link first asks the platform once for a fresh one by itself.
 - Approvals: the core calls `Approver::ask`; the shell queues the request,
   opens the approval window, fires a notification, and resolves the future on
   the owner's click. No answer in 55 s, a closed window and a pause are all
@@ -400,16 +458,19 @@ hidden "Advanced" override that accepts only `https://` addresses.
   after the core took out every path outside the app's own folder. It asks
   nothing of a driver the owner runs themselves and raises no system prompt.
 - Pairing links: `snth://pair?code=XXXXXX` only brings the window up and hands
-  the code to the UI, which asks the hub who the code belongs to and shows the
+  the code to the UI, which asks who the code belongs to and shows the
   confirmation screen. The token is stored and the link opened only on the
-  Connect click. If the computer is already linked, a notice says so and
-  nothing changes.
+  Connect click. On a computer that is linked already the same sheet adds
+  the synth (or replaces the token of a synth that is linked already).
+  `snth://login?...` is the platform's answer to the app's own sign-in and
+  is acted on only with the state the app is waiting for.
 - Webview permissions: `build.rs` lists every app command, which makes Tauri
   enforce `capabilities/*.json` per window. The main window gets the app's
   commands and the event listener; the approval window gets five commands.
   There is no shell plugin and no fs plugin; the folder picker is opened from
   Rust, so the webview never supplies a path; "open in browser" takes one of
-  four fixed targets, never a URL. Windows refuse to navigate anywhere but
+  a few fixed targets, never a URL (`platform_login`: the address is built
+  in Rust). Windows refuse to navigate anywhere but
   the app's own pages, and the CSP is `default-src 'self'` plus the IPC
   endpoint.
 - macOS: `src/menu.rs` replaces the default application menu so Cmd+Q goes
@@ -651,6 +712,17 @@ then split off), so it waits for the release manager.
 
 ## Not verified
 
+- Sign-in through the platform, and several synths at once, end to end. The
+  core is tested against a fake platform (PKCE, the state check, consent,
+  the sync adding and dropping synths, a revoked app token, sign-out, a
+  code through the account) and a local server that refuses tokens (no
+  redial after a 401, one fresh token for an account link). Not done: a
+  real `snth://login` coming back from a browser into the installed app on
+  macOS, Windows and Linux; the real platform's `/connect/login` page and
+  `/api/app/v1/*`; two real synths linked at the same time (two links, one
+  driver of the computer, the refusal the second synth gets); the move of
+  the one link of an app 0.1.12 to the new shape in the real keychain; the
+  notification after a sync; the window-focus sync.
 - "Which apps", with a synth at work. `connectd selftest cua` proved on the
   real pinned helper (macOS here, Windows in CI) that the bounded daemon
   lets the chosen app be observed and refuses another running app, the list
