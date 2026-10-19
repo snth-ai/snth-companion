@@ -15,7 +15,7 @@ import { backend } from "../backend";
 import type { IslandView } from "../backend/types";
 import { stringsFor } from "../i18n";
 import { shortcutText } from "../lib/format";
-import { Face, type FaceState } from "./faceApi";
+import { Face, faceFor, type FaceState } from "./faceApi";
 
 /** How long the summary stays after the answer (TZ: 4-6 s). */
 const SUMMARY_FOR = 6000;
@@ -233,8 +233,9 @@ export function IslandApp() {
   const quick = approval ? quickAnswer(approval, s, approval.synth ?? name) : null;
 
   const left = (p.window.w - width) / 2;
-  const accentRaw = (view.face?.palette as { accent?: unknown } | undefined)?.accent;
-  const accent = typeof accentRaw === "string" && /^#[0-9A-Fa-f]{6}$/.test(accentRaw) ? accentRaw : "#F2B8C6";
+  // The synth's own face, or the default look of its id.
+  const face = faceFor(view.synth?.id ?? "", view.face);
+  const accent = face.palette.accent;
   const faceSize = Math.max(18, p.pill.h - 4);
 
   return (
@@ -248,7 +249,7 @@ export function IslandApp() {
           <div className="isl-ear left" style={{ width: (p.pill.w - p.notch.w) / 2 }}>
             {open ? null : (
               <div ref={faceRef} className="isl-face">
-                <Face config={view.face} state={state} gaze={gaze} level={level} size={faceSize} compact label={name} />
+                <Face config={face} state={state} gaze={gaze} level={level} size={faceSize} compact label={name} />
               </div>
             )}
           </div>
@@ -263,7 +264,7 @@ export function IslandApp() {
             <>
               <div className="isl-head">
                 <div ref={faceRef} className="isl-face big">
-                  <Face config={view.face} state={state} gaze={gaze} level={level} size={56} label={name} />
+                  <Face config={face} state={state} gaze={gaze} level={level} size={56} compact={false} label={name} />
                 </div>
                 <div className="isl-text">
                   <div className="isl-name">{name}</div>

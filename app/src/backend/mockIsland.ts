@@ -18,6 +18,7 @@
 //
 // Nothing here touches the network or the computer.
 
+import { presetFace } from "../island/faceApi";
 import type {
   ApprovalRequest,
   FaceConfig,
@@ -58,16 +59,13 @@ export function canonical(accelerator: string): string {
   return [...[...mods].sort(), key].join("+");
 }
 
-/** The face Mia set for herself in the mock. */
-const MIA_FACE: FaceConfig = {
-  v: 1,
-  preset: "mia",
-  eyes: { shape: "almond", size: 0.62, iris: { color: "#7A4BFF", size: 0.55 }, lashes: "light", glow: 0.15 },
-  mouth: { style: "smile", color: "#F2B8C6" },
-  cheeks: { blush: 0.35, color: "#FF8FB1" },
-  accessory: "none",
-  palette: { accent: "#F2B8C6" },
-};
+/** The face Mia set for herself in the mock: her preset, a little
+ * changed. */
+const MIA_FACE: FaceConfig = (() => {
+  const face = presetFace("mia");
+  face.accessory = "none";
+  return face;
+})();
 
 export function stagedIslandState(os: string, links: LinkBrief[]): IslandState {
   const scenario = params.get("island") ?? "off";
@@ -149,7 +147,9 @@ export class MockIslandScreen {
     await new Promise((r) => window.setTimeout(r, 400));
     if (!this.state().island.supported[synthId]) throw "outdated";
     window.setTimeout(() => {
-      this.state().island.faces[synthId] = { ...MIA_FACE, preset: "star", eyes: { shape: "star", size: 0.66, glow: 0.4 }, accessory: "halo" };
+      const face = presetFace("star");
+      face.accessory = "halo";
+      this.state().island.faces[synthId] = face;
       void this.changed();
     }, 2500);
   }

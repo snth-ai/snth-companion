@@ -1,6 +1,8 @@
-// The one door to the face module (island/face/**, built on its own
-// branch). Until it is merged this points at a small placeholder with the
-// same props; after the merge it points at the real Face and FaceEditor.
+// The one door to the face module (island/face/**: renderer, schema,
+// presets, editor, its own strings). Everything else in the app imports
+// the face from here.
 
-export { Face, FaceEditor } from "./FacePlaceholder";
-export type { FaceState } from "./FacePlaceholder";
+export { Face } from "./face/Face";
+export { FaceEditor } from "./face/FaceEditor";
+export { faceFor, presetFace } from "./face/schema";
+export type { FaceConfig, FaceState } from "./face/schema";

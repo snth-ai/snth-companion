@@ -380,9 +380,9 @@ export interface LoginsState {
 
 // --- the island ---
 
-/** A synth's face (FaceConfig v1). The shape lives with the face module
- * (island/face/schema.ts); here it only travels. */
-export type FaceConfig = Record<string, unknown>;
+/** A synth's face (FaceConfig v1): the face module's schema. */
+export type { FaceConfig } from "../island/face/schema";
+import type { FaceConfig } from "../island/face/schema";
 
 export type HotkeyKind = "voice" | "screen_voice" | "text";
 export interface Hotkeys {
