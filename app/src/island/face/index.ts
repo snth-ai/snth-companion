@@ -1,6 +1,6 @@
 // The island face, for the rest of the app (agent I wires it in).
 
-export { Face, COMPACT_BELOW, faceAspect, faceWidth, type FaceProps } from "./Face";
+export { Face, COMPACT_BELOW, faceAspect, faceView, faceWidth, type FaceProps, type FaceView } from "./Face";
 export { FaceEditor, type FaceEditorProps } from "./FaceEditor";
 export { faceStrings, presetBlurb, presetTitle, type FaceStrings } from "./i18n";
 export type { Vec as FaceGaze } from "./motion";
