@@ -1,32 +1,56 @@
 // The synth's face on the island: SVG on a black background (the island
-// draws the black; the face itself is transparent). Two levels of detail:
-// compact (the closed island, about 32-37 px tall: eyes, cheeks, glasses,
-// small effects) and full (the open island and the editor: brows, mouth and
-// every accessory too). See motion.ts for how it moves and what it costs.
+// draws the black; the face itself is transparent).
+//
+// Scale: one continuous mapping from the height in px to the face units it
+// shows (see faceView), so the eyes never jump when the island opens: a
+// closed island (32-37 px) shows a crop around the eyes, an open one
+// (about 80 px and up) the whole head. Detail (brows, mouth, accessories)
+// fades in above COMPACT_BELOW. Small symbols beside the eyes say what the
+// synth is doing where the eyes alone cannot: a cursor (at the computer),
+// "?" (needs permission), "!" (problem), a three-bar meter (listening).
+// See motion.ts for how it moves and what it costs.
 
 import { useEffect, useId, useMemo, useRef, useState, type CSSProperties, type ReactElement } from "react";
 import { darken, drain, lighten, luminance, mix, visibleOnBlack } from "./color";
 import { eyeGeom, f, heart, softStar, sparkle } from "./geometry";
-import { EMOTE_LENGTH, FaceSim, LID_REST, stillFrame, type Frame, type Vec } from "./motion";
+import { EMOTE_LENGTH, FaceSim, HERO_TIME, LID_REST, nodCurve, stillFrame, type Frame, type Vec } from "./motion";
 import { clampFace, type FaceConfig, type FaceState, type IdleEmote } from "./schema";
 
-/** Below this height (px) the face draws its compact level of detail. */
-export const COMPACT_BELOW = 64;
+/** Below this height (px) brows, mouth and accessories are hidden. */
+export const COMPACT_BELOW = 48;
 
-const BOX = {
-  compact: { x: -68, y: -29, w: 136, h: 58 },
-  full: { x: -80, y: -62, w: 160, h: 114 },
-};
+/** The two ends of the scale: a closed island and an open one. Between
+ * them everything is interpolated by height. */
+const SMALL = { size: 34, h: 82, cy: 0, aspect: 2.05 };
+const LARGE = { size: 80, h: 114, cy: -5, aspect: 1.4 };
 
-/** Width / height of the face box. */
-export function faceAspect(compact: boolean): number {
-  const b = compact ? BOX.compact : BOX.full;
-  return b.w / b.h;
+export interface FaceView {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Face units per screen pixel. */
+  px: number;
 }
 
-/** The width in px the face takes at a given height. */
-export function faceWidth(size: number, compact = size < COMPACT_BELOW): number {
-  return Math.round(size * faceAspect(compact));
+/** The part of the face world shown at a height (px). */
+export function faceView(size: number): FaceView {
+  const k = Math.min(1, Math.max(0, (size - SMALL.size) / (LARGE.size - SMALL.size)));
+  const h = SMALL.h + (LARGE.h - SMALL.h) * k;
+  const cy = SMALL.cy + (LARGE.cy - SMALL.cy) * k;
+  const w = h * (SMALL.aspect + (LARGE.aspect - SMALL.aspect) * k);
+  return { x: -w / 2, y: cy - h / 2, w, h, px: h / size };
+}
+
+/** Width / height of the face at a height (px). */
+export function faceAspect(size: number): number {
+  const v = faceView(size);
+  return v.w / v.h;
+}
+
+/** The width in px the face takes at a height (px). */
+export function faceWidth(size: number): number {
+  return Math.round(size * faceAspect(size));
 }
 
 export interface FaceProps {
@@ -42,7 +66,7 @@ export interface FaceProps {
   size?: number;
   /** Defaults to the system setting. */
   reducedMotion?: boolean;
-  /** Level of detail; defaults to size < COMPACT_BELOW. */
+  /** Hide brows, mouth and accessories; defaults to size < COMPACT_BELOW. */
   compact?: boolean;
   /** Draw one settled pose and never animate (thumbnails, screenshots). */
   still?: boolean;
@@ -79,7 +103,7 @@ export function Face(props: FaceProps) {
   const gaze = useMemo(() => (gx === null || gy === null ? null : { x: gx, y: gy }), [gx, gy]);
   const uid = useId().replace(/[^a-zA-Z0-9_-]/g, "");
 
-  const input = useMemo(() => ({ face, state, gaze, level, reduced, autoSleep }), [face, state, gaze, level, reduced, autoSleep]);
+  const input = useMemo(() => ({ face, state, gaze, level, reduced, autoSleep, compact }), [face, state, gaze, level, reduced, autoSleep, compact]);
   const inputRef = useRef(input);
   inputRef.current = input;
   const simRef = useRef<FaceSim | null>(null);
@@ -110,25 +134,33 @@ export function Face(props: FaceProps) {
   const stillShot = useMemo(
     () =>
       still || !live
-        ? stillFrame(face, state, gaze, level, still && emoteKind ? { kind: emoteKind, t: EMOTE_LENGTH[emoteKind] * 0.45, side: 1 } : null)
+        ? stillFrame(face, state, gaze, level, compact, still && emoteKind ? { kind: emoteKind, t: EMOTE_LENGTH[emoteKind] * 0.45, side: 1 } : null)
         : null,
-    [still, live, face, state, gaze, level, emoteKind],
+    [still, live, face, state, gaze, level, compact, emoteKind],
   );
   const frame = stillShot ?? live!;
 
-  const box = compact ? BOX.compact : BOX.full;
+  const view = faceView(size);
+  const draw = (fr: Frame, id: string) => drawFace(face, fr, { size, view, reduced, uid: id });
   return (
     <svg
       className={props.className}
-      style={{ display: "block", overflow: "visible", ...props.style }}
-      width={faceWidth(size, compact)}
+      style={{ display: "block", overflow: "hidden", ...props.style }}
+      width={faceWidth(size)}
       height={size}
-      viewBox={`${box.x} ${box.y} ${box.w} ${box.h}`}
+      viewBox={`${f(view.x)} ${f(view.y)} ${f(view.w)} ${f(view.h)}`}
       role="img"
       aria-label={props.label}
       aria-hidden={props.label ? undefined : true}
     >
-      {drawFace(face, frame, compact, reduced, uid)}
+      {frame.fade ? (
+        <>
+          <g opacity={1 - frame.fade.a}>{draw(frame.fade.from, `${uid}p`)}</g>
+          <g opacity={frame.fade.a}>{draw(frame, uid)}</g>
+        </>
+      ) : (
+        draw(frame, uid)
+      )}
     </svg>
   );
 }
@@ -143,15 +175,35 @@ const smooth = (t: number) => {
 };
 
 const HEART_PINK = "#FF4F86";
-const TONGUE = "#FF7D9C";
-const SWEAT = "#8FD3FF";
+/** State symbols: fixed colours, so they read the same on every face. */
+const CURSOR_LINE = "#E9E9EE";
+const ASK_AMBER = "#FFB547";
+const ERROR_CORAL = "#FF7A6B";
+const OFFLINE_GREY = "#737780";
+/** Compact brows appear only where they carry the state. */
+const BROW_STATES: ReadonlySet<FaceState> = new Set(["thinking", "error", "approval"]);
 
-function drawFace(face: FaceConfig, fr: Frame, compact: boolean, reduced: boolean, uid: string): ReactElement {
+interface DrawOpts {
+  size: number;
+  view: FaceView;
+  reduced: boolean;
+  uid: string;
+}
+
+function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
+  const { size, view, reduced, uid } = o;
   const P = fr.pose;
+  const px = view.px;
+  const det = clamp(P.detail, 0, 1);
+  const tiny = size < 40;
+  const off = clamp(P.off, 0, 1);
   const dim = clamp(P.dim, 0, 1);
   const tone = (c: string) => drain(c, dim);
   const id = (name: string) => `${uid}-${name}`;
   const url = (name: string) => `url(#${id(name)})`;
+  // Reduced motion: anything driven by the state clock is frozen at the
+  // state's representative moment.
+  const vst = reduced ? (HERO_TIME[fr.state] ?? 1.2) : fr.st;
 
   const R = 11 + face.eyes.size * 13;
   const geom = eyeGeom(face.eyes.shape, R);
@@ -170,19 +222,24 @@ function drawFace(face: FaceConfig, fr: Frame, compact: boolean, reduced: boolea
   const cheekC = tone(face.cheeks.color);
   const glowC = flat ? sclera : accent;
   const lidVisible = luminance(lidC) > 0.025;
-  const thick = compact ? 1.3 : 1;
+  const thick = det < 0.5 ? 1.3 : 1;
 
-  const glow = clamp(face.eyes.glow + P.glow, 0, 1);
-  const blush = clamp(face.cheeks.blush + P.blush, 0, 1);
+  const glow = clamp(face.eyes.glow, 0, 1) * (1 - off);
+  // A face set to no blush never blushes; the states only add to faces that
+  // do. Small and faint blush is dropped at closed-island size.
+  const blushRaw = face.cheeks.blush > 0 ? clamp(face.cheeks.blush + P.blush, 0, 1) : 0;
+  const blush = det < 0.5 && blushRaw < 0.35 ? 0 : blushRaw;
 
-  // Whole-eye shift with the gaze: small for eyes with an iris, large for flat ones.
   const gx = clamp(P.gx, -1.2, 1.2);
   const gy = clamp(P.gy, -1.2, 1.2);
-  const shiftX = gx * (flat ? R * 0.36 : R * 0.08);
-  const shiftY = gy * (flat ? R * 0.26 : R * 0.06);
+  // Whole-eye shift with the gaze; flat eyes keep a steady outline and move
+  // a light core inside instead.
+  const shiftX = gx * R * (flat ? 0.05 : 0.08);
+  const shiftY = gy * R * (flat ? 0.04 : 0.06);
 
-  const headK = compact ? 0.5 : 1;
-  const head = `translate(${f(P.hx * headK)} ${f(P.hy * headK)}) rotate(${f(P.hr * (compact ? 0.45 : 1))} 0 ${f(R)})`;
+  const headK = det < 0.5 ? 0.5 : 1;
+  const nod = fr.state === "accepted" && !reduced ? nodCurve(vst) * (det < 0.5 ? 2 : 3) * px : 0;
+  const head = `translate(${f(P.hx * headK)} ${f(P.hy * headK + nod)}) rotate(${f(P.hr * (det < 0.5 ? 0.45 : 1))} 0 ${f(R)})`;
   // Antenna and halo trail the head on a loose spring.
   const wobX = clamp((P.ax - P.hx) * 1.4 - P.hr * 0.25, -R, R);
   const wobY = clamp((P.ay - P.hy) * 1.2, -R, R);
@@ -190,6 +247,7 @@ function drawFace(face: FaceConfig, fr: Frame, compact: boolean, reduced: boolea
   const eyeData = ([-1, 1] as const).map((s) => {
     const left = s < 0;
     const sc = left ? P.sL : P.sR;
+    const lift = (left ? P.eyL : P.eyR) * R;
     const blink = left ? fr.blinkL : fr.blinkR;
     let u = clamp(left ? P.uL : P.uR, 0, 1);
     let l = clamp(left ? P.lL : P.lR, 0, 1);
@@ -243,6 +301,7 @@ function drawFace(face: FaceConfig, fr: Frame, compact: boolean, reduced: boolea
     return {
       s,
       sc,
+      lift,
       irisOp,
       u,
       l,
@@ -291,7 +350,7 @@ function drawFace(face: FaceConfig, fr: Frame, compact: boolean, reduced: boolea
         return (
           <g opacity={op}>
             <circle r={f(r * 0.84)} fill="none" stroke={pupilC} strokeWidth={f(r * 0.36)} />
-            <circle r={f(r * 0.18)} fill={pupilC} />
+            {det > 0.5 ? <circle r={f(r * 0.18)} fill={pupilC} /> : null}
           </g>
         );
     }
@@ -310,30 +369,25 @@ function drawFace(face: FaceConfig, fr: Frame, compact: boolean, reduced: boolea
     );
   };
 
+  /** Flat eyes: a light core that drifts up to 2 px with the gaze. */
+  const core = () => {
+    if (!flat) return null;
+    const cx = gx * Math.min(2 * px, hx * 0.3);
+    const cy = gy * Math.min(2 * px, hy * 0.3);
+    return <ellipse cx={f(cx)} cy={f(cy)} rx={f(hx * 0.5)} ry={f(hy * 0.46)} fill={url("core")} opacity={0.7 + 0.3 * face.eyes.shine} />;
+  };
+
   const shine = () => {
     const amt = face.eyes.shine;
-    if (amt < 0.02) return null;
-    if (flat) {
-      return (
-        <ellipse
-          cx={f(-hx * 0.3)}
-          cy={f(-hy * 0.45)}
-          rx={f(hx * 0.34)}
-          ry={f(hy * 0.16)}
-          fill="#FFFFFF"
-          opacity={amt * 0.75 * (1 - dim * 0.7)}
-          transform={`rotate(-18 ${f(-hx * 0.3)} ${f(-hy * 0.45)})`}
-        />
-      );
-    }
+    if (amt < 0.02 || flat) return null;
     const sr = irisR > 0 ? irisR : Math.max(pupilR, Math.min(hx, hy) * 0.5);
     const cx = ix - sr * 0.36 - gx * sr * 0.1;
     const cy = iy - sr * 0.4 - gy * sr * 0.08;
-    const minR = compact ? 1.3 : 0.6;
+    const minR = det < 0.5 ? 0.6 * px : 0.6;
     return (
       <g opacity={1 - dim * 0.7}>
         <ellipse cx={f(cx)} cy={f(cy)} rx={f(Math.max(minR, sr * 0.3))} ry={f(Math.max(minR * 0.8, sr * 0.23))} fill="#FFFFFF" opacity={amt * 0.95} transform={`rotate(-30 ${f(cx)} ${f(cy)})`} />
-        {compact ? null : <circle cx={f(ix + sr * 0.32)} cy={f(iy + sr * 0.3)} r={f(sr * 0.11)} fill="#FFFFFF" opacity={amt * 0.6} />}
+        {det > 0.5 ? <circle cx={f(ix + sr * 0.32)} cy={f(iy + sr * 0.3)} r={f(sr * 0.11)} fill="#FFFFFF" opacity={amt * 0.6 * det} /> : null}
       </g>
     );
   };
@@ -341,31 +395,34 @@ function drawFace(face: FaceConfig, fr: Frame, compact: boolean, reduced: boolea
   const lashes = (e: (typeof eyeData)[number]) => {
     if (face.eyes.lashes === "none") return null;
     const full = face.eyes.lashes === "full";
-    const spec: [number, number, number][] = full
-      ? [
-          [0.4, 18, 0.24],
-          [0.66, 40, 0.3],
-          [0.9, 62, 0.34],
-        ]
-      : [
-          [0.58, 32, 0.22],
-          [0.88, 56, 0.27],
-        ];
+    // Closed island below 40 px: one short outer flick, 1 px wide.
+    const spec: [number, number, number][] = tiny
+      ? [[0.9, 55, (2.6 * px) / R]]
+      : full
+        ? [
+            [0.4, 18, 0.24],
+            [0.66, 40, 0.3],
+            [0.9, 62, 0.34],
+          ]
+        : [
+            [0.58, 32, 0.22],
+            [0.88, 56, 0.27],
+          ];
     const down = P.closedCurve < 0 ? e.lineOp : 0;
-    const w = R * (full ? 0.085 : 0.07) * thick;
+    const w = tiny ? 1 * px : R * (full ? 0.085 : 0.07) * thick;
     const parts = spec.map(([fx, deg, len], i) => {
       const x = fx * hx * 0.94;
       const top = geom.top(x);
       const open = Number.isNaN(top) ? e.edgeY(x) : Math.max(e.edgeY(x), top);
       const y = lerp(open, e.lineY(Math.min(x, e.hw)), e.lineOp);
       const a = (deg * Math.PI) / 180;
-      const L = R * len * (compact ? 1.15 : 1) * (1 - 0.45 * smooth((e.u - 0.25) / 0.35) * (1 - e.lineOp));
+      const L = R * len * (1 - 0.45 * smooth((e.u - 0.25) / 0.35) * (1 - e.lineOp));
       const dx = Math.sin(a) * L;
       const dy = -Math.cos(a) * L * (1 - 2 * down);
       return <path key={i} d={`M${f(x)},${f(y)}Q${f(x + dx * 0.35)},${f(y + dy * 0.75)} ${f(x + dx)},${f(y + dy)}`} />;
     });
     let wing = null;
-    if (full) {
+    if (full && !tiny) {
       const [cx, cy] = geom.corner;
       const x0 = cx - R * 0.3;
       const top = geom.top(x0);
@@ -394,52 +451,70 @@ function drawFace(face: FaceConfig, fr: Frame, compact: boolean, reduced: boolea
     const clipId = id(s < 0 ? "cl" : "cr");
     const maskId = id(s < 0 ? "ml" : "mr");
     const lineW = Math.max(1.8, R * 0.17) * thick;
+    const glowR = lerp(1.3, 1.6, det);
     return (
-      <g key={s} transform={`translate(${f(ex)} ${f(shiftY)}) scale(${f(sx)} ${f(sy)})`}>
-        <clipPath id={clipId}>
-          <path d={geom.path} transform={local(s)} />
-        </clipPath>
-        <mask id={maskId}>
-          <g transform={local(s)}>
-            <path d={geom.path} fill="#FFFFFF" />
-            <path d={e.lower} fill="#000000" />
-            <path d={e.upper} fill="#000000" />
-          </g>
-        </mask>
-        {glow > 0.01 ? <ellipse rx={f(hx * 1.9)} ry={f(hy * 1.9)} fill={url("glow")} opacity={glow * (0.4 + 0.6 * e.contentOp)} /> : null}
-        {lidVisible ? (
-          <g clipPath={`url(#${clipId})`} opacity={e.contentOp}>
+      <g key={s} opacity={1 - off}>
+        <g transform={`translate(${f(ex)} ${f(shiftY + e.lift)}) scale(${f(sx)} ${f(sy)})`}>
+          <clipPath id={clipId}>
+            <path d={geom.path} transform={local(s)} />
+          </clipPath>
+          <mask id={maskId}>
             <g transform={local(s)}>
-              <path d={e.upper} fill={lidC} />
-              <path d={e.edge} fill="none" stroke={darken(lidC, 0.4)} strokeWidth={f(R * 0.07)} />
+              <path d={geom.path} fill="#FFFFFF" />
+              <path d={e.lower} fill="#000000" />
+              <path d={e.upper} fill="#000000" />
             </g>
+          </mask>
+          {glow > 0.01 ? <ellipse rx={f(hx * glowR)} ry={f(hy * glowR)} fill={url("glow")} opacity={glow * smooth(e.aperture / 0.6)} /> : null}
+          {lidVisible ? (
+            <g clipPath={`url(#${clipId})`} opacity={e.contentOp}>
+              <g transform={local(s)}>
+                <path d={e.upper} fill={lidC} />
+                <path d={e.edge} fill="none" stroke={darken(lidC, 0.4)} strokeWidth={f(R * 0.07)} />
+              </g>
+            </g>
+          ) : null}
+          <g mask={`url(#${maskId})`} opacity={e.contentOp}>
+            <g transform={local(s)}>
+              <path d={geom.path} fill={flat ? url("flat") : sclera} />
+              {!flat && luminance(sclera) > 0.3 ? <path d={e.upper} fill="#000000" opacity={0.09} transform={`translate(0 ${f(hy * 0.13)})`} /> : null}
+            </g>
+            {core()}
+            {irisR > 0 || pupilR > 0 ? (
+              <g opacity={e.irisOp} transform={`translate(${f(ix)} ${f(iy)}) scale(${f(1 - 0.16 * Math.abs(gx))} ${f(1 - 0.1 * Math.abs(gy))})`}>
+                {irisR > 0 ? (
+                  <>
+                    <circle r={f(irisR)} fill={det < 0.5 ? irisC : url("iris")} />
+                    {det > 0.5 ? <circle r={f(irisR * 0.95)} fill="none" stroke={darken(irisC, 0.4)} strokeWidth={f(irisR * 0.08)} opacity={0.4} /> : null}
+                  </>
+                ) : null}
+                {pupil()}
+              </g>
+            ) : null}
+            {heartOverlay()}
+            <g opacity={e.irisOp}>{shine()}</g>
           </g>
-        ) : null}
-        <g mask={`url(#${maskId})`} opacity={e.contentOp}>
           <g transform={local(s)}>
-            <path d={geom.path} fill={flat ? url("flat") : sclera} />
-            {!flat && luminance(sclera) > 0.3 ? <path d={e.upper} fill="#000000" opacity={0.09} transform={`translate(0 ${f(hy * 0.13)})`} /> : null}
+            {e.lineOp > 0.01 ? (
+              <path d={e.line} fill="none" stroke={flat ? sclera : lighten(sclera, 0.1)} strokeWidth={f(lineW)} strokeLinecap="round" opacity={e.lineOp} />
+            ) : null}
+            {lashes(e)}
           </g>
-          {irisR > 0 || pupilR > 0 ? (
-            <g opacity={e.irisOp} transform={`translate(${f(ix)} ${f(iy)}) scale(${f(1 - 0.16 * Math.abs(gx))} ${f(1 - 0.1 * Math.abs(gy))})`}>
-              {irisR > 0 ? (
-                <>
-                  <circle r={f(irisR)} fill={url("iris")} />
-                  {compact ? null : <circle r={f(irisR * 0.95)} fill="none" stroke={darken(irisC, 0.45)} strokeWidth={f(irisR * 0.1)} opacity={0.5} />}
-                </>
-              ) : null}
-              {pupil()}
-            </g>
-          ) : null}
-          {heartOverlay()}
-          <g opacity={e.irisOp}>{shine()}</g>
         </g>
-        <g transform={local(s)}>
-          {e.lineOp > 0.01 ? (
-            <path d={e.line} fill="none" stroke={flat ? sclera : lighten(sclera, 0.1)} strokeWidth={f(lineW)} strokeLinecap="round" opacity={e.lineOp} />
-          ) : null}
-          {lashes(e)}
-        </g>
+      </g>
+    );
+  };
+
+  /** Offline: two still grey capsules, 8 x 2 px, no glow. */
+  const capsules = () => {
+    if (off < 0.01) return null;
+    const w = 8 * px * lerp(1, 1.5, det);
+    const h = 2 * px * lerp(1, 1.5, det);
+    return (
+      <g opacity={off} fill={OFFLINE_GREY}>
+        {[-1, 1].map((s) => (
+          <rect key={s} x={f(s * d - w / 2)} y={f(hy * 0.1 - h / 2)} width={f(w)} height={f(h)} rx={f(h / 2)} />
+        ))}
       </g>
     );
   };
@@ -448,7 +523,11 @@ function drawFace(face: FaceConfig, fr: Frame, compact: boolean, reduced: boolea
 
   const brows = () => {
     const style = face.brows.style;
-    if (compact || style === "none") return null;
+    if (style === "none") return null;
+    // Closed island: a short simple brow, only in states it helps tell apart.
+    const stateBrow = BROW_STATES.has(fr.state) ? 1 : 0;
+    const op = Math.max(det, stateBrow * (1 - off));
+    if (op < 0.01) return null;
     const spec = {
       thin: { w: 0.12, arch: 0.35, angle: 0, lift: 0, half: 0.7 },
       thick: { w: 0.26, arch: 0.18, angle: 0, lift: 0, half: 0.66 },
@@ -456,23 +535,27 @@ function drawFace(face: FaceConfig, fr: Frame, compact: boolean, reduced: boolea
       flat: { w: 0.19, arch: 0.02, angle: 0, lift: 0, half: 0.68 },
       worried: { w: 0.15, arch: 0.22, angle: 13, lift: 0.05, half: 0.68 },
     }[style];
+    const width = lerp(1.4 * px, R * spec.w, det);
+    const half = lerp(3.2 * px, R * spec.half, det);
     return (
-      <g fill="none" stroke={ink} strokeLinecap="round" strokeWidth={f(R * spec.w)}>
+      <g fill="none" stroke={ink} strokeLinecap="round" strokeWidth={f(width)} opacity={op}>
         {eyeData.map((e) => {
           const s = e.s;
           const left = s < 0;
           const lift = (left ? P.bLl : P.bRl) + spec.lift;
           const angle = (left ? P.bLa : P.bRa) + spec.angle - face.eyes.tilt * 8;
           const lidDown = (left ? P.uL : P.uR) - face.eyes.lids.rest * LID_REST;
-          const cy = shiftY * 0.4 - hy * e.sc - R * 0.42 - 3 - lift * R * 0.42 + Math.max(0, lidDown) * R * 0.32 + e.blink * R * 0.05;
+          // Closed island: the brow sits close above the eye so it stays inside the shape.
+          const gap = lerp(2.4 * px, R * 0.42 + 3, det);
+          const liftK = lerp(1.6 * px, R * 0.42, det);
+          const cy = shiftY * 0.4 + e.lift - hy * e.sc - gap - lift * liftK + Math.max(0, lidDown) * R * 0.32 * det + e.blink * R * 0.05;
           const cx = s * (d + R * 0.06) + shiftX * 0.4;
-          const half = R * spec.half;
           const dy = Math.tan((clamp(angle, -35, 35) * Math.PI) / 180) * half;
           const innerX = cx - s * half;
           const outerX = cx + s * half;
           const innerY = cy - dy;
           const outerY = cy + dy * 0.5;
-          const midY = (innerY + outerY) / 2 - spec.arch * R * 0.3;
+          const midY = (innerY + outerY) / 2 - spec.arch * R * 0.3 * (half / (R * spec.half));
           const ctrlY = 2 * midY - (innerY + outerY) / 2;
           return <path key={s} d={`M${f(innerX)},${f(innerY)}Q${f(cx)},${f(ctrlY)} ${f(outerX)},${f(outerY)}`} />;
         })}
@@ -484,42 +567,37 @@ function drawFace(face: FaceConfig, fr: Frame, compact: boolean, reduced: boolea
 
   const mouth = () => {
     const style = face.mouth.style;
-    if (compact || style === "none") return null;
+    if (det < 0.01 || style === "none") return null;
     const sm = clamp(P.smile, -1, 1);
     const op = clamp(P.open, 0, 1.2);
     const x0 = P.mouthX * R * 0.3;
     const y0 = mouthY;
     const lw = Math.max(1.5, R * 0.12);
     const inside = darken(mouthC, 0.72);
-    const tongueC = tone(TONGUE);
-    const tongue =
-      P.tongue > 0.02 ? (
-        <ellipse cx={f(x0 + R * 0.24)} cy={f(y0 + R * 0.1 + R * 0.1 * P.tongue)} rx={f(R * 0.13)} ry={f(R * 0.17 * P.tongue)} fill={tongueC} />
-      ) : null;
 
     if (style === "dot") {
       const r = R * 0.11 * (1 + op * 1.7);
-      if (op < 0.1) return <circle cx={f(x0)} cy={f(y0)} r={f(r)} fill={mouthC} />;
-      return <ellipse cx={f(x0)} cy={f(y0 + r * 0.2)} rx={f(r * 0.85)} ry={f(r * 1.1)} fill={inside} stroke={mouthC} strokeWidth={f(lw * 0.9)} />;
+      if (op < 0.1) return <circle cx={f(x0)} cy={f(y0)} r={f(r)} fill={mouthC} opacity={det} />;
+      return <ellipse cx={f(x0)} cy={f(y0 + r * 0.2)} rx={f(r * 0.85)} ry={f(r * 1.1)} fill={inside} stroke={mouthC} strokeWidth={f(lw * 0.9)} opacity={det} />;
     }
 
-    if (style === "cat") {
+    // A cat mouth stays a cat mouth while content; unhappy, it flattens.
+    if (style === "cat" && sm >= -0.05) {
       const w = R * 0.42;
       const depth = R * (0.17 + Math.max(0, sm) * 0.08);
       const y = y0 - R * 0.06;
       const lip = `M${f(x0 - w)},${f(y - depth * 0.35)}Q${f(x0 - w / 2)},${f(y + depth * 1.2)} ${f(x0)},${f(y)}Q${f(x0 + w / 2)},${f(y + depth * 1.2)} ${f(x0 + w)},${f(y - depth * 0.35)}`;
       return (
-        <g>
+        <g opacity={det}>
           {op > 0.05 ? (
             <ellipse cx={f(x0)} cy={f(y + depth * 0.5 + op * R * 0.22)} rx={f(w * 0.42)} ry={f(op * R * 0.34 + R * 0.04)} fill={inside} stroke={mouthC} strokeWidth={f(lw * 0.8)} />
           ) : null}
-          {tongue}
           <path d={lip} fill="none" stroke={mouthC} strokeWidth={f(lw)} strokeLinecap="round" strokeLinejoin="round" />
         </g>
       );
     }
 
-    const w = R * (style === "line" ? 0.4 : 0.5);
+    const w = R * (style === "line" || style === "cat" ? 0.4 : 0.5);
     const yc = y0 - sm * R * 0.15;
     const mid = y0 + sm * R * 0.15;
     const tiltY = P.mouthX * R * 0.12;
@@ -529,23 +607,18 @@ function drawFace(face: FaceConfig, fr: Frame, compact: boolean, reduced: boolea
     const ry = yc - tiltY;
     const cU = 2 * mid - (ly + ry) / 2;
     if (op < 0.04) {
-      return (
-        <g>
-          {tongue}
-          <path d={`M${f(lx)},${f(ly)}Q${f(x0)},${f(cU)} ${f(rx)},${f(ry)}`} fill="none" stroke={mouthC} strokeWidth={f(lw)} strokeLinecap="round" />
-        </g>
-      );
+      return <path d={`M${f(lx)},${f(ly)}Q${f(x0)},${f(cU)} ${f(rx)},${f(ry)}`} fill="none" stroke={mouthC} strokeWidth={f(lw)} strokeLinecap="round" opacity={det} />;
     }
     const lowMid = mid + op * R * 0.8;
     const cL = 2 * lowMid - (ly + ry) / 2;
     const shape = `M${f(lx)},${f(ly)}Q${f(x0)},${f(cU)} ${f(rx)},${f(ry)}Q${f(x0)},${f(cL)} ${f(lx)},${f(ly)}Z`;
     return (
-      <g>
+      <g opacity={det}>
         <clipPath id={id("m")}>
           <path d={shape} />
         </clipPath>
         <path d={shape} fill={inside} />
-        <ellipse cx={f(x0)} cy={f(lowMid)} rx={f(w * 0.62)} ry={f(op * R * 0.36)} fill={tongueC} clipPath={url("m")} />
+        <ellipse cx={f(x0)} cy={f(lowMid)} rx={f(w * 0.62)} ry={f(op * R * 0.36)} fill={tone(mix(mouthC, "#FF6F91", 0.5))} clipPath={url("m")} />
         <path d={shape} fill="none" stroke={mouthC} strokeWidth={f(lw * 0.9)} strokeLinejoin="round" />
       </g>
     );
@@ -553,9 +626,9 @@ function drawFace(face: FaceConfig, fr: Frame, compact: boolean, reduced: boolea
 
   const cheeks = () => {
     if (blush < 0.01) return null;
-    const cy = hy * 0.72 + R * (compact ? 0.16 : 0.3);
+    const cy = hy * 0.72 + R * lerp(0.16, 0.3, det);
     return (
-      <g opacity={Math.min(1, blush * 1.25)}>
+      <g opacity={Math.min(1, blush * 1.25) * (1 - off)}>
         {[-1, 1].map((s) => (
           <ellipse key={s} cx={f(s * (d + hx * 0.62))} cy={f(cy)} rx={f(R * 0.5)} ry={f(R * 0.3)} fill={url("cheek")} />
         ))}
@@ -569,8 +642,17 @@ function drawFace(face: FaceConfig, fr: Frame, compact: boolean, reduced: boolea
   const acc = face.accessory;
   const accLw = Math.max(1.4, R * 0.13) * thick;
 
-  // Glasses ride the nose: pushed up, slid down or askew by the pose.
-  const glassesAt = (H: number) => `translate(${f(shiftX * 0.22)} ${f(shiftY * 0.22 - P.gl * H)}) rotate(${f(P.glr)} 0 ${f(-H * 0.3)})`;
+  /** Glasses ride the nose: pushed up, slid down or askew by the pose, but
+   * on a closed island never more than 3 px, and never closer than 2 px to
+   * the edge of the black shape. */
+  const glassesAt = (H: number, top: number, bottom: number) => {
+    const want = P.gl * H;
+    const maxUp = det < 0.5 ? 3 * px : H * 0.9;
+    const roomUp = top - (view.y + 2 * px) + P.hy * headK;
+    const roomDown = view.y + view.h - 2 * px - bottom - P.hy * headK;
+    const lift = clamp(want, -Math.max(0, roomDown), Math.max(0, Math.min(maxUp, roomUp)));
+    return `translate(${f(shiftX * 0.22)} ${f(shiftY * 0.22 - lift)}) rotate(${f(P.glr)} 0 ${f(-H * 0.3)})`;
+  };
 
   const glasses = (): ReactElement | null => {
     if (acc === "glasses" || acc === "round_glasses") {
@@ -579,26 +661,23 @@ function drawFace(face: FaceConfig, fr: Frame, compact: boolean, reduced: boolea
       const fh = hy + R * 0.3;
       const rr = Math.max(hx, hy) + R * 0.32;
       const inner = d - (round ? rr : fw);
+      const half = round ? rr : fh;
       return (
-        <g fill="none" stroke={accC} strokeWidth={f(accLw)} strokeLinecap="round" transform={glassesAt((hy + R * 0.3) * 0.6)}>
+        <g fill="none" stroke={accC} strokeWidth={f(accLw)} strokeLinecap="round" transform={glassesAt(fh * 0.6, -half, half)}>
           {[-1, 1].map((s) =>
             round ? (
-              <circle key={s} cx={f(s * d)} cy={0} r={f(rr)} fill="#FFFFFF" fillOpacity={0.05} />
+              <circle key={s} cx={f(s * d)} cy={0} r={f(rr)} fill="#FFFFFF" fillOpacity={0.04} />
             ) : (
-              <rect key={s} x={f(s * d - fw)} y={f(-fh)} width={f(2 * fw)} height={f(2 * fh)} rx={f(R * 0.5)} fill="#FFFFFF" fillOpacity={0.05} />
+              <rect key={s} x={f(s * d - fw)} y={f(-fh)} width={f(2 * fw)} height={f(2 * fh)} rx={f(R * 0.5)} fill="#FFFFFF" fillOpacity={0.04} />
             ),
           )}
           <path d={`M${f(-inner)},${f(-hy * 0.25)}Q0,${f(-hy * 0.5)} ${f(inner)},${f(-hy * 0.25)}`} strokeWidth={f(accLw * 0.85)} />
-          {[-1, 1].map((s) => {
-            const gx0 = s * d - (round ? rr : fw) * 0.45;
-            return <path key={`g${s}`} d={`M${f(gx0)},${f(-hy * 0.15)}L${f(gx0 + R * 0.32)},${f(-hy * 0.62)}`} stroke="#FFFFFF" strokeOpacity={0.35} strokeWidth={f(R * 0.08)} />;
-          })}
-          {compact
-            ? null
-            : [-1, 1].map((s) => {
+          {det > 0.01
+            ? [-1, 1].map((s) => {
                 const x = s * (d + (round ? rr : fw));
-                return <path key={`t${s}`} d={`M${f(x)},${f(-hy * 0.35)}L${f(x + s * R * 0.55)},${f(-hy * 0.55)}`} />;
-              })}
+                return <path key={`t${s}`} d={`M${f(x)},${f(-hy * 0.35)}L${f(x + s * R * 0.55)},${f(-hy * 0.55)}`} opacity={det} />;
+              })
+            : null}
         </g>
       );
     }
@@ -608,33 +687,36 @@ function drawFace(face: FaceConfig, fr: Frame, compact: boolean, reduced: boolea
       const lens = `M${f(-0.95 * W)},${f(-0.72 * H)}C${f(-0.95 * W)},${f(-1.02 * H)} ${f(1.05 * W)},${f(-1.08 * H)} ${f(1.06 * W)},${f(-0.62 * H)}C${f(1.08 * W)},${f(0.45 * H)} ${f(0.6 * W)},${f(1.0 * H)} 0,${f(1.0 * H)}C${f(-0.62 * W)},${f(1.0 * H)} ${f(-1.0 * W)},${f(0.4 * H)} ${f(-0.95 * W)},${f(-0.72 * H)}Z`;
       const rim = lighten(accC, 0.3);
       const inner = d - 0.95 * W;
+      // Closed island: thin lenses so the eyes (and the state) show through.
+      const lensOp = lerp(0.4, 0.74, det);
       return (
-        <g transform={glassesAt(H * 1.6)}>
+        <g transform={glassesAt(H * 1.6, -1.0 * H, 1.0 * H)}>
           {[-1, 1].map((s) => (
             <g key={s} transform={`translate(${f(s * d)} 0) scale(${s} 1)`}>
-              <path d={lens} fill={url("lens")} opacity={0.82} />
+              <path d={lens} fill={url("lens")} opacity={lensOp} />
               <path d={lens} fill="none" stroke={rim} strokeWidth={f(R * 0.08 * thick)} strokeOpacity={0.9} />
-              <path
-                d={`M${f(-0.62 * W)},${f(-0.35 * H)}L${f(-0.28 * W)},${f(-0.86 * H)}L${f(-0.08 * W)},${f(-0.86 * H)}L${f(-0.44 * W)},${f(-0.3 * H)}Z`}
-                fill="#FFFFFF"
-                opacity={0.32}
-              />
+              {det > 0.01 ? (
+                <path
+                  d={`M${f(-0.62 * W)},${f(-0.35 * H)}L${f(-0.28 * W)},${f(-0.86 * H)}L${f(-0.08 * W)},${f(-0.86 * H)}L${f(-0.44 * W)},${f(-0.3 * H)}Z`}
+                  fill="#FFFFFF"
+                  opacity={0.2 * det}
+                />
+              ) : null}
             </g>
           ))}
           <path d={`M${f(-inner)},${f(-0.72 * H)}Q0,${f(-0.98 * H)} ${f(inner)},${f(-0.72 * H)}`} fill="none" stroke={rim} strokeWidth={f(R * 0.12 * thick)} strokeLinecap="round" />
-          {compact
-            ? null
-            : [-1, 1].map((s) => (
-                <path key={`t${s}`} d={`M${f(s * (d + 1.05 * W))},${f(-0.6 * H)}L${f(s * (d + 1.05 * W + R * 0.5))},${f(-0.72 * H)}`} stroke={rim} strokeWidth={f(R * 0.1)} strokeLinecap="round" />
-              ))}
+          {det > 0.01
+            ? [-1, 1].map((s) => (
+                <path key={`t${s}`} d={`M${f(s * (d + 1.05 * W))},${f(-0.6 * H)}L${f(s * (d + 1.05 * W + R * 0.5))},${f(-0.72 * H)}`} stroke={rim} strokeWidth={f(R * 0.1)} strokeLinecap="round" opacity={det} />
+              ))
+            : null}
         </g>
       );
     }
     return null;
   };
 
-  const top = (): ReactElement | null => {
-    if (compact) return null;
+  const topInner = (): ReactElement | null => {
     switch (acc) {
       case "cat_ears": {
         const inner = mix(cheekC, "#FFFFFF", 0.25);
@@ -736,8 +818,15 @@ function drawFace(face: FaceConfig, fr: Frame, compact: boolean, reduced: boolea
     }
   };
 
+  const top = (): ReactElement | null => {
+    if (det < 0.01) return null;
+    const inner = topInner();
+    return inner ? <g opacity={det}>{inner}</g> : null;
+  };
+
+
   const headphones = (part: "band" | "cups"): ReactElement | null => {
-    if (compact || acc !== "headphones") return null;
+    if (det < 0.01 || acc !== "headphones") return null;
     const cx = d + hx + R * 0.42;
     if (part === "band") {
       const topY = eyeTop - R * 2.45;
@@ -748,15 +837,14 @@ function drawFace(face: FaceConfig, fr: Frame, compact: boolean, reduced: boolea
           stroke={accC}
           strokeWidth={f(R * 0.2)}
           strokeLinecap="round"
+          opacity={det}
         />
       );
     }
-    const lvl = fr.state === "listening" ? fr.level : 0;
     return (
-      <g>
+      <g opacity={det}>
         {[-1, 1].map((s) => (
-          <g key={s} transform={`translate(${f(s * cx)} ${f(R * 0.12)}) scale(${f(1 + lvl * 0.06)})`}>
-            {lvl > 0.02 ? <rect x={f(-R * 0.6)} y={f(-R * 1.0)} width={f(R * 1.2)} height={f(R * 2.0)} rx={f(R * 0.55)} fill={url("acc-glow")} opacity={lvl} /> : null}
+          <g key={s} transform={`translate(${f(s * cx)} ${f(R * 0.12)})`}>
             <rect x={f(-R * 0.36)} y={f(-R * 0.76)} width={f(R * 0.72)} height={f(R * 1.52)} rx={f(R * 0.34)} fill={accC} />
             <rect x={f(s > 0 ? -R * 0.36 : R * 0.12)} y={f(-R * 0.6)} width={f(R * 0.24)} height={f(R * 1.2)} rx={f(R * 0.12)} fill={darken(accC, 0.45)} />
           </g>
@@ -765,28 +853,67 @@ function drawFace(face: FaceConfig, fr: Frame, compact: boolean, reduced: boolea
     );
   };
 
-  // ---------- effects ----------
+  // ---------- state symbols, beside the right eye ----------
 
-  const listeningArcs = () => {
-    if (fr.state !== "listening" || (acc === "headphones" && !compact)) return null;
-    return (
-      <g fill="none" stroke={accent} strokeLinecap="round" strokeWidth={f(R * 0.11 * thick)}>
-        {[-1, 1].flatMap((s) =>
-          [0, 1].map((k) => {
-            const r = hx + R * (0.5 + 0.42 * k);
-            const a = (38 * Math.PI) / 180;
-            const lvl = k === 0 ? fr.level : fr.levelSlow;
-            const op = 0.16 + 0.84 * clamp(lvl * 1.3, 0, 1);
-            const cx = s * d + shiftX;
-            const x = cx + s * r * Math.cos(a);
-            const y1 = -r * Math.sin(a);
-            const y2 = r * Math.sin(a);
-            return <path key={`${s}${k}`} d={`M${f(x)},${f(y1)}A${f(r)},${f(r)} 0 0 ${s > 0 ? 1 : 0} ${f(x)},${f(y2)}`} opacity={op} />;
-          }),
-        )}
+  const symbolX = Math.min(d + hx + 7.5 * px, view.x + view.w - 6 * px);
+  const symbolK = lerp(1, 1.35, det);
+  const symbolIn = reduced ? 1 : smooth(fr.st / 0.15);
+
+  const symbol = (): ReactElement | null => {
+    const at = (inner: ReactElement, dx = 0, dy = 0) => (
+      <g transform={`translate(${f(symbolX + dx)} ${f(dy)}) scale(${f(px * symbolK)})`} opacity={symbolIn}>
+        {inner}
       </g>
     );
+    switch (fr.state) {
+      case "driving":
+        // A pointer, 7 x 10 px: dark body, pale outline, nudged by the gaze.
+        return at(
+          <path
+            d="M-3.2,-4.9L-3.2,3.7L-1,1.7L0.6,4.9L2,4.3L0.5,1.2L3.4,1.2Z"
+            fill="#000000"
+            stroke={CURSOR_LINE}
+            strokeWidth={1.25}
+            strokeLinejoin="round"
+          />,
+          gx * 1.5 * px,
+          gy * 1.5 * px,
+        );
+      case "approval":
+        // "?" 6 x 8 px, amber.
+        return at(
+          <g fill="none" stroke={ASK_AMBER} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round">
+            <path d="M-2.4,-1.9C-2.4,-3.5 -1.3,-4.2 0,-4.2C1.4,-4.2 2.5,-3.3 2.5,-2.1C2.5,-0.8 1.4,-0.4 0.5,0.3C0.1,0.6 0,1 0,1.5" />
+            <circle cy={3.5} r={0.95} fill={ASK_AMBER} stroke="none" />
+          </g>,
+        );
+      case "error":
+        // "!" 6 x 8 px, coral.
+        return at(
+          <g fill={ERROR_CORAL}>
+            <path d="M0,-4.2L0,1.2" stroke={ERROR_CORAL} strokeWidth={2} strokeLinecap="round" />
+            <circle cy={3.6} r={1.1} />
+          </g>,
+        );
+      case "listening": {
+        // Three bars, 1.5 px wide with 1.5 px gaps, 3 to 10 px tall; never
+        // below 45 % opacity while the microphone is open.
+        const lv = [fr.level * 0.85, Math.max(fr.level, fr.levelSlow * 1.1), fr.levelSlow * 0.9];
+        return at(
+          <g fill={accent} opacity={0.45 + 0.55 * clamp(fr.level * 1.6, 0, 1)}>
+            {lv.map((v, i) => {
+              const h = 3 + 7 * clamp(v, 0, 1);
+              return <rect key={i} x={-3.75 + i * 3} y={-h / 2} width={1.5} height={h} rx={0.75} />;
+            })}
+          </g>,
+        );
+      }
+      default:
+        return null;
+    }
   };
+
+  // ---------- effects ----------
 
   const zees = () => {
     if (fr.state !== "sleeping") return null;
@@ -799,8 +926,8 @@ function drawFace(face: FaceConfig, fr: Frame, compact: boolean, reduced: boolea
       if (age < 0 || age > life) continue;
       const u = age / life;
       const x = d + hx * 0.55 + u * R * 1.1 + Math.sin(u * 6) * R * 0.12;
-      const y = -hy * 0.3 - u * R * (compact ? 0.9 : 2.0);
-      const s = R * (0.16 + u * 0.18) * (compact ? 1.2 : 1);
+      const y = -hy * 0.3 - u * R * lerp(0.9, 2.0, det);
+      const s = R * (0.16 + u * 0.18) * lerp(1.2, 1, det);
       const op = Math.min(1, u / 0.15) * (1 - smooth((u - 0.55) / 0.45));
       items.push(
         <path
@@ -818,62 +945,39 @@ function drawFace(face: FaceConfig, fr: Frame, compact: boolean, reduced: boolea
     return <g>{items}</g>;
   };
 
+  /** Done: one small sparkle by the right eye. */
   const sparkles = () => {
-    if (fr.state !== "done" || fr.st > 1.5) return null;
-    const spots: [number, number, number][] = [
-      [-d - hx * 0.85, -hy * 0.75, 0],
-      [d + hx * 0.95, -hy * 0.3, 0.12],
-      [compact ? 0 : d * 0.15, compact ? -hy * 0.95 : eyeTop - R * 0.75, 0.24],
-    ];
-    const c = lighten(accent, 0.25);
-    return (
-      <g fill={c}>
-        {spots.map(([x, y, delay], i) => {
-          const age = fr.st - delay;
-          const life = 0.8;
-          if (age <= 0 || age >= life) return null;
-          const k = Math.sin((Math.PI * age) / life);
-          const r = R * 0.34 * k * (compact ? 1.1 : 1);
-          return <path key={i} d={sparkle(x, y, r)} transform={`rotate(${f(age * 80)} ${f(x)} ${f(y)})`} />;
-        })}
-      </g>
-    );
-  };
-
-  const sweat = () => {
-    if (compact || fr.state !== "error") return null;
-    const st = fr.st;
-    const op = smooth(st / 0.25) * (1 - smooth((st - 2.4) / 0.5));
-    if (op < 0.01) return null;
-    const r = R * 0.17;
-    const x = d + hx * 0.78;
-    const y = eyeTop - R * 0.05 + smooth(st / 1.4) * R * 0.35;
-    const c = tone(SWEAT);
-    return (
-      <g transform={`translate(${f(x)} ${f(y)})`} opacity={op}>
-        <path d={`M0,${f(-r * 1.7)}C${f(r * 0.35)},${f(-r * 0.8)} ${f(r)},${f(-r * 0.25)} ${f(r)},${f(r * 0.35)}A${f(r)},${f(r)} 0 0 1 ${f(-r)},${f(r * 0.35)}C${f(-r)},${f(-r * 0.25)} ${f(-r * 0.35)},${f(-r * 0.8)} 0,${f(-r * 1.7)}Z`} fill={c} />
-        <ellipse cx={f(-r * 0.35)} cy={f(r * 0.2)} rx={f(r * 0.2)} ry={f(r * 0.3)} fill="#FFFFFF" opacity={0.6} />
-      </g>
-    );
+    if (fr.state !== "done") return null;
+    const age = vst - 0.1;
+    const life = 0.8;
+    if (age <= 0 || age >= life) return null;
+    const k = Math.sin((Math.PI * age) / life);
+    const x = d + hx * 0.85;
+    const y = -hy * 0.85;
+    const r = 1.8 * px * k * symbolK;
+    return <path d={sparkle(x, y, r)} fill={lighten(accent, 0.25)} transform={`rotate(${f(reduced ? 0 : age * 80)} ${f(x)} ${f(y)})`} />;
   };
 
   const lensTop = darken(accC, 0.85);
   return (
     <>
       <defs>
-        <radialGradient id={id("iris")} cx="50%" cy="62%" r="60%">
-          <stop offset="0%" stopColor={lighten(irisC, 0.38)} />
-          <stop offset="58%" stopColor={irisC} />
-          <stop offset="100%" stopColor={darken(irisC, 0.38)} />
+        <radialGradient id={id("iris")} cx="50%" cy="62%" r="62%">
+          <stop offset="0%" stopColor={lighten(irisC, 0.18)} />
+          <stop offset="100%" stopColor={darken(irisC, 0.2)} />
         </radialGradient>
-        <radialGradient id={id("flat")} cx="45%" cy="40%" r="65%">
-          <stop offset="0%" stopColor={lighten(sclera, 0.6)} />
-          <stop offset="55%" stopColor={sclera} />
-          <stop offset="100%" stopColor={darken(sclera, 0.22)} />
+        <radialGradient id={id("flat")} cx="50%" cy="45%" r="60%">
+          <stop offset="0%" stopColor={sclera} />
+          <stop offset="100%" stopColor={darken(sclera, 0.14)} />
+        </radialGradient>
+        <radialGradient id={id("core")}>
+          <stop offset="0%" stopColor={lighten(sclera, 0.88)} stopOpacity={1} />
+          <stop offset="55%" stopColor={lighten(sclera, 0.45)} stopOpacity={0.45} />
+          <stop offset="100%" stopColor={sclera} stopOpacity={0} />
         </radialGradient>
         <radialGradient id={id("glow")}>
-          <stop offset="0%" stopColor={glowC} stopOpacity={0.6} />
-          <stop offset="45%" stopColor={glowC} stopOpacity={0.22} />
+          <stop offset="0%" stopColor={glowC} stopOpacity={0.55} />
+          <stop offset="50%" stopColor={glowC} stopOpacity={0.18} />
           <stop offset="100%" stopColor={glowC} stopOpacity={0} />
         </radialGradient>
         <radialGradient id={id("acc-glow")}>
@@ -899,13 +1003,13 @@ function drawFace(face: FaceConfig, fr: Frame, compact: boolean, reduced: boolea
         {top()}
         {cheeks()}
         {eyeData.map(eye)}
+        {capsules()}
         {brows()}
         {mouth()}
         {glasses()}
         {headphones("cups")}
-        {sweat()}
       </g>
-      {listeningArcs()}
+      {symbol()}
       {zees()}
       {sparkles()}
     </>

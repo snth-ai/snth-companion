@@ -1,10 +1,16 @@
-// The face editor: a live preview (closed and open island), the looks as a
-// grid, then grouped controls. Emits a full, valid FaceConfig on every change.
+// The face editor. A preview stays in view while editing: the closed
+// island at its real size (in the left ear of a measured notch) and the
+// open island, with the state to show and Undo / Redo. Then the looks as a
+// grid and grouped controls. Emits a full, valid FaceConfig on every change.
+//
+// Layout: a pinned strip on top in a narrow window (the app's 760 px window),
+// a sticky left column once the editor is 760 px wide or more.
 
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { useI18n } from "../../i18n";
-import { Row, Section } from "../../ui/controls";
+import { Row } from "../../ui/controls";
 import { Face } from "./Face";
+import { NotchFixture } from "./Fixture";
 import { eyeGeom, heart, softStar } from "./geometry";
 import { faceStrings, presetBlurb, presetTitle, type FaceStrings } from "./i18n";
 import { randomFace } from "./random";
@@ -29,7 +35,7 @@ import {
   type IdleEmote,
   type PupilShape,
 } from "./schema";
-import { useFakeVoice, useGazeToward, useWindowPointer, type PointerPos } from "./useGaze";
+import { useFakeVoice, useGazeToward, useWindowPointer } from "./useGaze";
 import "./face.css";
 
 /** A deep partial of FaceConfig, for one control's change. */
@@ -39,11 +45,24 @@ type Patch2<T> = T extends unknown[] ? T : { [K in keyof T]?: T[K] extends objec
 export interface FaceEditorProps {
   /** The current look; null = the synth has none yet (its default is shown). */
   value: FaceConfig | null | undefined;
-  /** Picks the default look when `value` is null, and for Reset. */
+  /** Picks the default look when `value` is null, and for Restore. */
   synthId?: string;
   onChange: (face: FaceConfig) => void;
   /** Defaults to the app's language. */
   lang?: "en" | "ru";
+}
+
+/** The closed island height the preview uses (a 14" MacBook Pro menu bar is 37). */
+const NATIVE = 34;
+const HISTORY = 50;
+/** Changes to the same control within this window are one undo step. */
+const COALESCE_MS = 1200;
+
+interface History {
+  past: FaceConfig[];
+  future: FaceConfig[];
+  key: string | null;
+  at: number;
 }
 
 export function FaceEditor(props: FaceEditorProps) {
@@ -54,205 +73,349 @@ export function FaceEditor(props: FaceEditorProps) {
   const face = useMemo(() => (props.value ? clampFace(props.value, fallback) : fallback), [props.value, fallback]);
   const [state, setState] = useState<FaceState>("idle");
   const [emote, setEmote] = useState<{ kind: IdleEmote; nonce: number } | null>(null);
-  const pointer = useWindowPointer();
-  const level = useFakeVoice(state === "listening");
+
+  const hist = useRef<History>({ past: [], future: [], key: null, at: 0 });
+  const [, rerender] = useReducer((x: number) => x + 1, 0);
 
   const base = findPreset(face.preset);
   const changed = base ? JSON.stringify(base.face) !== JSON.stringify(face) : true;
 
-  const set = (patch: Patch) => props.onChange(clampFace(deepMerge(face, patch), face));
+  /** Every change goes through here so it can be undone. `key` names the
+   * control: a drag on one slider is one step. */
+  const commit = (next: FaceConfig, key?: string) => {
+    const h = hist.current;
+    const now = Date.now();
+    const same = key !== undefined && h.key === key && now - h.at < COALESCE_MS;
+    if (!same) {
+      h.past.push(face);
+      if (h.past.length > HISTORY) h.past.shift();
+    }
+    h.future = [];
+    h.key = key ?? null;
+    h.at = now;
+    props.onChange(next);
+    rerender();
+  };
+  const endDrag = () => {
+    hist.current.key = null;
+  };
+  const undo = () => {
+    const h = hist.current;
+    const prev = h.past.pop();
+    if (!prev) return;
+    h.future.push(face);
+    h.key = null;
+    props.onChange(prev);
+    rerender();
+  };
+  const redo = () => {
+    const h = hist.current;
+    const next = h.future.pop();
+    if (!next) return;
+    h.past.push(face);
+    h.key = null;
+    props.onChange(next);
+    rerender();
+  };
+  const set = (patch: Patch, key: string) => commit(clampFace(deepMerge(face, patch), face), key);
   const play = (kind: IdleEmote) => {
     setState("idle");
     setEmote({ kind, nonce: Date.now() });
   };
 
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "z") return;
+    const target = e.target as HTMLElement;
+    if (target.tagName === "INPUT" && (target as HTMLInputElement).type === "text") return;
+    e.preventDefault();
+    if (e.shiftKey) redo();
+    else undo();
+  };
+
+  const f = t.editor.fields;
+  const pct = (v: number) => t.editor.percent(Math.round(v * 100));
+
   return (
-    <div className="fe">
-      <Section title={t.editor.preview} note={t.editor.previewNote}>
-        <Preview face={face} state={state} level={level} emote={emote} pointer={pointer} t={t} />
-        <div className="fe-states" role="group" aria-label={t.editor.stateLabel}>
-          {FACE_STATES.map((s) => (
-            <button key={s} type="button" className="chip" aria-pressed={s === state} onClick={() => setState(s)}>
-              {t.states[s]}
-            </button>
-          ))}
-        </div>
-      </Section>
+    <div className="fe" onKeyDown={onKeyDown} onPointerUp={endDrag}>
+      <div className="fe-layout">
+        <Preview
+          face={face}
+          state={state}
+          setState={setState}
+          emote={emote}
+          t={t}
+          canUndo={hist.current.past.length > 0}
+          canRedo={hist.current.future.length > 0}
+          undo={undo}
+          redo={redo}
+        />
 
-      <Section title={t.editor.presets} note={base ? presetBlurb(base, lang) : t.editor.presetsNote}>
-        <div className="fe-looks" role="radiogroup" aria-label={t.editor.presets}>
-          {PRESETS.map((p) => {
-            const on = face.preset === p.name;
-            return (
-              <button key={p.name} type="button" role="radio" aria-checked={on} className="fe-look" title={presetBlurb(p, lang)} onClick={() => props.onChange(presetFace(p.name))}>
-                <span className="fe-look-face">
-                  <Face config={p.face} size={50} compact={false} still />
-                </span>
-                <span className="fe-look-name">
-                  {presetTitle(p, lang)}
-                  {on && changed ? <span className="tag">{t.editor.custom}</span> : null}
-                </span>
+        <div className="fe-body">
+          <section className="section">
+            <h2 className="section-title">{t.editor.presets}</h2>
+            <div className="fe-looks" role="radiogroup" aria-label={t.editor.presets}>
+              {PRESETS.map((p) => {
+                const on = face.preset === p.name;
+                return (
+                  <button
+                    key={p.name}
+                    type="button"
+                    role="radio"
+                    aria-checked={on}
+                    className="fe-look"
+                    title={presetBlurb(p, lang)}
+                    onClick={() => commit(presetFace(p.name))}
+                  >
+                    <span className="fe-look-face">
+                      <Face config={p.face} size={56} still />
+                    </span>
+                    <span className="fe-look-name">
+                      {presetTitle(p, lang)}
+                      {on && changed ? <span className="tag">{t.editor.custom}</span> : null}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            <p className="section-note">{base ? presetBlurb(base, lang) : t.editor.presetsNote}</p>
+            <div className="fe-actions">
+              <button
+                type="button"
+                className="btn"
+                title={t.editor.resetHint}
+                disabled={!changed && !!base}
+                onClick={() => commit(base ? presetFace(base.name) : fallback)}
+              >
+                {t.editor.reset}
               </button>
-            );
-          })}
-        </div>
-        <div className="fe-actions">
-          <button
-            type="button"
-            className="btn"
-            title={t.editor.resetHint}
-            disabled={!changed && !!base}
-            onClick={() => props.onChange(base ? presetFace(base.name) : fallback)}
-          >
-            {t.editor.reset}
-          </button>
-          <button type="button" className="btn" onClick={() => props.onChange(randomFace())}>
-            {t.editor.random}
-          </button>
-        </div>
-      </Section>
+              <button type="button" className="btn" onClick={() => commit(randomFace())}>
+                {t.editor.random}
+              </button>
+            </div>
+          </section>
 
-      <Section title={t.editor.groups.eyes}>
-        <div className="group">
-          <Row title={t.editor.fields.shape}>
-            <Glyphs
-              label={t.editor.fields.shape}
-              value={face.eyes.shape}
-              options={EYE_SHAPES.map((s) => ({ value: s, title: t.shapes[s], glyph: <EyeGlyph shape={s} /> }))}
-              onChange={(shape) => set({ eyes: { shape } })}
+          <Group title={t.editor.groups.eyes} open>
+            <Row title={f.shape} desc={t.shapes[face.eyes.shape]}>
+              <Glyphs
+                label={f.shape}
+                value={face.eyes.shape}
+                options={EYE_SHAPES.map((s) => ({ value: s, title: t.shapes[s], glyph: <EyeGlyph shape={s} /> }))}
+                onChange={(shape) => set({ eyes: { shape } }, "eyes.shape")}
+              />
+            </Row>
+            <Slider title={f.size} value={face.eyes.size} format={pct} onChange={(size) => set({ eyes: { size } }, "eyes.size")} />
+            <Slider title={f.spacing} value={face.eyes.spacing} format={pct} onChange={(spacing) => set({ eyes: { spacing } }, "eyes.spacing")} />
+            <Slider
+              title={f.tilt}
+              value={face.eyes.tilt}
+              min={-1}
+              format={(v) => t.editor.degrees(Math.round(v * 16))}
+              onChange={(tilt) => set({ eyes: { tilt } }, "eyes.tilt")}
             />
-          </Row>
-          <Slider title={t.editor.fields.size} value={face.eyes.size} onChange={(size) => set({ eyes: { size } })} />
-          <Slider title={t.editor.fields.spacing} value={face.eyes.spacing} onChange={(spacing) => set({ eyes: { spacing } })} />
-          <Slider title={t.editor.fields.tilt} value={face.eyes.tilt} min={-1} onChange={(tilt) => set({ eyes: { tilt } })} />
-          <Colour title={t.editor.fields.sclera} value={face.eyes.sclera} onChange={(sclera) => set({ eyes: { sclera } })} />
-          <Slider title={t.editor.fields.shine} value={face.eyes.shine} onChange={(shine) => set({ eyes: { shine } })} />
-          <Slider title={t.editor.fields.glow} value={face.eyes.glow} onChange={(glow) => set({ eyes: { glow } })} />
-        </div>
-      </Section>
+            <Colour title={f.sclera} value={face.eyes.sclera} t={t} onChange={(sclera) => set({ eyes: { sclera } }, "eyes.sclera")} />
+            <Slider title={f.shine} value={face.eyes.shine} format={pct} onChange={(shine) => set({ eyes: { shine } }, "eyes.shine")} />
+            <Slider title={f.glow} value={face.eyes.glow} format={pct} onChange={(glow) => set({ eyes: { glow } }, "eyes.glow")} />
+          </Group>
 
-      <Section title={t.editor.groups.iris}>
-        <div className="group">
-          <Colour title={t.editor.fields.irisColor} value={face.eyes.iris.color} onChange={(color) => set({ eyes: { iris: { color } } })} />
-          <Slider title={t.editor.fields.irisSize} value={face.eyes.iris.size} onChange={(size) => set({ eyes: { iris: { size } } })} />
-          <Row title={t.editor.fields.pupilShape}>
-            <Glyphs
-              label={t.editor.fields.pupilShape}
-              value={face.eyes.pupil.shape}
-              options={PUPIL_SHAPES.map((s) => ({ value: s, title: t.pupils[s], glyph: <PupilGlyph shape={s} /> }))}
-              onChange={(shape) => set({ eyes: { pupil: { shape } } })}
+          <Group title={t.editor.groups.iris}>
+            <Colour title={f.irisColor} value={face.eyes.iris.color} t={t} onChange={(color) => set({ eyes: { iris: { color } } }, "iris.color")} />
+            <Slider title={f.irisSize} value={face.eyes.iris.size} format={pct} onChange={(size) => set({ eyes: { iris: { size } } }, "iris.size")} />
+            <Row title={f.pupilShape} desc={t.pupils[face.eyes.pupil.shape]}>
+              <Glyphs
+                label={f.pupilShape}
+                value={face.eyes.pupil.shape}
+                options={PUPIL_SHAPES.map((s) => ({ value: s, title: t.pupils[s], glyph: <PupilGlyph shape={s} /> }))}
+                onChange={(shape) => set({ eyes: { pupil: { shape } } }, "pupil.shape")}
+              />
+            </Row>
+            <Colour title={f.pupilColor} value={face.eyes.pupil.color} t={t} onChange={(color) => set({ eyes: { pupil: { color } } }, "pupil.color")} />
+            <Slider title={f.pupilSize} value={face.eyes.pupil.size} format={pct} onChange={(size) => set({ eyes: { pupil: { size } } }, "pupil.size")} />
+          </Group>
+
+          <Group title={t.editor.groups.lids}>
+            <Slider title={f.lidRest} value={face.eyes.lids.rest} format={pct} onChange={(rest) => set({ eyes: { lids: { rest } } }, "lids.rest")} />
+            <Colour title={f.lidColor} value={face.eyes.lids.color} t={t} onChange={(color) => set({ eyes: { lids: { color } } }, "lids.color")} />
+            <Choice title={f.lashes} value={face.eyes.lashes} options={LASHES} labels={t.lashes} onChange={(lashes) => set({ eyes: { lashes } }, "lashes")} />
+          </Group>
+
+          <Group title={t.editor.groups.brows}>
+            <Choice
+              title={f.style}
+              value={face.brows.style}
+              options={BROW_STYLES}
+              labels={t.brows}
+              onChange={(style) => set({ brows: { style } }, "brows.style")}
             />
-          </Row>
-          <Colour title={t.editor.fields.pupilColor} value={face.eyes.pupil.color} onChange={(color) => set({ eyes: { pupil: { color } } })} />
-          <Slider title={t.editor.fields.pupilSize} value={face.eyes.pupil.size} onChange={(size) => set({ eyes: { pupil: { size } } })} />
-        </div>
-      </Section>
+            <Colour title={f.color} value={face.brows.color} t={t} onChange={(color) => set({ brows: { color } }, "brows.color")} />
+          </Group>
 
-      <Section title={t.editor.groups.lids}>
-        <div className="group">
-          <Slider title={t.editor.fields.lidRest} value={face.eyes.lids.rest} onChange={(rest) => set({ eyes: { lids: { rest } } })} />
-          <Colour title={t.editor.fields.lidColor} value={face.eyes.lids.color} onChange={(color) => set({ eyes: { lids: { color } } })} />
-          <Choice title={t.editor.fields.lashes} value={face.eyes.lashes} options={LASHES} labels={t.lashes} onChange={(lashes) => set({ eyes: { lashes } })} />
-        </div>
-      </Section>
+          <Group title={t.editor.groups.mouth}>
+            <Choice
+              title={f.style}
+              value={face.mouth.style}
+              options={MOUTH_STYLES}
+              labels={t.mouths}
+              onChange={(style) => set({ mouth: { style } }, "mouth.style")}
+            />
+            <Colour title={f.color} value={face.mouth.color} t={t} onChange={(color) => set({ mouth: { color } }, "mouth.color")} />
+          </Group>
 
-      <Section title={t.editor.groups.brows}>
-        <div className="group">
-          <Choice title={t.editor.fields.style} value={face.brows.style} options={BROW_STYLES} labels={t.brows} onChange={(style) => set({ brows: { style } })} />
-          <Colour title={t.editor.fields.color} value={face.brows.color} onChange={(color) => set({ brows: { color } })} />
-        </div>
-      </Section>
+          <Group title={t.editor.groups.cheeks}>
+            <Slider title={f.blush} value={face.cheeks.blush} format={pct} onChange={(blush) => set({ cheeks: { blush } }, "cheeks.blush")} />
+            <Colour title={f.color} value={face.cheeks.color} t={t} onChange={(color) => set({ cheeks: { color } }, "cheeks.color")} />
+          </Group>
 
-      <Section title={t.editor.groups.mouth}>
-        <div className="group">
-          <Choice title={t.editor.fields.style} value={face.mouth.style} options={MOUTH_STYLES} labels={t.mouths} onChange={(style) => set({ mouth: { style } })} />
-          <Colour title={t.editor.fields.color} value={face.mouth.color} onChange={(color) => set({ mouth: { color } })} />
-        </div>
-      </Section>
+          <Group title={t.editor.groups.accessory} open>
+            <Choice
+              title={f.accessory}
+              value={face.accessory}
+              options={ACCESSORIES}
+              labels={t.accessories}
+              onChange={(accessory) => set({ accessory }, "accessory")}
+            />
+            <Colour title={f.color} value={face.accessory_color} t={t} onChange={(accessory_color) => set({ accessory_color }, "accessory_color")} />
+          </Group>
 
-      <Section title={t.editor.groups.cheeks}>
-        <div className="group">
-          <Slider title={t.editor.fields.blush} value={face.cheeks.blush} onChange={(blush) => set({ cheeks: { blush } })} />
-          <Colour title={t.editor.fields.color} value={face.cheeks.color} onChange={(color) => set({ cheeks: { color } })} />
-        </div>
-      </Section>
+          <Group title={t.editor.groups.color}>
+            <Colour title={f.accent} desc={f.accentDesc} value={face.palette.accent} t={t} onChange={(accent) => set({ palette: { accent } }, "accent")} />
+          </Group>
 
-      <Section title={t.editor.groups.accessory}>
-        <div className="group">
-          <Choice title={t.editor.fields.accessory} value={face.accessory} options={ACCESSORIES} labels={t.accessories} onChange={(accessory) => set({ accessory })} />
-          <Colour title={t.editor.fields.color} value={face.accessory_color} onChange={(accessory_color) => set({ accessory_color })} />
+          <Group title={t.editor.groups.motion} open>
+            <Slider title={f.blink} value={face.motion.blink} format={pct} onChange={(blink) => set({ motion: { blink } }, "motion.blink")} />
+            <Slider
+              title={f.curiosity}
+              desc={f.curiosityDesc}
+              value={face.motion.curiosity}
+              format={pct}
+              onChange={(curiosity) => set({ motion: { curiosity } }, "motion.curiosity")}
+            />
+            <Slider
+              title={f.liveliness}
+              desc={f.livelinessDesc}
+              value={face.motion.liveliness}
+              format={pct}
+              onChange={(liveliness) => set({ motion: { liveliness } }, "motion.liveliness")}
+            />
+            <Slider
+              title={f.sleepy}
+              value={face.motion.sleepy_after_min}
+              min={0}
+              max={MAX_SLEEPY_MIN}
+              step={1}
+              format={(n) => (n === 0 ? f.sleepyNever : f.minutes(n))}
+              onChange={(sleepy_after_min) => set({ motion: { sleepy_after_min } }, "motion.sleepy")}
+            />
+            <Row title={f.emotes} desc={f.emotesDesc}>
+              <span />
+            </Row>
+            <div className="fe-emotes">
+              {IDLE_EMOTES.map((e) => {
+                const on = face.idle_emotes.includes(e);
+                return (
+                  <span key={e} className="fe-habit">
+                    <button
+                      type="button"
+                      className="chip"
+                      aria-pressed={on}
+                      onClick={() => {
+                        const next = on ? face.idle_emotes.filter((x) => x !== e) : [...face.idle_emotes, e];
+                        commit(clampFace({ ...face, idle_emotes: next }, face));
+                      }}
+                    >
+                      {t.emotes[e]}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn quiet icon-only fe-play"
+                      aria-label={t.editor.previewHabit(t.emotes[e])}
+                      title={t.editor.previewHabit(t.emotes[e])}
+                      onClick={() => play(e)}
+                    >
+                      <svg viewBox="0 0 12 12" width={11} height={11} aria-hidden="true">
+                        <path d="M3.5 2.2L9.6 6L3.5 9.8Z" fill="currentColor" />
+                      </svg>
+                    </button>
+                  </span>
+                );
+              })}
+            </div>
+          </Group>
         </div>
-      </Section>
-
-      <Section title={t.editor.groups.color}>
-        <div className="group">
-          <Colour title={t.editor.fields.accent} desc={t.editor.fields.accentDesc} value={face.palette.accent} onChange={(accent) => set({ palette: { accent } })} />
-        </div>
-      </Section>
-
-      <Section title={t.editor.groups.motion}>
-        <div className="group">
-          <Slider title={t.editor.fields.blink} value={face.motion.blink} onChange={(blink) => set({ motion: { blink } })} />
-          <Slider title={t.editor.fields.curiosity} desc={t.editor.fields.curiosityDesc} value={face.motion.curiosity} onChange={(curiosity) => set({ motion: { curiosity } })} />
-          <Slider title={t.editor.fields.liveliness} desc={t.editor.fields.livelinessDesc} value={face.motion.liveliness} onChange={(liveliness) => set({ motion: { liveliness } })} />
-          <Slider
-            title={t.editor.fields.sleepy}
-            value={face.motion.sleepy_after_min}
-            min={0}
-            max={60}
-            step={1}
-            format={(n) => (n === 0 ? t.editor.fields.sleepyNever : t.editor.fields.minutes(n))}
-            onChange={(sleepy_after_min) => set({ motion: { sleepy_after_min: Math.min(MAX_SLEEPY_MIN, sleepy_after_min) } })}
-          />
-          <Row title={t.editor.fields.emotes} desc={t.editor.fields.emotesDesc}>
-            <span />
-          </Row>
-          <div className="fe-emotes">
-            {IDLE_EMOTES.map((e) => {
-              const on = face.idle_emotes.includes(e);
-              return (
-                <button
-                  key={e}
-                  type="button"
-                  className="chip"
-                  aria-pressed={on}
-                  onClick={() => {
-                    const next = on ? face.idle_emotes.filter((x) => x !== e) : [...face.idle_emotes, e];
-                    props.onChange(clampFace({ ...face, idle_emotes: next }, face));
-                    if (!on) play(e);
-                  }}
-                >
-                  {t.emotes[e]}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      </Section>
+      </div>
     </div>
   );
 }
 
-function Preview(props: { face: FaceConfig; state: FaceState; level: number; emote: { kind: IdleEmote; nonce: number } | null; pointer: PointerPos | null; t: FaceStrings }) {
+function Preview(props: {
+  face: FaceConfig;
+  state: FaceState;
+  setState: (s: FaceState) => void;
+  emote: { kind: IdleEmote; nonce: number } | null;
+  t: FaceStrings;
+  canUndo: boolean;
+  canRedo: boolean;
+  undo: () => void;
+  redo: () => void;
+}) {
+  const { t } = props;
+  const pointer = useWindowPointer();
+  const level = useFakeVoice(props.state === "listening");
   const small = useRef<HTMLDivElement>(null);
   const big = useRef<HTMLDivElement>(null);
-  const smallGaze = useGazeToward(small, props.pointer);
-  const bigGaze = useGazeToward(big, props.pointer);
+  const smallGaze = useGazeToward(small, pointer);
+  const bigGaze = useGazeToward(big, pointer);
   return (
-    <div className="fe-stage">
-      <div className="fe-notch" ref={small} aria-label={props.t.editor.collapsed}>
-        <Face config={props.face} state={props.state} gaze={smallGaze} level={props.level} size={32} emote={props.emote} autoSleep={false} />
+    <div className="fe-preview" aria-label={t.editor.preview}>
+      <div className="fe-preview-stage">
+        <div className="fe-preview-closed" ref={small}>
+          <NotchFixture face={props.face} state={props.state} height={NATIVE} gaze={smallGaze} level={level} emote={props.emote} crop barWidth={1} />
+          <span className="fe-size">{t.editor.actualSize(NATIVE)}</span>
+        </div>
+        <div className="fe-preview-open" ref={big} aria-label={t.editor.openSize}>
+          <Face config={props.face} state={props.state} gaze={bigGaze} level={level} size={84} emote={props.emote} autoSleep={false} />
+        </div>
       </div>
-      <div className="fe-open" ref={big} aria-label={props.t.editor.expanded}>
-        <Face config={props.face} state={props.state} gaze={bigGaze} level={props.level} size={128} emote={props.emote} autoSleep={false} />
+      <div className="fe-preview-bar">
+        <select className="select" value={props.state} aria-label={t.editor.stateLabel} onChange={(e) => props.setState(e.target.value as FaceState)}>
+          {FACE_STATES.map((s) => (
+            <option key={s} value={s}>
+              {t.states[s]}
+            </option>
+          ))}
+        </select>
+        <span className="fe-preview-gap" />
+        <button type="button" className="btn small" disabled={!props.canUndo} onClick={props.undo} title={`${t.editor.undo} (⌘Z)`}>
+          {t.editor.undo}
+        </button>
+        <button type="button" className="btn small" disabled={!props.canRedo} onClick={props.redo} title={`${t.editor.redo} (⇧⌘Z)`}>
+          {t.editor.redo}
+        </button>
       </div>
     </div>
   );
 }
 
-function Slider(props: { title: string; desc?: ReactNode; value: number; min?: number; max?: number; step?: number; format?: (n: number) => string; onChange: (n: number) => void }) {
+function Group(props: { title: string; open?: boolean; children: ReactNode }) {
+  return (
+    <details className="fe-group section" open={props.open}>
+      <summary className="section-title fe-summary">{props.title}</summary>
+      <div className="group">{props.children}</div>
+    </details>
+  );
+}
+
+function Slider(props: {
+  title: string;
+  desc?: ReactNode;
+  value: number;
+  min?: number;
+  max?: number;
+  step?: number;
+  format: (n: number) => string;
+  onChange: (n: number) => void;
+}) {
   const { min = 0, max = 1, step = 0.01 } = props;
-  const shown = props.format ? props.format(props.value) : `${Math.round(props.value * 100)}`;
+  const shown = props.format(props.value);
   return (
     <Row title={props.title} desc={props.desc}>
       <span className="fe-slider">
@@ -273,13 +436,35 @@ function Slider(props: { title: string; desc?: ReactNode; value: number; min?: n
   );
 }
 
-function Colour(props: { title: string; desc?: ReactNode; value: string; onChange: (hex: string) => void }) {
+const HEX = /^#?([0-9a-fA-F]{6})$/;
+
+function Colour(props: { title: string; desc?: ReactNode; value: string; t: FaceStrings; onChange: (hex: string) => void }) {
+  const [text, setText] = useState(props.value.toUpperCase());
+  useEffect(() => setText(props.value.toUpperCase()), [props.value]);
+  const apply = () => {
+    const m = HEX.exec(text.trim());
+    if (m) props.onChange(`#${m[1]!.toUpperCase()}`);
+    else setText(props.value.toUpperCase());
+  };
   return (
     <Row title={props.title} desc={props.desc}>
-      <label className="fe-colour">
-        <span className="fe-hex">{props.value.toUpperCase()}</span>
+      <span className="fe-colour">
+        <input
+          className="input fe-hex"
+          type="text"
+          value={text}
+          maxLength={7}
+          spellCheck={false}
+          aria-label={props.t.editor.hexLabel(props.title)}
+          aria-invalid={!HEX.test(text.trim())}
+          onChange={(e) => setText(e.target.value)}
+          onBlur={apply}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") apply();
+          }}
+        />
         <input type="color" value={props.value.toLowerCase()} aria-label={props.title} onChange={(e) => props.onChange(e.target.value.toUpperCase())} />
-      </label>
+      </span>
     </Row>
   );
 }
@@ -302,7 +487,16 @@ function Glyphs<T extends string>(props: { label: string; value: T; options: { v
   return (
     <div className="swatches fe-glyphs" role="radiogroup" aria-label={props.label}>
       {props.options.map((o) => (
-        <button key={o.value} type="button" role="radio" className="swatch" aria-checked={o.value === props.value} title={o.title} aria-label={o.title} onClick={() => props.onChange(o.value)}>
+        <button
+          key={o.value}
+          type="button"
+          role="radio"
+          className="swatch"
+          aria-checked={o.value === props.value}
+          title={o.title}
+          aria-label={o.title}
+          onClick={() => props.onChange(o.value)}
+        >
           {o.glyph}
         </button>
       ))}

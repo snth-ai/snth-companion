@@ -75,34 +75,29 @@ html:has(.fd) body {
   box-shadow: var(--shadow);
 }
 
-.fd-menubar {
-  height: 36px;
-  display: flex;
-  justify-content: center;
-  background: rgba(30, 28, 36, 0.55);
-  backdrop-filter: blur(20px);
+.fd-screen .fx-bar {
+  width: 100% !important;
 }
 
-.fd-menubar .fd-cell {
-  margin: 0;
+.fd-screen.light {
+  background:
+    radial-gradient(120% 90% at 20% 100%, #c9d7f2 0%, transparent 60%),
+    radial-gradient(90% 80% at 90% 90%, #f3cfdc 0%, transparent 55%),
+    linear-gradient(180deg, #eef0f6 0%, #dfe3ee 100%);
 }
 
 .fd-open {
   position: absolute;
-  top: 56px;
+  top: 60px;
   left: 50%;
   transform: translateX(-50%);
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 8px 24px 8px 8px;
-  border-radius: 36px;
+  gap: 10px;
+  padding: 10px 28px 10px 14px;
+  border-radius: 32px;
   background: #000;
   box-shadow: 0 14px 40px rgba(0, 0, 0, 0.45);
-}
-
-.fd-open .face-card {
-  border-radius: 28px;
 }
 
 .fd-open-name {
@@ -172,6 +167,11 @@ html:has(.fd) body {
   padding-right: 6px;
 }
 
+.fd-notch td {
+  padding: 4px 10px;
+  background: #8a8790;
+}
+
 /* ---------- controls the app does not have yet ---------- */
 
 .face-range {
@@ -181,13 +181,27 @@ html:has(.fd) body {
 
 /* ---------- editor ---------- */
 
-.fe-stage {
-  position: relative;
+.fe {
+  container-type: inline-size;
+}
+
+/* The preview stays in view: a pinned strip in a narrow window ... */
+.fe-preview {
+  position: sticky;
+  top: -22px;
+  z-index: 3;
+  margin: -22px -2px 0;
+  padding: 22px 2px 12px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.fe-preview-stage {
   display: flex;
-  flex-direction: column;
   align-items: center;
   gap: 14px;
-  padding: 0 0 18px;
+  min-height: 112px;
+  padding: 0 14px 12px;
   border-radius: var(--radius);
   overflow: hidden;
   background:
@@ -196,31 +210,73 @@ html:has(.fd) body {
     linear-gradient(180deg, #24212b 0%, #17151c 100%);
 }
 
-.fe-notch {
+.fe-preview-closed {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
+  align-self: flex-start;
+}
+
+.fe-size {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.62);
+  white-space: nowrap;
+}
+
+.fe-preview-open {
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 32px;
-  padding: 0 34px;
-  border-radius: 0 0 13px 13px;
+  margin: 12px 0 0 auto;
+  padding: 8px 18px;
+  border-radius: 26px;
   background: #000;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
 }
 
-.fe-open {
+.fe-preview-bar {
   display: flex;
   align-items: center;
-  justify-content: center;
-  padding: 10px 16px;
-  border-radius: 34px;
-  background: #000;
-  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
-}
-
-.fe-states {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
+  gap: 6px;
   margin-top: 10px;
+}
+
+.fe-preview-bar .select {
+  flex: 0 1 220px;
+  min-width: 0;
+  height: 28px;
+}
+
+.fe-preview-gap {
+  flex: 1;
+}
+
+/* ... and a sticky column once there is room for two. */
+@container (min-width: 760px) {
+  .fe-layout {
+    display: grid;
+    grid-template-columns: 270px minmax(0, 1fr);
+    gap: 26px;
+    align-items: start;
+  }
+
+  .fe-preview {
+    top: 16px;
+    margin: 16px 0 0;
+    padding: 0;
+    border: 0;
+    background: none;
+  }
+
+  .fe-preview-stage {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .fe-preview-open {
+    margin: 4px auto 0;
+  }
 }
 
 .fe-looks {
@@ -256,7 +312,7 @@ html:has(.fd) body {
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 60px;
+  height: 64px;
   border-radius: 7px;
   background: #000;
 }
@@ -281,6 +337,32 @@ html:has(.fd) body {
   margin-top: 10px;
 }
 
+.fe-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.fe-summary::-webkit-details-marker {
+  display: none;
+}
+
+.fe-summary::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 0.15s var(--ease);
+}
+
+.fe-group[open] > .fe-summary::before {
+  transform: rotate(45deg);
+}
+
 .fe-slider {
   display: inline-flex;
   align-items: center;
@@ -289,7 +371,7 @@ html:has(.fd) body {
 }
 
 .fe-num {
-  min-width: 46px;
+  min-width: 52px;
   text-align: right;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
@@ -299,14 +381,18 @@ html:has(.fd) body {
 .fe-colour {
   display: inline-flex;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
   flex: none;
-  cursor: pointer;
 }
 
-.fe-hex {
+.fe-colour .fe-hex {
+  width: 84px;
+  height: 28px;
   font: 12px var(--mono);
-  color: var(--text-2);
+}
+
+.fe-colour .fe-hex[aria-invalid="true"] {
+  border-color: var(--danger);
 }
 
 .fe-colour input[type="color"] {
@@ -339,9 +425,6 @@ html:has(.fd) body {
 .fe-glyphs .swatch {
   width: 28px;
   height: 28px;
-}
-
-.fe-glyphs .swatch {
   color: var(--text-2);
 }
 
@@ -352,9 +435,21 @@ html:has(.fd) body {
 .fe-emotes {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 8px 12px;
   padding: 0 14px 12px;
   border-top: 0 !important;
+}
+
+.fe-habit {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.fe-play {
+  width: 24px;
+  height: 24px;
+  color: var(--text-2);
 }
 
 .mock-window.fd-editor {
@@ -362,7 +457,51 @@ html:has(.fd) body {
   min-height: 560px;
 }
 
+.mock-window.fd-editor.wide {
+  width: 1100px;
+}
+
 .mock-window.fd-editor .main {
   height: auto;
   overflow: visible;
+}
+
+/* ---------- notch fixture (review only) ---------- */
+
+.fx-bar {
+  flex: none;
+}
+
+.fx-shape {
+  display: flex;
+  align-items: stretch;
+  background: #000;
+}
+
+.fx-slot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.fx-slot[data-guides] {
+  box-shadow: inset 0 0 0 1px rgba(120, 200, 255, 0.35);
+}
+
+.fx-cutout[data-guides] {
+  background: repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.05) 0 4px, transparent 4px 8px);
+}
+
+.fx-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.fx-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #5c5a62;
 }

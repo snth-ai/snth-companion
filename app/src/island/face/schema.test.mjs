@@ -50,7 +50,7 @@ test("presets have distinct characters, not recolours", () => {
 
 test("no em-dash anywhere in the presets file", () => {
   const raw = readFileSync(new URL("./presets.json", import.meta.url), "utf8");
-  assert.ok(!raw.includes("—"));
+  assert.ok(!raw.includes(String.fromCharCode(0x2014)));
 });
 
 test("unknown keys are an error, top level and nested", () => {
