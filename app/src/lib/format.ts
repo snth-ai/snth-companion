@@ -158,13 +158,16 @@ export function acceleratorFromEvent(e: KeyboardEvent, os: string): string | nul
 // --- one-line summaries of what is allowed ---
 
 export function summarize(
-  capability: "net" | "cookies" | "computer" | "files" | "apps",
+  capability: "net" | "cookies" | "computer" | "files" | "apps" | "shell",
   settings: Settings,
   s: Strings,
   apps: AppView[] = [],
 ): string {
   const sum = s.status.sum;
   switch (capability) {
+    case "shell":
+      if (!settings.shell.enabled) return sum.off;
+      return settings.shell.mode === "auto" ? sum.shellAuto : sum.shellAsk;
     case "apps": {
       if (!settings.apps.enabled) return sum.off;
       // Only what this computer has and the owner left switched on.
@@ -215,7 +218,7 @@ export function grantTime(grant: Grant, s: Strings, lang: Lang): string {
 
 // --- the activity journal in plain words ---
 
-export type LineKind = "net" | "cookies" | "computer" | "files" | "apps" | "link" | "app";
+export type LineKind = "net" | "cookies" | "computer" | "files" | "apps" | "shell" | "link" | "app";
 
 /** The browser a sign-in came from, as the core names it: a browser's
  * own name ("Chrome"), or "chrome-extension" when it came through the
@@ -355,6 +358,28 @@ export function describeEntry(entry: Entry, s: Strings, lang: Lang): Omit<Line, 
         return { ...base, kind: "apps", text: j.appFailed(appTitle), note: notHere };
       }
       return { ...base, kind: "apps", text: what, note: entry.count === undefined ? "" : j.appCount(entry.count) };
+    }
+    case "shell": {
+      // The command and how it ended; never what it printed.
+      const cmd = entry.target.length > 120 ? `${entry.target.slice(0, 120)}...` : entry.target;
+      const o = entry.outcome;
+      const facts = [
+        entry.exit_code !== undefined && entry.exit_code !== 0 ? j.shellExit(entry.exit_code) : "",
+        entry.cwd ? j.shellIn(shortPath(entry.cwd)) : "",
+        entry.duration_ms !== undefined && !refused ? j.shellTook((entry.duration_ms / 1000).toFixed(1)) : "",
+        size,
+      ].filter(Boolean);
+      if (refused) return { ...base, kind: "shell", text: j.shellRefused(cmd), note: why };
+      const text = o.startsWith("timed out")
+        ? j.shellTimedOut(cmd)
+        : o.startsWith("stopped")
+          ? j.shellStopped(cmd)
+          : o.startsWith("cancelled")
+            ? j.shellCancelled(cmd)
+            : o.startsWith("failed")
+              ? j.shellFailed(cmd)
+              : j.shellRan(cmd);
+      return { ...base, kind: "shell", text, note: facts.join(", ") };
     }
     case "link":
       return { ...base, kind: "link", text: j.linkUp, note: "" };

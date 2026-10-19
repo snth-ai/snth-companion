@@ -1906,3 +1906,17 @@ details.more .more-body {
   max-height: 112px;
   overflow-y: auto;
 }
+
+/* The command line: a command is shown as it will run, in a fixed-width
+   face, never wrapped into something that reads differently. */
+
+.exact dd.code,
+.item-text.mono {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.exact dd.code {
+  max-height: 140px;
+  overflow-y: auto;
+}

@@ -51,6 +51,7 @@ const COMMANDS: &[&str] = &[
     "check_update",
     "install_update",
     "set_auto_update",
+    "set_developer",
     "diagnostics",
     "open_external",
 ];

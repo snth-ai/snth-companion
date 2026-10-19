@@ -42,6 +42,11 @@ pub struct Prefs {
     /// or with the window, as it was. Used once at the next launch.
     #[serde(default)]
     pub resume_hidden: Option<bool>,
+    /// Developer mode: shows the developer section on the General screen
+    /// (the command line). Off until the owner turns it on; turning it off
+    /// also turns the command line off.
+    #[serde(default)]
+    pub developer: bool,
 }
 
 fn default_true() -> bool {
@@ -64,6 +69,7 @@ impl Default for Prefs {
             auto_update: true,
             last_version: None,
             resume_hidden: None,
+            developer: false,
         }
     }
 }

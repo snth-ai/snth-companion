@@ -23,7 +23,7 @@ const RING_CAP: usize = 500;
 pub struct Entry {
     /// Unix seconds.
     pub time: i64,
-    /// "net", "cookies", "computer", "files", "apps", "link".
+    /// "net", "cookies", "computer", "files", "apps", "shell", "link".
     pub capability: String,
     /// "dial", "cookies.get", "files.read", "mcp.open", "tools/call", ...
     pub action: String,
@@ -37,6 +37,16 @@ pub struct Entry {
     /// The number only: never what the items say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub count: Option<u64>,
+    /// A command line: the folder it ran in (`shell` only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// A command line: how it ended. None when it did not end by itself
+    /// (stopped, timed out) or never started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// A command line: how long it ran, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 impl Entry {
@@ -57,6 +67,9 @@ impl Entry {
             outcome: outcome.into(),
             bytes: None,
             count: None,
+            cwd: None,
+            exit_code: None,
+            duration_ms: None,
         }
     }
 

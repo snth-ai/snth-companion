@@ -9,7 +9,9 @@ export type Foreground = "never" | "idle" | "ask" | "always";
 /** The owner's choice of the new way to drive the computer. "default" = as the synth decides. */
 export type Experiment = "default" | "on" | "off";
 export type Preset = "careful" | "balanced" | "full" | "custom";
-export type Capability = "net" | "cookies" | "computer" | "files" | "apps";
+export type Capability = "net" | "cookies" | "computer" | "files" | "apps" | "shell";
+/** The command line: every command asks, or none does. */
+export type ShellMode = "ask" | "auto";
 /** When the app asks before a change in the owner's apps: every time,
  * with the option to remember, or never. Reading never asks; sending a
  * message always does. */
@@ -141,6 +143,9 @@ export interface Settings {
      * except Messages). */
     apps: Record<string, boolean>;
   };
+  /** The command line. Off in every preset; its switch shows only in
+   * developer mode. */
+  shell: { enabled: boolean; mode: ShellMode };
   preset: Preset;
 }
 
@@ -312,6 +317,8 @@ export interface UiState {
     autostart: boolean;
     stop_shortcut: string;
     stop_shortcut_active: boolean;
+    /** Developer mode: the developer section (the command line) shows. */
+    developer: boolean;
   };
   app: {
     version: string;
@@ -326,6 +333,8 @@ export interface UiState {
     secret_store: string;
     cua_pinned_version: string;
     cua_path: string;
+    /** The shell the synth's commands run in: pwsh, powershell, zsh... */
+    os_shell: string;
   };
 }
 
@@ -339,6 +348,10 @@ export interface Entry {
   bytes?: number;
   /** How many items a call in the owner's apps returned. */
   count?: number;
+  /** A command: the folder it ran in, how it ended, how long it took. */
+  cwd?: string;
+  exit_code?: number;
+  duration_ms?: number;
 }
 
 /** One fact of the action the owner is asked about, shown in full. */
@@ -493,6 +506,8 @@ export interface Backend {
   /** Install the new version and restart into it now. */
   installUpdate(): Promise<UiState>;
   setAutoUpdate(enabled: boolean): Promise<UiState>;
+  /** Developer mode. Off also switches the command line off. */
+  setDeveloper(enabled: boolean): Promise<UiState>;
   diagnostics(): Promise<string>;
   openExternal(target: ExternalTarget): Promise<void>;
 

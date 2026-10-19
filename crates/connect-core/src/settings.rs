@@ -439,6 +439,32 @@ impl AppsSettings {
     }
 }
 
+/// When the app asks before the synth runs a command (connect.md:
+/// shell.mode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShellMode {
+    /// Every command asks, with the whole command and its folder on the
+    /// screen. Only "always for this exact command" can be remembered.
+    #[default]
+    Ask,
+    /// No questions.
+    Auto,
+}
+
+/// The command line on this computer (`shell`): full access by
+/// definition. A command runs as the owner, with everything the owner can
+/// reach; the shared folders do not limit it. Off in every preset and on
+/// a fresh install; the switch lives in the developer section, which the
+/// owner turns on by hand.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ShellSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub mode: ShellMode,
+}
+
 /// Which preset the settings came from, or `custom` after a hand edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -459,6 +485,10 @@ pub struct Settings {
     /// Absent in a settings file written before apps existed: off.
     #[serde(default)]
     pub apps: AppsSettings,
+    /// The command line. Absent in a settings file written before it
+    /// existed: off.
+    #[serde(default)]
+    pub shell: ShellSettings,
     pub preset: Preset,
 }
 
@@ -495,6 +525,7 @@ impl Default for Settings {
                 ask_on_write: false,
             },
             apps: AppsSettings::default(),
+            shell: ShellSettings::default(),
             preset: Preset::Custom,
         }
     }
@@ -825,6 +856,26 @@ mod tests {
         let s: Settings = serde_json::from_value(old).unwrap();
         assert!(!s.apps.enabled, "apps stay off until the owner turns them on");
         assert!(s.net.enabled);
+    }
+
+    #[test]
+    fn the_command_line_is_off_in_every_preset_and_in_an_old_file() {
+        for p in [Preset::Careful, Preset::Balanced, Preset::Full, Preset::Custom] {
+            let s = Settings::from_preset(p, vec![]);
+            assert!(!s.shell.enabled, "{p:?} turns the command line on");
+            assert_eq!(s.shell.mode, ShellMode::Ask);
+        }
+        assert!(!Settings::default().shell.enabled);
+        // settings.json of app 0.1.11 has no "shell" key at all.
+        let mut old = serde_json::to_value(Settings::from_preset(Preset::Full, vec![])).unwrap();
+        old.as_object_mut().unwrap().remove("shell");
+        let s: Settings = serde_json::from_value(old).unwrap();
+        assert!(!s.shell.enabled);
+        assert_eq!(s.shell.mode, ShellMode::Ask);
+        // Stored in plain words.
+        assert_eq!(serde_json::to_value(ShellMode::Auto).unwrap(), serde_json::json!("auto"));
+        let partial: ShellSettings = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
+        assert_eq!(partial.mode, ShellMode::Ask);
     }
 
     #[test]

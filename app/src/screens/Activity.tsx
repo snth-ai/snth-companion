@@ -1,9 +1,9 @@
 import { useMemo, useState } from "react";
 import { buildLines, dayLabel, formatClock, type LineKind } from "../lib/format";
 import { useStore } from "../lib/store";
-import { IconApps, IconCookie, IconFolder, IconGlobe, IconLink, IconPointer, IconUpdate } from "../ui/icons";
+import { IconApps, IconCookie, IconFolder, IconGlobe, IconLink, IconPointer, IconTerminal, IconUpdate } from "../ui/icons";
 
-type Filter = "all" | "net" | "cookies" | "computer" | "files" | "apps";
+type Filter = "all" | "net" | "cookies" | "computer" | "files" | "apps" | "shell";
 
 const ICONS: Record<LineKind, () => React.JSX.Element> = {
   net: IconGlobe,
@@ -11,12 +11,13 @@ const ICONS: Record<LineKind, () => React.JSX.Element> = {
   computer: IconPointer,
   files: IconFolder,
   apps: IconApps,
+  shell: IconTerminal,
   link: IconLink,
   app: IconUpdate,
 };
 
 export function Activity() {
-  const { journal, s, lang, name } = useStore();
+  const { state, journal, s, lang, name } = useStore();
   const t = s.activity;
   const [filter, setFilter] = useState<Filter>("all");
 
@@ -41,6 +42,8 @@ export function Activity() {
     { value: "computer", title: t.computer },
     { value: "files", title: t.files },
     { value: "apps", title: t.apps },
+    // Only where the command line is or was in use.
+    ...(state.prefs.developer || journal.some((e) => e.capability === "shell") ? [{ value: "shell" as const, title: t.shell }] : []),
   ];
 
   return (

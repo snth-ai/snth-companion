@@ -86,6 +86,21 @@ function wording(req: ApprovalRequest, s: Strings, name: string, cookiesAskEvery
       return { title: t.fileTitle(fileName(req.scope)), body: t.fileBody(parentFolder(req.scope)), spans: ["once", "session", "always"] };
     case "apps":
       return appsWording(req, s);
+    case "shell": {
+      // A command: the whole of it, the folder and the shell, from the
+      // core. Only "always for this exact command" can be remembered, and
+      // only when the core offers it.
+      const a = t.apps;
+      const always = req.remember === "always";
+      return {
+        title: a.shellTitle,
+        body: a.shellBody,
+        details: req.details,
+        spans: always ? ["once", "always"] : ["once"],
+        labels: { always: a.alwaysCommand },
+        hint: always ? undefined : a.shellOnceOnly,
+      };
+    }
   }
   // Something this version does not know: never remembered.
   return { title: t.otherTitle, body: t.otherBody(req.capability, req.scope), spans: ["once"], unknown: true };
@@ -164,7 +179,7 @@ function Details(props: { items: ApprovalDetail[]; s: Strings }) {
         {props.items.map((d) => (
           <div className="exact-row" key={d.key}>
             <dt>{a.detail[d.key] ?? d.key}</dt>
-            <dd className={`selectable${d.key === "text" || d.key === "input" || d.key === "notes" ? " long" : ""}`}>
+            <dd className={`selectable${d.key === "text" || d.key === "input" || d.key === "notes" ? " long" : ""}${d.key === "command" || d.key === "cwd" ? " code" : ""}`}>
               {d.key === "service" ? (a.service[d.value] ?? d.value) : d.value}
             </dd>
           </div>

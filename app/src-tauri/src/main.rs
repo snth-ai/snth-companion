@@ -417,6 +417,7 @@ fn main() {
             commands::check_update,
             commands::install_update,
             commands::set_auto_update,
+            commands::set_developer,
             commands::diagnostics,
             commands::open_external,
         ])
