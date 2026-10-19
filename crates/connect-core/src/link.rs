@@ -301,6 +301,8 @@ async fn control_loop(mut s: MuxStream, shared: Arc<Shared>, slot: Arc<LinkSlot>
         &cua_status,
         shared.apps.backend().as_ref(),
     );
+    // The island only while it is on (island.rs).
+    let caps = crate::island::with_capability(caps, shared.island().enabled);
     let hello = wire::hello(
         &shared.device_id(),
         &shared.device_name(),
@@ -336,6 +338,16 @@ async fn control_loop(mut s: MuxStream, shared: Arc<Shared>, slot: Arc<LinkSlot>
                             );
                             est.store(true, Ordering::Release);
                             logln!("linked to {} as device {}", slot_r.display_name(), shared_r.device_id());
+                            // The island shows this synth's face: read it
+                            // now (the request goes out on this stream).
+                            if shared_r.island().enabled && crate::island::supports(&slot_r) {
+                                let (sh, sl) = (shared_r.clone(), slot_r.clone());
+                                tokio::spawn(async move {
+                                    if let Err(e) = crate::island::refresh_face(&sh, &sl).await {
+                                        logln!("link {}: face.get: {e}", sl.synth_id);
+                                    }
+                                });
+                            }
                         }
                         Some("response") => slot_r.requests.resolve(&msg),
                         Some("unpair_ack") => {
@@ -379,6 +391,7 @@ async fn control_loop(mut s: MuxStream, shared: Arc<Shared>, slot: Arc<LinkSlot>
                         &st,
                         shared_w.apps.backend().as_ref(),
                     );
+                    let caps = crate::island::with_capability(caps, shared_w.island().enabled);
                     if let Err(e) = write_json_line(&mut wr, &wire::settings_msg(rev, caps)).await {
                         return format!("send settings: {e}");
                     }

@@ -794,6 +794,17 @@ pub struct Persisted {
     /// `StoredBrowser`). Not part of `settings_rev`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub browsers: Vec<StoredBrowser>,
+    /// The island (island.rs): on/off, the main synth, the hold keys. The
+    /// owner's own, not a policy: no preset touches it and `settings_rev`
+    /// moves only when it is switched on or off (the synth learns that
+    /// from `capabilities.island`). Absent in a file written before the
+    /// island: off, with this system's default keys.
+    #[serde(default)]
+    pub island: crate::island::IslandSettings,
+    /// Each synth's face (FaceConfig v1) as last read from it, by synth
+    /// id. A cache: the synth holds the truth.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub faces: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 impl Persisted {
@@ -839,6 +850,8 @@ impl Persisted {
             egress_month: String::new(),
             egress_bytes: 0,
             browsers: Vec::new(),
+            island: crate::island::IslandSettings::default(),
+            faces: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -856,6 +869,8 @@ pub fn load(path: &Path, new_device_id: impl FnOnce() -> String) -> io::Result<P
             p.settings.migrate();
             // One synth before 0.1.13, a list of them now.
             p.migrate_links();
+            // Keys of a file edited by hand: trimmed, no key twice.
+            p.island.normalize();
             Ok(p)
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Persisted::fresh(new_device_id())),

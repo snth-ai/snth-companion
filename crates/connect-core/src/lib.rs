@@ -42,6 +42,7 @@ pub mod cua_install;
 pub mod cua_look;
 pub mod files;
 pub mod grant;
+pub mod island;
 pub mod journal;
 pub mod link;
 pub mod mcp;

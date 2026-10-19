@@ -2,8 +2,8 @@
 //!
 //! Methods: files.list / files.stat / files.read / files.write,
 //! cookies.get, permission.request, device.info, apps.<app>.<action>
-//! (every one of those goes through the one gate in apps/mod.rs), and
-//! shell.exec (the one gate in shell.rs). One stream serves any
+//! (every one of those goes through the one gate in apps/mod.rs),
+//! shell.exec (the one gate in shell.rs), and island.event (island.rs). One stream serves any
 //! number of sequential requests; the synth opens one per call and the
 //! app also serves many on one.
 
@@ -174,6 +174,9 @@ async fn dispatch(shared: &Arc<Shared>, req: &Request) -> Result<Value, String> 
         m if m.starts_with("apps.") => crate::apps::handle(shared, m, &req.params).await,
         "shell.exec" => crate::shell::exec(shared, &req.params, std::future::pending::<()>()).await,
         "permission.request" => permission_request(shared, req).await,
+        // The life of a message the owner sent from the island, and the
+        // synth's own face changes (island.rs).
+        "island.event" => crate::island::handle_event(shared, &req.params),
         "device.info" => Ok(wire::device_info(
             &shared.device_id(),
             &shared.device_name(),
