@@ -19,6 +19,7 @@
 //   reduced 1 = reduced motion
 //   perf=1  counts animation frames into the page title (energy checks)
 //   calm    1 = no glances or habits, 2 = no blinks either (energy checks)
+//   light   1 = light menu bar on the stage; bar = its height (32/34/37)
 //   lang    en | ru
 
 import { createContext, useContext, useRef, useState } from "react";
@@ -116,8 +117,8 @@ function Stage(props: { still: boolean; reduced: boolean }) {
   const [state, setState] = useState<FaceState>(paramState);
   const [voice, setVoice] = useState(false);
   const [manual, setManual] = useState(0.5);
-  const [light, setLight] = useState(false);
-  const [height, setHeight] = useState(37);
+  const [light, setLight] = useState(params.get("light") === "1");
+  const [height, setHeight] = useState(Number(params.get("bar")) || 37);
   const fake = useFakeVoice(voice);
   const level = voice ? fake : manual;
   const [emote, setEmote] = useState<{ kind: IdleEmote; nonce: number } | null>(null);

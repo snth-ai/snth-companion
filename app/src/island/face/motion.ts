@@ -173,6 +173,9 @@ const TIMELINE: Partial<Record<FaceState, number>> = { accepted: 0.8, done: 1.5,
 const BLINK_INTO: ReadonlySet<FaceState> = new Set(["idle", "listening", "thinking", "working", "driving"]);
 const BLINK_COOLDOWN = 1.2;
 
+/** States drawn with a symbol beside the eyes (Face.tsx). */
+const SYMBOL_STATES: ReadonlySet<FaceState> = new Set(["driving", "approval", "error", "listening"]);
+
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 const smooth = (t: number) => {
@@ -1058,7 +1061,9 @@ export class FaceSim {
     const fps = reduced ? (this.state === "listening" && this.level > 0.01 ? 30 : 0) : ambientFps(this.state, this.level);
     // Fast things (a blink, an emote, a one-shot timeline, a cross-fade) get
     // every frame; the slow ambient motion of a state gets its capped rate.
-    const fast = blink > 0 || this.blinkStart >= 0 || this.emote !== null || inTimeline || fading;
+    // The symbols beside the eyes fade in over 150 ms after a state change.
+    const symbolIn = !reduced && SYMBOL_STATES.has(this.state) && st < 0.2;
+    const fast = blink > 0 || this.blinkStart >= 0 || this.emote !== null || inTimeline || fading || symbolIn;
     const capped = fps > 0 && !fast;
     const busy = fast || (moving && fps === 0);
 
