@@ -3,7 +3,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { backend } from "../backend";
-import type { Entry, Settings, UiState } from "../backend/types";
+import type { Entry, LinkBrief, Settings, UiState } from "../backend/types";
 import { I18nContext, resolveLang, stringsFor, type Lang, type Strings } from "../i18n";
 
 /** How long after its journal line an action still counts as "right now". */
@@ -39,7 +39,32 @@ export function useStore(): Store {
 }
 
 export function synthName(state: UiState, s: Strings): string {
-  return state.core.synth_name || state.core.synth_id || state.pending?.synth_id || s.common.yourSynth;
+  return state.core.synth_name || state.core.synth_id || state.pending?.synth_name || state.pending?.synth_id || s.common.yourSynth;
+}
+
+/** One link's name for people: its name, else its id. */
+export function linkName(link: LinkBrief): string {
+  return link.synth_name || link.synth_id;
+}
+
+/** Who this computer is linked to, in a few words: the name when there is
+ * one synth, "2 synths" when there are more. */
+export function synthsLabel(state: UiState, s: Strings): string {
+  const links = state.core.links;
+  return links.length > 1 ? s.common.synthsCount(links.length) : synthName(state, s);
+}
+
+/** Whose remembered answer this is, when the computer has more than one
+ * synth (answers are kept per synth). null with one synth. */
+export function grantSynth(state: UiState, grant: { synth_id: string; synth_name: string | null }): string | null {
+  if (state.core.links.length < 2) return null;
+  const link = state.core.links.find((l) => l.synth_id === grant.synth_id);
+  return (link ? linkName(link) : null) ?? grant.synth_name ?? grant.synth_id;
+}
+
+/** "Mia and Maya": every linked synth by name. */
+export function synthsNames(state: UiState, s: Strings): string {
+  return state.core.links.length > 0 ? s.common.names(state.core.links.map(linkName)) : synthName(state, s);
 }
 
 /** Re-render on a timer (countdowns, "right now"). */

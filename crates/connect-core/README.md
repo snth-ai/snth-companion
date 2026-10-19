@@ -1,7 +1,7 @@
 # connect-core
 
 The core of SNTH Connect: one outbound WebSocket from the owner's computer
-to their cloud synth, giving the synth six capabilities under the owner's
+to each of their cloud synths, giving the synth six capabilities under the owner's
 policy (internet, cookies, computer control, files, the owner's own apps,
 and the command line). UI-free. The Tauri shell holds a single [`Core`] and drives it with
 commands; `connectd` (sibling crate) is the headless CLI over the same API.
@@ -57,23 +57,40 @@ Everything on `Core` is `Send + Sync`; clone the handle freely (it is an
   `FileSecretStore` headless, `MemSecretStore` for tests.
 - **`HubClient`**: `UreqHubClient` claims a code against the hub; a fake is
   used in tests.
+- **`account::PlatformClient`**: `account::UreqPlatformClient` talks to the
+  platform's app API (`/api/app/v1/*`); tests use a fake. Set with
+  `Core::set_platform(client, base_url)`; without it the core has no
+  account (the CLI).
 
 ## Commands (all on `Core`)
 
 | Command | What |
 |---|---|
-| `pair_begin(hub_url, code).await -> Pending` | claim a 6-digit code; holds the result in memory ONLY (nothing stored, no link) |
-| `pair_confirm() -> Pending` | the owner confirmed the synth identity: store the token, allow the link |
+| `pair_begin(hub_url, code).await -> Pending` | claim a 6-digit code (the hub's claim-pair; while signed in to the account, the platform's `link-code`, which also ties the synth to the account when it is free); holds the result in memory ONLY (nothing stored, no link) |
+| `pair_confirm() -> Pending` | the owner confirmed the synth identity: store the token under `pairing_token:<synth_id>`, add the link. A synth that has a link already gets the new token on it (one link per synth) |
 | `pair_cancel()` | drop the pending pairing |
-| `pending() -> Option<Pending>` | the claimed-not-confirmed pairing (synth_id, synth_url) |
-| `unpair().await` | send `unpair`, await the ack (bounded), then wipe token + grants + state |
+| `pending() -> Option<Pending>` | the claimed-not-confirmed pairing (synth_id, synth_url, the platform's name and `linked_to_account` / `reason` for a code through the account) |
+| `unpair_synth(id).await` | send `unpair` over that link, await the ack (bounded), then wipe that synth's token, grants, browsers' link, stored pairing and hold on the computer. The other links and the settings stay |
+| `unpair().await` | the same for every link, then `wipe_local` |
+| `link_ids()` / `links() -> Vec<LinkBrief>` | the links, in the order they were made (`LinkBrief`: synth_id, synth_name, synth_url, synth_version, state, source `account|code`, detail, hub_id) |
+| `run_slot(id, shutdown).await` | the reconnect loop of one link (returns at once when it runs already or the link is unknown; when the app shuts down or the link is removed). The app runs one per link |
+| `run_link(ws_url, shutdown).await` | the CLI's single link: the first link, or (no pairing, a url given) a link from the token under the bare `pairing_token` key that is not stored |
+| `reconnect_synth(id).await` | "connect again" for a link its synth refused: an account link gets a fresh token from the platform; a code link answers `needs_code` |
+| `login_url() -> String` | start (or, within 10 min, repeat) a sign-in: a fresh `state` and PKCE verifier, the platform's `/connect/login` address with the S256 challenge |
+| `login_complete(code_or_error, state).await` | the browser came back (`snth://login`): a state the core is not waiting for is ignored and journaled (`state_mismatch`); otherwise exchange the code for the app's token (`account_token` in the SecretStore), store the account, read its synths. Links nothing |
+| `login_cancel()` | forget the sign-in in progress |
+| `account_connect().await -> SyncReport` | the owner confirmed: link every synth of the account (a link its synth refused gets a fresh token too); from now on the sync links new synths by itself |
+| `account_sync().await -> SyncReport` | read `/me` and bring the links in step: link new synths (after the owner's confirmation, not the ones the owner disconnected here), unlink synths that left, make a code link to a synth of the account the account's link, and on a 401 sign out (account links go, code links stay) |
+| `account_skip(id)` | the owner disconnected this synth here: the sync leaves it alone until `account_connect` |
+| `sign_out().await` | `POST /api/app/v1/logout` (best effort), then forget the token and the account and unpair every account link |
+| `account_view() -> AccountView` | the account for the UI: signed in, the account, the sign-in phase, the synths of the last `/me` (linked, skipped, the last error), consented, last sync |
 | `apply_preset(Preset) -> rev` | careful / balanced / full. Shared folders, the look and the owner's choice of apps are kept |
 | `mutate_settings(FnMut) -> rev` | arbitrary edit; bumps `settings_rev`, persists, pushes a `settings` message. An edit of nothing but `computer.look` is saved without moving the rev and without a message |
 | `settings() -> Settings` | current settings |
 | `add_root(path, write) -> rev` / `remove_root(path) -> rev` | shared folders |
 | `Core::default_roots() -> Vec<Root>` | Desktop + Downloads, for onboarding |
-| `grant_list()` / `revoke(cap, scope)` | live grants (`until`: 0 = always, -1 = this session, else a unix second) |
-| `is_paired()` | a confirmed pairing exists (link up or not) |
+| `grant_list()` / `revoke(synth_id, cap, scope)` | live grants, each with the synth it was given to (`until`: 0 = always, -1 = this session, else a unix second) |
+| `is_paired()` | at least one confirmed pairing exists (link up or not) |
 | `active_streams()` | how many streams the synth has open right now (0 = nothing in flight; the host may restart for an update) |
 | `set_metered(bool)` | the host reports a metered connection (the core cannot detect it) |
 | `flush()` | write batched state (egress counters) before exit |
@@ -90,12 +107,11 @@ Everything on `Core` is `Send + Sync`; clone the handle freely (it is an
 | `cua_install_argv()` / `cua_permissions_grant_argv()` / `cua_permissions_status()` | for a host that attaches to the user's own driver (`CuaAttach::User`): argv the host runs, and the read-only CLI status |
 | `apps_views()` | the apps this computer offers (no Mac app on Windows), each with the owner's switch and its actions |
 | `apps_permissions(app)` / `apps_request_permission(app, kind)` | macOS: where an app's Automation / Full Disk Access permission stands (read-only, never prompts), and the call that makes macOS ask. Empty elsewhere |
-| `run_link(ws_url, shutdown).await` | the reconnect loop; spawn it. `ws_url` None = the paired synth url |
 | `run_browser_link(endpoint, shutdown).await` | serve the SNTH Vault extension's helper on a per-user endpoint (see "The browser link"); returns an error at once when the endpoint cannot be bound |
 | `run_browser_door(endpoint, door, shutdown).await` | the same for one door: `Door::Chromium` is what `run_browser_link` serves; `Door::Safari` is the endpoint in the app group folder, for the handler of the Safari extension that ships inside the app |
 | `browsers()` | the browsers whose extension has talked to the app: connected or not, linked or not, which sites each may hand a sign-in for |
-| `browser_link(install).await` / `browser_unlink(install).await` / `browser_forget(install)` | link a connected browser to the synth's vault (the owner's click in the host is the confirmation), unlink one (its extension forgets the pairing and its sites, the synth removes the pairing at the vault), drop one that is gone |
-| `vault_list().await` / `vault_forget(site).await` | which sites the synth's vault holds a login for (names and dates only), and deleting one |
+| `browser_link(install, synth_id).await` / `browser_unlink(install).await` / `browser_forget(install)` | link a connected browser to a synth's vault (`synth_id` None = the only synth; with several the owner picks one, and a request from the extension itself is refused as `choose_synth`) (the owner's click in the host is the confirmation), unlink one (its extension forgets the pairing and its sites, the synth removes the pairing at the vault), drop one that is gone |
+| `vault_list(synth_id).await` / `vault_forget(site, synth_id).await` | which sites a synth's vault holds a login for (names and dates only), and deleting one |
 | `set_cookies_extension_first(bool)` | which cookie source goes first: a linked browser's extension, or the browsers' files (default: the extension on Windows, the files elsewhere) |
 | `snapshot().await -> Snapshot` | the state snapshot below |
 
@@ -116,14 +132,17 @@ it is started on.
 
 ## Events
 
-- `subscribe() -> broadcast::Receiver<CoreEvent>`: `Link{state,detail}`,
-  `Settings{rev}`, `Paired{synth_id}`, `Unpaired`, `Paused{paused}`,
+- `subscribe() -> broadcast::Receiver<CoreEvent>`: `Link{synth_id,state,detail}`,
+  `Settings{rev}`, `Paired{synth_id}`, `Unpaired{synth_id,remaining}`,
+  `Account` (signed in or out, the account's synths read again),
+  `Paused{paused}`,
   `Browsers` (an extension connected, left, was linked or unlinked, or the
   sites it may read changed), `ComputerTask` (the name of the running
   computer-control task changed, or there is none any more).
 - `subscribe_journal() -> broadcast::Receiver<Entry>` and
   `recent_journal() -> Vec<Entry>`: the action journal (time, capability,
-  action, target, outcome, bytes, count). No content, no cookie values, no
+  action, target, outcome, bytes, count, and `synth`: the name of the synth
+  whose stream did it, none for the app's own lines). No content, no cookie values, no
   bodies; for the owner's apps a line is the app, the action, the outcome
   and how many items came back, never what a message, a contact or a note
   says.
@@ -131,27 +150,118 @@ it is started on.
 ## Snapshot
 
 `Snapshot { link_state, paired, synth_id, synth_name, synth_url,
-synth_version, idle_seconds, screen_locked, paused, metered, settings,
-settings_rev, cua_version, cua_status, computer_task, egress_month,
-egress_bytes }`.
-`link_state` is `unpaired | connecting | linked | reconnecting | paused`.
-While the link is down, `synth_id` / `synth_name` come from the stored
-pairing. All fields are `Serialize`, so a Tauri command can return the
+synth_version, links, idle_seconds, screen_locked, paused, metered,
+settings, settings_rev, cua_version, cua_status, computer_task,
+computer_driver, egress_month, egress_bytes }`.
+`links` has every link (`LinkBrief`); `synth_*` are the first link's, and
+`link_state` is the links together (paused, else linked if any is, else
+connecting, reconnecting, `needs_repair` when every link needs a new token,
+else unpaired). A link's state is `unpaired | connecting | linked |
+reconnecting | paused | needs_repair`. While a link is down its name comes
+from the stored pairing. `computer_driver` is the name of the synth that
+holds computer control right now. All fields are `Serialize`, so a Tauri command can return the
 snapshot as JSON directly.
 
 ## What survives a restart
 
 `settings.json` holds, next to the settings and `settings_rev`:
 
-- the confirmed pairing without its token (`identity`: synth id, url and the
-  last friendly name). The token stays in the `SecretStore`; a stored
-  pairing whose token is gone counts as not paired;
-- durable grants ("always" and until-time). Session grants are memory only;
+- the confirmed pairings without their tokens (`identities`: synth id, url,
+  the last friendly name, `source` `account|code`, the platform's hub id).
+  Each token stays in the `SecretStore` under `pairing_token:<synth_id>`; a
+  stored pairing whose token is gone is not a link;
+- the platform account (`account`: id, email, name, whether the owner
+  confirmed on this computer, the synths the owner disconnected here). The
+  app's token is in the `SecretStore` under `account_token`;
+- durable grants ("always" and until-time), each with its synth. Session
+  grants are memory only;
 - this month's egress count, so the monthly cap is not reset by a restart
   (written at most every 30 s or 4 MiB, and on `flush()`).
 
 The journal ring is refilled from the tail of `journal.jsonl` on start.
-`unpair` / `wipe_local` erase the pairing and every grant.
+`unpair_synth` erases one synth's pairing and grants; `unpair` /
+`wipe_local` erase every pairing and every grant.
+
+A file of an app before 0.1.13 (one `identity`, grants and linked browsers
+without a synth, the token under the bare `pairing_token` key) is moved
+once, at the first start (`Persisted::migrate_links` in `settings::load`,
+the token in `Core::new`): the pairing becomes the first of `identities`,
+the grants and the linked browsers become that synth's, the token moves to
+`pairing_token:<synth_id>` (written, read back, then the bare key is
+removed) and the file is written in the new shape at once. The old field
+is read, never written. If the app stops between moving the token and
+writing the file, the next start finds the token in place and only removes
+the bare key. If the keychain refuses the write, the bare key is
+kept and the link reads its token from there (`LinkSlot::legacy_token`);
+every start tries the move again (with exactly one stored pairing, a token
+under the bare key is that pairing's), and a new token for the link or
+unlinking it removes the bare key.
+
+## Several synths
+
+One `Core` holds one `LinkSlot` per synth (`slot.rs`): the synth's id, url,
+source, hub id, name, its hello_ack, its state, its control stream's
+requests and its reconnect loop. Everything else (the settings, the
+journal, the approver, computer control, the browser link) is the
+computer's and shared. Every stream a link serves runs inside a task-local
+`PEER` (that link's slot), so the policy code knows which synth asks:
+
+- grants are per synth (`GrantStore` keyed by synth id): an answer given to
+  Mia is never an answer to Maya, and unlinking one synth drops only its
+  grants;
+- the approval window and the journal name the synth (`ApprovalRequest.synth`,
+  `Entry.synth`);
+- a browser is linked to one synth's vault (`StoredBrowser.synth_id`), is
+  asked for cookies only on that synth's behalf, and is unlinked only when
+  that synth goes;
+- computer control is held by one synth at a time. The synth whose action
+  went to the driver last holds it while it acts and for `LEASE_QUIET`
+  (60 s) after its last action. Meanwhile another synth may LOOK (the tools
+  in `cua_apps::LOOK_ONLY_TOOLS`: `list_apps`, `list_windows`,
+  `get_desktop_state`, `get_accessibility_tree`, `get_window_state`,
+  `verify_state`, `zoom`, `debug_window_info`, `get_browser_state`,
+  `get_screen_size`, `get_cursor_position`, `get_agent_cursor_state`,
+  `clipboard_read`, `check_permissions`, `health_report`, `get_config`,
+  `start_session`, `end_session`, `get_session`, `list_sessions`,
+  `get_session_state`, `escalate_session`, `get_recording_state`,
+  `parse_visual_regions`, `history_status`, `history_query`, `probe`), and
+  every other tool, a tool of a newer driver included, is an ACTION and is
+  refused with one line: `unavailable: Mia is controlling this computer
+  right now; try again in a minute` (`error.data.code` `computer_busy`, no
+  class: nothing about the call was decided). The check and the take
+  happen under one lock at the moment the action goes to the driver.
+  Unlinking the driver frees the computer at once.
+
+A host call with no link of its own (a command from the UI, a test) is the
+only link's when there is one, and nobody's when there are several.
+
+A synth that refuses the token (HTTP 401 at the dial) is not dialed again
+(connect.md: re-pair needed): the link reads `needs_repair` and waits for a
+new token (`pair_confirm` with a new code, `reconnect_synth`, or the
+account's connect), for the link to be removed, or for shutdown. An
+account link first asks the platform once for a fresh token by itself.
+
+## Pairing and the platform account (`account.rs`)
+
+The app talks to the platform's app API only, with its own token
+(`snthapp_...`, from the sign-in; never a browser session, never a synth's
+portal token). Calls, exactly:
+
+| Call | Body | Answer |
+|---|---|---|
+| browser: `GET <platform>/connect/login?state&code_challenge&device_id&device_name&os&app_version` | | the browser comes back to `snth://login?code=cac_...&state=...` or `snth://login?error=denied&state=...` |
+| `POST /api/app/v1/token` | `{code, code_verifier, device_id}` | `{token: "snthapp_...", account: {id, email, name}}` |
+| `GET /api/app/v1/me` (Bearer) | | `{account, synths: [{hub_id, synth_id, name, avatar_url?}]}`; 401 = signed out |
+| `POST /api/app/v1/synths/<hub_id>/<synth_id>/connect` (Bearer) | `{}` | `{synth_id, synth_url, synth_name, companion_token}`; 409 `connect_unavailable` (+ `reason`), 409 `synth_outdated`, 410 `synth_unlinked`, 502 `synth_unreachable`: kept per synth and shown, no retry loop (the next sync tries again) |
+| `POST /api/app/v1/link-code` (Bearer) | `{code}` | `{synth_id, synth_url, synth_name, companion_token, linked, reason?}`; 404/410/400/429 like the hub's claim-pair |
+| `POST /api/app/v1/logout` (Bearer) | `{}` | anything 2xx; errors only logged |
+
+`state` and the verifier are 32 random bytes each (base64url), memory only,
+for 10 minutes; the challenge is base64url(SHA-256(verifier)). There is one
+link per synth: a code link to a synth the account lists becomes the
+account's link without a new token (the synth would drop the old one when
+it mints), and a token minted for a synth that has a link replaces that
+link's token.
 
 ## Settings + presets
 

@@ -14,7 +14,14 @@ const COMMANDS: &[&str] = &[
     "pair_confirm",
     "pair_cancel",
     "unpair",
+    "unpair_synth",
+    "reconnect_synth",
     "finish_onboarding",
+    // the platform account
+    "login_cancel",
+    "account_connect",
+    "account_sync",
+    "sign_out",
     // settings
     "apply_preset",
     "update_settings",
@@ -34,6 +41,8 @@ const COMMANDS: &[&str] = &[
     "cua_check",
     "cua_grant_permissions",
     "cua_install",
+    "computer_apps",
+    "cua_health_check",
     // the owner's own apps
     "apps_check",
     "apps_request_permission",

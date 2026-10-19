@@ -5,7 +5,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use connect_core::pairing::parse_deep_link;
+use connect_core::pairing::{parse_deep_link, DeepLink};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 
 use crate::state::Ctx;
@@ -63,18 +63,38 @@ async fn stop_everything(ctx: &Arc<Ctx>) {
     ctx.core.flush();
 }
 
-/// `snth://pair?code=XXXXXX`. Any web page can open such a link, so this
-/// only brings the window up and leaves the code for the UI to collect
-/// (`ui_ready`). The UI then asks the hub who the code belongs to and
-/// shows the confirmation screen; the token is kept and the link opened
-/// only after the owner clicks Connect there.
+/// A `snth://` link. Any web page can open one, so:
+///
+/// - `snth://pair?code=XXXXXX` only brings the window up and leaves the
+///   code for the UI to collect (`ui_ready`). The UI then asks who the
+///   code belongs to and shows the confirmation screen; the token is kept
+///   and the link opened only after the owner clicks Connect there.
+/// - `snth://login?code=...&state=...` finishes a sign-in only when its
+///   state is the one this app is waiting for (the core checks it and
+///   journals any other); then the window comes up with the account's
+///   synths to confirm. Nothing is linked by the link itself.
 pub fn handle_deep_link(ctx: &Arc<Ctx>, url: &str) {
-    let Some(code) = parse_deep_link(url) else {
-        return;
-    };
-    *ctx.pair_code.lock().unwrap() = Some(code);
-    windows::show_main(&ctx.app);
-    ui::emit(&ctx.app, UiEvent::PairLink);
+    match parse_deep_link(url) {
+        Some(DeepLink::Pair(code)) => {
+            *ctx.pair_code.lock().unwrap() = Some(code);
+            windows::show_main(&ctx.app);
+            ui::emit(&ctx.app, UiEvent::PairLink);
+        }
+        Some(DeepLink::Login { code, state }) => {
+            let ctx = ctx.clone();
+            tauri::async_runtime::spawn(async move {
+                match ctx.core.login_complete(code, &state).await {
+                    // A link this app did not ask for: nothing to show.
+                    Err(e) if e == "state_mismatch" => {}
+                    _ => {
+                        windows::show_main(&ctx.app);
+                        crate::state::emit_state(&ctx);
+                    }
+                }
+            });
+        }
+        None => {}
+    }
 }
 
 /// Register the stop shortcut with the OS. An empty string turns it off.

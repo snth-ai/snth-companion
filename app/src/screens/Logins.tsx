@@ -15,46 +15,55 @@ import { useCallback, useEffect, useState } from "react";
 import { backend } from "../backend";
 import type { BrowserRow, CookiesMode, Grant, VaultSite } from "../backend/types";
 import { formatDay, grantTime } from "../lib/format";
-import { useStore } from "../lib/store";
-import { ChoiceList, More, Notice, Section, Sheet, SwitchRow } from "../ui/controls";
+import { grantSynth, linkName, useStore } from "../lib/store";
+import { ChoiceList, More, Notice, Section, Segmented, Sheet, SwitchRow } from "../ui/controls";
 import { IconCheck } from "../ui/icons";
 
 interface SiteRow {
   site: string;
   password: VaultSite | null;
-  session: Grant | null;
+  /** One per synth the owner allowed the site for. */
+  sessions: Grant[];
 }
 
 /** One row per site, from both sides. */
 function bySite(passwords: VaultSite[], sessions: Grant[]): SiteRow[] {
   const rows = new Map<string, SiteRow>();
-  for (const p of passwords) rows.set(p.site, { site: p.site, password: p, session: null });
+  for (const p of passwords) rows.set(p.site, { site: p.site, password: p, sessions: [] });
   for (const g of sessions) {
     const row = rows.get(g.scope);
-    if (row) row.session = g;
-    else rows.set(g.scope, { site: g.scope, password: null, session: g });
+    if (row) row.sessions.push(g);
+    else rows.set(g.scope, { site: g.scope, password: null, sessions: [g] });
   }
   return [...rows.values()].sort((a, b) => a.site.localeCompare(b.site));
 }
 
 export function Logins() {
-  const { state, s, lang, name, edit, act, set } = useStore();
+  const { state, s, lang, name: firstName, edit, act, set } = useStore();
   const c = state.core.settings.cookies;
   const t = s.logins;
-  const { vault, browsers, link_ready } = state.logins;
+  const { vault, browsers, link_ready, vault_synth } = state.logins;
+  const links = state.core.links;
+  const several = links.length > 1;
+  // The vault on show is one synth's: its name goes into the sentences
+  // about the vault.
+  const vaultLink = links.find((l) => l.synth_id === vault_synth) ?? links[0];
+  const name = vaultLink ? linkName(vaultLink) : firstName;
+  const [choosing, setChoosing] = useState<BrowserRow | null>(null);
+  const [chosen, setChosen] = useState<string>("");
   const [asking, setAsking] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
   const [unlinking, setUnlinking] = useState<BrowserRow | null>(null);
   const [linking, setLinking] = useState<string | null>(null);
   const [linkError, setLinkError] = useState<{ install: string; code: string } | null>(null);
-  const linked = state.core.link_state === "linked";
+  const linked = vaultLink?.state === "linked";
 
   // What the vault holds is asked of the synth when the page opens, and
   // again when the link comes back.
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (synthId: string | null = null) => {
     setAsking(true);
     try {
-      set(await backend.loginsRefresh());
+      set(await backend.loginsRefresh(synthId));
     } catch {
       /* the last answer stays */
     } finally {
@@ -63,7 +72,8 @@ export function Logins() {
   }, [set]);
 
   useEffect(() => {
-    void refresh();
+    void refresh(vault_synth);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refresh, linked]);
 
   // Safari's extension ships inside the app, and only the owner can
@@ -101,12 +111,12 @@ export function Logins() {
               ? { text: t.vaultUnavailable(name), retry: false }
               : { text: t.vaultFailed, retry: true };
 
-  const link = async (install: string) => {
+  const link = async (install: string, synthId: string | null) => {
     setLinking(install);
     setLinkError(null);
     try {
-      set(await backend.browserLink(install));
-      void refresh();
+      set(await backend.browserLink(install, synthId));
+      void refresh(vault_synth);
     } catch (e) {
       setLinkError({ install, code: String(e) });
     } finally {
@@ -124,6 +134,17 @@ export function Logins() {
       </Section>
 
       <Section title={t.sitesTitle} note={rows.length > 0 ? t.sitesNote(name) : undefined}>
+        {several ? (
+          <div className="onb-actions" style={{ marginTop: 0, marginBottom: 8 }}>
+            <span>{s.account.vaultOf}</span>
+            <Segmented<string>
+              label={s.account.vaultOf}
+              value={vault_synth ?? links[0]!.synth_id}
+              onChange={(id) => void refresh(id)}
+              options={links.map((l) => ({ value: l.synth_id, title: linkName(l) }))}
+            />
+          </div>
+        ) : null}
         <div className="group">
           {rows.length === 0 ? (
             <div className="empty">{t.sitesEmpty(name)}</div>
@@ -140,15 +161,18 @@ export function Logins() {
                     </button>
                   </div>
                 ) : null}
-                {row.session ? (
-                  <div className="login-line">
-                    <span className="login-what">{t.session}</span>
-                    <span className="login-meta">{grantTime(row.session, s, lang)}</span>
-                    <button type="button" className="btn small" onClick={() => void act(() => backend.revokeGrant("cookies", row.site))}>
+                {row.sessions.map((g) => (
+                  <div className="login-line" key={g.synth_id}>
+                    <span className="login-what">
+                      {t.session}
+                      {grantSynth(state, g) ? <> <span className="tag">{grantSynth(state, g)}</span></> : null}
+                    </span>
+                    <span className="login-meta">{grantTime(g, s, lang)}</span>
+                    <button type="button" className="btn small" onClick={() => void act(() => backend.revokeGrant("cookies", row.site, g.synth_id))}>
                       {t.revoke}
                     </button>
                   </div>
-                ) : null}
+                ))}
               </div>
             ))
           )}
@@ -157,7 +181,7 @@ export function Logins() {
           <div className="login-vault-note" role="status">
             <span>{vaultNote.text}</span>
             {vaultNote.retry ? (
-              <button type="button" className="btn small" disabled={asking} onClick={() => void refresh()}>
+              <button type="button" className="btn small" disabled={asking} onClick={() => void refresh(vault_synth)}>
                 {t.retry}
               </button>
             ) : null}
@@ -180,7 +204,10 @@ export function Logins() {
             browsers.map((b) => (
               <div className="row app-row" key={b.install ?? b.browser}>
                 <div className="row-text">
-                  <div className="row-title">{b.name}</div>
+                  <div className="row-title">
+                    {b.name}
+                    {several && b.state === "linked" && b.synth_name ? <> <span className="tag">{b.synth_name}</span></> : null}
+                  </div>
                   <div className="row-desc">{browserLine(b, t, name)}</div>
                   {b.state === "missing" ? <div className="row-desc">{missingHint(b, t)}</div> : null}
                   {b.state === "linked" ? (
@@ -216,7 +243,18 @@ export function Logins() {
                     {t.unlink}
                   </button>
                 ) : b.connected ? (
-                  <button type="button" className="btn small strong" disabled={linking !== null} onClick={() => void link(b.install!)}>
+                  <button
+                    type="button"
+                    className="btn small strong"
+                    disabled={linking !== null}
+                    onClick={() => {
+                      // More than one synth: the owner picks whose vault.
+                      if (several) {
+                        setChosen(vault_synth ?? links[0]!.synth_id);
+                        setChoosing(b);
+                      } else void link(b.install!, links[0]?.synth_id ?? null);
+                    }}
+                  >
                     {linking === b.install ? t.linking : t.linkBrowser}
                   </button>
                 ) : (
@@ -276,7 +314,7 @@ export function Logins() {
                 onClick={() => {
                   const site = removing;
                   setRemoving(null);
-                  void act(() => backend.vaultForget(site));
+                  void act(() => backend.vaultForget(site, vault_synth));
                 }}
               >
                 {t.removeConfirm}
@@ -285,6 +323,40 @@ export function Logins() {
           }
         >
           <p style={{ marginTop: 10, lineHeight: 1.45 }}>{t.removeBody(name, removing)}</p>
+        </Sheet>
+      ) : null}
+
+      {choosing ? (
+        <Sheet
+          title={s.account.whichSynthTitle(choosing.name)}
+          onCancel={() => setChoosing(null)}
+          actions={
+            <>
+              <button type="button" className="btn" onClick={() => setChoosing(null)}>
+                {s.common.cancel}
+              </button>
+              <button
+                type="button"
+                className="btn primary"
+                data-autofocus
+                onClick={() => {
+                  const install = choosing.install!;
+                  setChoosing(null);
+                  void link(install, chosen);
+                }}
+              >
+                {t.linkBrowser}
+              </button>
+            </>
+          }
+        >
+          <p style={{ marginTop: 10, marginBottom: 12, lineHeight: 1.45 }}>{s.account.whichSynthBody}</p>
+          <ChoiceList<string>
+            label={s.account.whichSynthTitle(choosing.name)}
+            value={chosen}
+            onChange={setChosen}
+            options={links.map((l) => ({ value: l.synth_id, title: linkName(l), desc: s.link[l.state] }))}
+          />
         </Sheet>
       ) : null}
 

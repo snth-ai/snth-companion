@@ -340,5 +340,5 @@ async fn a_preset_turns_it_off_and_permission_request_cannot_turn_it_on() {
         .await
         .unwrap_err();
     assert!(e.starts_with("denied: commands are asked about one by one"), "{e}");
-    assert!(!core.shared().grants().allows("shell", "rm -rf /"));
+    assert!(!core.shared().grants().allows("", "shell", "rm -rf /"));
 }

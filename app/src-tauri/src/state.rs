@@ -23,6 +23,14 @@ pub const HUB_URL: &str = match option_env!("SNTH_HUB_URL") {
     None => "https://hub.snth.ai",
 };
 
+/// The platform the owner's account lives on (sign-in, the app's API).
+/// Fixed at build time (`SNTH_PLATFORM_URL=... npm run tauri build`), with
+/// this default.
+pub const PLATFORM_URL: &str = match option_env!("SNTH_PLATFORM_URL") {
+    Some(u) => u,
+    None => "https://platform.snth.ai",
+};
+
 /// The updater key placeholder in tauri.conf.json. While it is there the
 /// updater plugin is not loaded and "check for updates" says so.
 pub const UPDATER_KEY_PLACEHOLDER: &str = "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY";
@@ -44,8 +52,9 @@ pub struct Ctx {
     /// Folders the owner picked in the native dialog during this run, plus
     /// the suggested ones. The webview can only add a folder from here.
     pub offered_roots: Mutex<HashSet<PathBuf>>,
-    /// The last link detail the core reported (why it is reconnecting).
-    pub link_detail: Mutex<(Option<LinkState>, String)>,
+    /// The last state and detail each link reported (only a change is
+    /// news for the UI).
+    pub link_detail: Mutex<std::collections::HashMap<String, (LinkState, String)>>,
     /// A code from a `snth://pair` link, waiting for the UI to collect it.
     pub pair_code: Mutex<Option<String>>,
     /// Wakes the helper supervisor: the owner clicked "try again now".
@@ -53,8 +62,11 @@ pub struct Ctx {
     /// When the next automatic helper install attempt is due (unix
     /// seconds), while one is waiting.
     pub helper_retry_at: Mutex<Option<i64>>,
-    /// Wakes the link supervisor after a new pairing.
+    /// Wakes the link supervisor after a new pairing: it starts a loop
+    /// for every link that has none.
     pub relink: Notify,
+    /// Wakes the account sync (the window came up).
+    pub account_wake: Notify,
     pub shutdown: watch::Sender<bool>,
     pub tray: Mutex<Option<TrayItems>>,
     pub device_name: String,
@@ -96,6 +108,9 @@ impl Ctx {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GrantDto {
+    /// The synth the answer was given to, and its name.
+    pub synth_id: String,
+    pub synth_name: Option<String>,
     pub capability: String,
     pub scope: String,
     /// 0 = always, -1 = until the app quits, else the unix second it ends.
@@ -106,6 +121,25 @@ pub struct GrantDto {
 pub struct PendingDto {
     pub synth_id: String,
     pub synth_url: String,
+    /// The synth's name when the platform said it.
+    pub synth_name: Option<String>,
+    /// A code redeemed through the signed-in account: did the platform
+    /// tie the synth to the account (None: the code went to the hub).
+    pub linked_to_account: Option<bool>,
+    /// Why not ("synth_linked_elsewhere").
+    pub reason: Option<String>,
+}
+
+impl PendingDto {
+    pub fn of(p: connect_core::Pending) -> PendingDto {
+        PendingDto {
+            synth_name: Some(p.synth_name).filter(|n| !n.is_empty()),
+            synth_id: p.synth_id,
+            synth_url: p.synth_url,
+            linked_to_account: p.linked_to_account,
+            reason: p.reason,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -146,7 +180,8 @@ pub struct UiState {
     pub core: Snapshot,
     /// Why the link is not up, in the core's words (diagnostics only).
     pub link_detail: String,
-    /// The synth refused our key: the owner has to unlink and pair again.
+    /// Every link was refused by its synth: the owner has to link again
+    /// (each link says so itself in `core.links`).
     pub needs_repair: bool,
     /// A claimed code waiting for the owner's confirmation.
     pub pending: Option<PendingDto>,
@@ -166,24 +201,31 @@ pub struct UiState {
     pub look_support: connect_core::cua_look::Support,
     /// The Logins page: the browsers and what the synth's vault holds.
     pub logins: crate::logins::LoginsState,
+    /// The platform account: signed in or not, the sign-in in progress,
+    /// the account's synths.
+    pub account: connect_core::account::AccountView,
     pub prefs: PrefsDto,
     pub app: AppInfo,
 }
 
 pub async fn build_state(ctx: &Ctx) -> UiState {
     let core = ctx.core.snapshot().await;
-    let (_, link_detail) = ctx.link_detail.lock().unwrap().clone();
-    let needs_repair = core.paired
-        && core.link_state != LinkState::Linked
-        && link_detail.contains("re-pair needed");
+    // Why the links are not up, one line per link that is not.
+    let link_detail = core
+        .links
+        .iter()
+        .filter(|l| l.state != LinkState::Linked && !l.detail.is_empty())
+        .map(|l| format!("{}: {}", l.synth_id, l.detail))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let needs_repair = !core.links.is_empty() && core.links.iter().all(|l| l.state == LinkState::NeedsRepair);
     let prefs = ctx.prefs.lock().unwrap().clone();
+    let names: std::collections::HashMap<String, Option<String>> =
+        core.links.iter().map(|l| (l.synth_id.clone(), l.synth_name.clone())).collect();
     UiState {
         link_detail,
         needs_repair,
-        pending: ctx.core.pending().map(|p| PendingDto {
-            synth_id: p.synth_id,
-            synth_url: p.synth_url,
-        }),
+        pending: ctx.core.pending().map(PendingDto::of),
         helper: ctx.core.cua_helper_state(),
         helper_retry_at: *ctx.helper_retry_at.lock().unwrap(),
         update: ctx.updates.status(prefs.auto_update),
@@ -191,11 +233,18 @@ pub async fn build_state(ctx: &Ctx) -> UiState {
             .core
             .grant_list()
             .into_iter()
-            .map(|(capability, scope, until)| GrantDto { capability, scope, until })
+            .map(|g| GrantDto {
+                synth_name: names.get(&g.synth_id).cloned().flatten(),
+                synth_id: g.synth_id,
+                capability: g.capability,
+                scope: g.scope,
+                until: g.until,
+            })
             .collect(),
         apps: ctx.core.apps_views(),
         look_support: ctx.core.look_support(),
         logins: crate::logins::state(ctx),
+        account: ctx.core.account_view(),
         prefs: PrefsDto {
             onboarded: prefs.onboarded,
             language: prefs.language,
@@ -220,6 +269,12 @@ pub async fn build_state(ctx: &Ctx) -> UiState {
         },
         core,
     }
+}
+
+/// Tell the UI to read the state again (and the tray to follow).
+pub fn emit_state(ctx: &Ctx) {
+    crate::tray::refresh(ctx);
+    crate::ui::emit(&ctx.app, crate::ui::UiEvent::State);
 }
 
 /// Which preset, if any, these settings are exactly (so the UI can show

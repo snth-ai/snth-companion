@@ -95,7 +95,8 @@ pub fn sync(ctx: &Ctx) {
     let Ok(locations) = Locations::system(&ctx.data_dir) else {
         return;
     };
-    if !ctx.core.is_paired() {
+    // Registered while there is at least one link, whichever synth.
+    if ctx.core.link_ids().is_empty() {
         for (browser, result) in locations.remove() {
             if let Err(e) = result {
                 connect_core::logln!("browser link: could not unregister from {}: {e}", browser.name);
@@ -183,6 +184,9 @@ pub struct BrowserRow {
     /// settings: that browser asks nothing per site any more.
     pub all_sites: bool,
     pub last_seen: i64,
+    /// The synth whose vault a linked browser is linked to, and its name.
+    pub synth_id: Option<String>,
+    pub synth_name: Option<String>,
     /// Safari only: where the extension that ships in this app stands in
     /// Safari, and whether the stand-alone one is installed too. For a
     /// "missing" row it says what the owner has to do next.
@@ -195,10 +199,17 @@ const SAFARI: &str = connect_host::safari::BROWSER_ID;
 /// row for each installed browser none has talked from, and Safari's (on
 /// a Mac whose copy of the app carries the Safari extension) whether or
 /// not its extension has talked yet.
-pub fn browser_rows(views: Vec<BrowserView>, installed: &[&str], safari: Option<SafariInfo>) -> Vec<BrowserRow> {
+pub fn browser_rows(
+    views: Vec<BrowserView>,
+    installed: &[&str],
+    safari: Option<SafariInfo>,
+    synth_name: impl Fn(&str) -> Option<String>,
+) -> Vec<BrowserRow> {
     let mut rows: Vec<BrowserRow> = views
         .into_iter()
         .map(|v| BrowserRow {
+            synth_name: v.synth_id.as_deref().and_then(&synth_name),
+            synth_id: v.synth_id,
             name: browser_name(&v.browser).to_string(),
             state: if v.linked { "linked" } else { "installed" },
             install: Some(v.install),
@@ -221,6 +232,8 @@ pub fn browser_rows(views: Vec<BrowserView>, installed: &[&str], safari: Option<
         sites: Vec::new(),
         all_sites: false,
         last_seen: 0,
+        synth_id: None,
+        synth_name: None,
         safari,
     };
     for id in installed {
@@ -282,22 +295,31 @@ pub fn vault_failure(error: &str) -> VaultView {
     }
 }
 
+/// What one synth's vault holds, as last asked, and which synth that is.
 #[derive(Default)]
-pub struct VaultCache(Mutex<VaultView>);
+pub struct VaultCache(Mutex<(VaultView, Option<String>)>);
 
 impl VaultCache {
     pub fn get(&self) -> VaultView {
-        self.0.lock().unwrap().clone()
+        self.0.lock().unwrap().0.clone()
+    }
+    /// The synth the view is of.
+    pub fn synth(&self) -> Option<String> {
+        self.0.lock().unwrap().1.clone()
     }
     pub fn set(&self, v: VaultView) {
-        *self.0.lock().unwrap() = v;
+        self.0.lock().unwrap().0 = v;
     }
-    pub fn ready(&self, list: VaultList) {
-        self.set(VaultView::Ready { sites: list.sites, devices: list.devices.len(), fetched_at: now_unix() });
+    /// A view of this synth's vault (None = the only synth there is).
+    pub fn set_for(&self, synth: Option<String>, v: VaultView) {
+        *self.0.lock().unwrap() = (v, synth);
+    }
+    pub fn ready(&self, synth: Option<String>, list: VaultList) {
+        self.set_for(synth, VaultView::Ready { sites: list.sites, devices: list.devices.len(), fetched_at: now_unix() });
     }
     /// One entry was removed: reflect it without another round trip.
     pub fn drop_site(&self, site: &str) {
-        if let VaultView::Ready { sites, .. } = &mut *self.0.lock().unwrap() {
+        if let VaultView::Ready { sites, .. } = &mut self.0.lock().unwrap().0 {
             sites.retain(|s| s.site != site);
         }
     }
@@ -311,6 +333,8 @@ pub struct LoginsState {
     /// holds it, or it could not start.
     pub link_ready: bool,
     pub vault: VaultView,
+    /// The synth whose vault `vault` describes (None while unknown).
+    pub vault_synth: Option<String>,
 }
 
 pub fn state(ctx: &Ctx) -> LoginsState {
@@ -320,11 +344,16 @@ pub fn state(ctx: &Ctx) -> LoginsState {
     if views.iter().any(|v| v.browser == SAFARI && v.connected) {
         ctx.safari.heard_from();
     }
+    let links = ctx.core.links();
+    let name_of = |id: &str| {
+        links.iter().find(|l| l.synth_id == id).map(|l| l.synth_name.clone().unwrap_or_else(|| l.synth_id.clone()))
+    };
     LoginsState {
-        browsers: browser_rows(views, &installed_browsers(&ctx.data_dir), ctx.safari.info()),
+        browsers: browser_rows(views, &installed_browsers(&ctx.data_dir), ctx.safari.info(), name_of),
         // Both doors: the one the Chromium helper uses and Safari's.
         link_ready: ctx.browser_link.lock().unwrap().is_none() && ctx.safari.door.lock().unwrap().is_none(),
         vault: ctx.vault.get(),
+        vault_synth: ctx.vault.synth().or_else(|| links.first().map(|l| l.synth_id.clone())),
     }
 }
 
@@ -338,6 +367,7 @@ mod tests {
             browser: browser.into(),
             connected,
             linked,
+            synth_id: linked.then(|| "mia".to_string()),
             ext_version: "0.2.0".into(),
             sites: vec![],
             all_sites: false,
@@ -350,7 +380,7 @@ mod tests {
         use crate::safari::Enabled;
         let off = SafariInfo { enabled: Enabled::Off, standalone: true };
         // Shipped in the app, never heard from: the row says where it stands.
-        let rows = browser_rows(vec![view("aa", "chrome", true, true)], &["chrome"], Some(off));
+        let rows = browser_rows(vec![view("aa", "chrome", true, true)], &["chrome"], Some(off), |_| None);
         let got: Vec<(&str, &str, Option<SafariInfo>)> = rows.iter().map(|r| (r.browser.as_str(), r.state, r.safari)).collect();
         assert_eq!(got, [("chrome", "linked", None), ("safari", "missing", Some(off))]);
         assert_eq!(rows[1].name, "Safari");
@@ -362,6 +392,7 @@ mod tests {
             vec![view("bb", "safari", false, true), view("cc", "browser", false, true), view("aa", "chrome", true, true)],
             &["chrome"],
             Some(on),
+            |_| None,
         );
         let got: Vec<(&str, &str, Option<SafariInfo>)> = rows.iter().map(|r| (r.browser.as_str(), r.state, r.safari)).collect();
         // Chromium browsers, then Safari, then one the app has no name for.
@@ -369,8 +400,8 @@ mod tests {
 
         // A copy of the app without the extension (a debug build, Windows,
         // Linux) shows no Safari at all.
-        assert!(browser_rows(vec![], &[], None).is_empty());
-        assert!(browser_rows(vec![view("aa", "chrome", true, true)], &["chrome"], None).iter().all(|r| r.browser != "safari"));
+        assert!(browser_rows(vec![], &[], None, |_| None).is_empty());
+        assert!(browser_rows(vec![view("aa", "chrome", true, true)], &["chrome"], None, |_| None).iter().all(|r| r.browser != "safari"));
     }
 
     #[test]
@@ -379,6 +410,7 @@ mod tests {
             vec![view("bb", "chrome", false, true), view("aa", "chrome", true, false), view("cc", "browser", false, true)],
             &["chrome", "edge"],
             None,
+            |id| (id == "mia").then(|| "Mia".to_string()),
         );
         let got: Vec<(&str, &str, Option<&str>)> = rows.iter().map(|r| (r.browser.as_str(), r.state, r.install.as_deref())).collect();
         assert_eq!(
@@ -396,7 +428,7 @@ mod tests {
         assert_eq!(rows[2].name, "Microsoft Edge");
         assert_eq!(rows[3].name, "Browser");
         // No browser installed and nothing heard: nothing to show.
-        assert!(browser_rows(vec![], &[], None).is_empty());
+        assert!(browser_rows(vec![], &[], None, |_| None).is_empty());
     }
 
     #[test]
@@ -414,7 +446,7 @@ mod tests {
     fn the_vault_cache_drops_a_removed_site() {
         let cache = VaultCache::default();
         assert_eq!(cache.get(), VaultView::Unknown);
-        cache.ready(VaultList {
+        cache.ready(None, VaultList {
             sites: vec![
                 VaultSite { site: "a.com".into(), has_totp: false, updated: 1, last_used: 0, use_count: 0 },
                 VaultSite { site: "b.com".into(), has_totp: true, updated: 2, last_used: 3, use_count: 4 },

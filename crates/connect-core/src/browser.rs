@@ -246,8 +246,9 @@ struct SessionState {
     all_sites: bool,
     /// A pairing question from it is being handled.
     pairing: bool,
-    /// When a code went out to it.
+    /// When a code went out to it, and from which synth's vault.
     code_sent: Option<Instant>,
+    code_synth: String,
     last_pair: Option<Instant>,
 }
 
@@ -297,13 +298,6 @@ impl Hub {
         self.greeted().into_iter().rev().find(|s| s.state.lock().unwrap().install == install)
     }
 
-    /// Say something to every connected extension.
-    fn tell_all(&self, msg: &Value) {
-        for s in self.greeted() {
-            s.send(msg.clone());
-        }
-    }
-
     fn remove(&self, id: u64) {
         self.sessions.lock().unwrap().retain(|s| s.id != id);
         // Whoever waited for this extension gets no answer.
@@ -348,9 +342,12 @@ pub struct BrowserView {
     pub browser: String,
     /// Its extension is talking to the app right now.
     pub connected: bool,
-    /// The owner linked it here and it holds a vault pairing of this
-    /// synth. Only a linked browser is asked for cookies.
+    /// The owner linked it here and it holds a vault pairing of a synth
+    /// (`synth_id`). Only a linked browser is asked for cookies, and only
+    /// for its own synth.
     pub linked: bool,
+    /// The synth whose vault it is linked to (None while not linked).
+    pub synth_id: Option<String>,
     pub ext_version: String,
     /// The sites it may hand cookies of (known while connected).
     pub sites: Vec<String>,
@@ -404,6 +401,9 @@ pub enum PairRefusal {
     SynthOutdated,
     /// The extension is paired with a vault this synth does not know.
     OtherSynth,
+    /// The computer is linked to several synths: the owner picks the one
+    /// in the app (Logins), not from the browser.
+    ChooseSynth,
     Failed,
 }
 
@@ -417,6 +417,7 @@ impl PairRefusal {
             PairRefusal::SynthOffline => "synth_offline",
             PairRefusal::SynthOutdated => "synth_outdated",
             PairRefusal::OtherSynth => "other_synth",
+            PairRefusal::ChooseSynth => "choose_synth",
             PairRefusal::Failed => "failed",
         }
     }
@@ -493,19 +494,35 @@ fn parse_vault_list(v: &Value) -> VaultList {
 }
 
 impl Shared {
-    fn synth_label(&self) -> String {
-        if let Some(ack) = self.synth.read().unwrap().as_ref() {
-            if !ack.synth_name.is_empty() {
-                return ack.synth_name.clone();
+    /// The name the browsers are told for a synth: that synth's, else the
+    /// current one's (the only link), else nothing.
+    fn synth_label_for(&self, synth_id: Option<&str>) -> String {
+        let slot = match synth_id.filter(|id| !id.is_empty()) {
+            Some(id) => self.slot(id),
+            None => self.current_slot(),
+        };
+        slot.map(|s| s.display_name()).unwrap_or_default()
+    }
+
+    /// The link a browser request goes to: the synth given, else the only
+    /// link there is.
+    fn vault_slot(&self, synth_id: Option<&str>) -> Result<Arc<crate::slot::LinkSlot>, String> {
+        match synth_id.filter(|id| !id.is_empty()) {
+            Some(id) => self.slot(id).ok_or_else(|| "unavailable: not linked to that synth".to_string()),
+            None => {
+                let links = self.slots();
+                match links.len() {
+                    0 => Err("unavailable: not linked to a synth".into()),
+                    1 => Ok(links[0].clone()),
+                    _ => Err("bad request: say which synth".into()),
+                }
             }
         }
-        self.persisted
-            .read()
-            .unwrap()
-            .identity
-            .as_ref()
-            .map(|i| if i.synth_name.is_empty() { i.synth_id.clone() } else { i.synth_name.clone() })
-            .unwrap_or_default()
+    }
+
+    /// Does any synth hold a standing answer for this?
+    fn grant_allows_any(&self, capability: &str, scope: &str) -> bool {
+        self.slots().iter().any(|s| self.grants.allows(&s.synth_id, capability, scope))
     }
 
     fn stored_browser(&self, install: &str) -> Option<StoredBrowser> {
@@ -539,6 +556,7 @@ impl Shared {
                     browser: "browser".into(),
                     linked: false,
                     device_id: String::new(),
+                    synth_id: String::new(),
                     ext_version: String::new(),
                     last_seen: 0,
                 });
@@ -555,43 +573,80 @@ impl Shared {
 
     /// What every extension is told about the app: linked to whom.
     fn status_for(&self, install: &str) -> Value {
+        let stored = self.stored_browser(install);
+        let own = stored.as_ref().filter(|b| b.linked).map(|b| b.synth_id.clone());
         json!({
             "linked": self.has_synth(),
-            "synth": self.synth_label(),
-            "known": self.stored_browser(install).is_some_and(|b| b.linked),
+            "synth": self.synth_label_for(own.as_deref()),
+            "known": stored.is_some_and(|b| b.linked),
         })
     }
 
-    /// The app was linked to a synth or unlinked from it.
-    pub(crate) fn browsers_link_changed(&self, linked: bool) {
-        if !linked {
-            // The vault pairings were with the synth that is gone now.
-            let mut p = self.persisted.write().unwrap();
-            if p.browsers.iter().any(|b| b.linked) {
-                for b in p.browsers.iter_mut() {
-                    b.linked = false;
-                }
-                self.save_persisted(&p);
-            }
-        }
+    /// The app was linked to one more synth: every extension hears the
+    /// news (a computer that was not linked at all is linked now).
+    pub(crate) fn browsers_synth_added(&self) {
         for s in self.browsers.greeted() {
             let install = s.snapshot().install;
             let mut msg = self.status_for(&install);
             msg["type"] = json!("status");
             s.send(msg);
-            if !linked {
-                // Cookies are a function of the link: with no link no
-                // site stays readable.
+        }
+        self.emit(CoreEvent::Browsers);
+    }
+
+    /// The app was unlinked from one synth (`remaining` links are left).
+    /// The browsers linked to that synth's vault are not linked any more
+    /// and forget the sites they could read; the others keep theirs. With
+    /// no link left, no browser keeps a site.
+    pub(crate) fn browsers_synth_removed(&self, synth_id: &str, remaining: usize) {
+        let unlinked: Vec<String> = {
+            let mut p = self.persisted.write().unwrap();
+            let mut gone = Vec::new();
+            for b in p.browsers.iter_mut() {
+                if b.linked && (b.synth_id == synth_id || remaining == 0) {
+                    b.linked = false;
+                    b.synth_id = String::new();
+                    gone.push(b.install.clone());
+                }
+            }
+            if !gone.is_empty() {
+                self.save_persisted(&p);
+            }
+            gone
+        };
+        for s in self.browsers.greeted() {
+            let install = s.snapshot().install;
+            let mut msg = self.status_for(&install);
+            msg["type"] = json!("status");
+            s.send(msg);
+            if remaining == 0 || unlinked.contains(&install) {
+                // Cookies are a function of the link: a browser whose synth
+                // is gone keeps no site readable.
                 s.send(json!({"type": "sites.clear"}));
             }
         }
         self.emit(CoreEvent::Browsers);
     }
 
-    /// The owner took a site back: no browser keeps the right to read it.
-    pub(crate) fn browsers_revoke_site(&self, site: &str) {
-        if clean_site(site).is_some() {
-            self.browsers.tell_all(&json!({"type": "site.revoke", "site": site}));
+    /// The owner took a site back from one synth: no browser linked to
+    /// that synth keeps the right to read it (nor a browser linked to no
+    /// synth, once no synth has a standing answer for the site).
+    pub(crate) fn browsers_revoke_site(&self, synth_id: &str, site: &str) {
+        if clean_site(site).is_none() {
+            return;
+        }
+        let still_any = self.grant_allows_any("cookies", site);
+        let stored = self.persisted.read().unwrap().browsers.clone();
+        for s in self.browsers.greeted() {
+            let install = s.snapshot().install;
+            let own = stored.iter().find(|b| b.install == install).filter(|b| b.linked).map(|b| b.synth_id.as_str());
+            let take_back = match own {
+                Some(synth) => synth == synth_id,
+                None => !still_any,
+            };
+            if take_back {
+                s.send(json!({"type": "site.revoke", "site": site}));
+            }
         }
     }
 
@@ -600,7 +655,7 @@ impl Shared {
     fn keeps_site(&self, site: &str) -> bool {
         match self.settings().cookies.mode {
             CookiesMode::Auto => true,
-            CookiesMode::AskNew => self.grants().allows("cookies", site),
+            CookiesMode::AskNew => self.grant_allows("cookies", site),
             CookiesMode::Ask => false,
         }
     }
@@ -625,16 +680,18 @@ impl Shared {
         sessions
     }
 
-    /// Connected extensions of browsers the owner linked, the one that
-    /// connected last first.
+    /// Connected extensions of browsers the owner linked to the synth
+    /// that asks, the one that connected last first. A browser linked to
+    /// another synth's vault is never asked for this one.
     fn linked_sessions(&self) -> Vec<Arc<Session>> {
+        let synth = self.current_synth_id();
         let linked: Vec<String> = self
             .persisted
             .read()
             .unwrap()
             .browsers
             .iter()
-            .filter(|b| b.linked)
+            .filter(|b| b.linked && b.synth_id == synth)
             .map(|b| b.install.clone())
             .collect();
         let mut out: Vec<Arc<Session>> = self
@@ -689,7 +746,7 @@ impl Shared {
     async fn cookies_from(self: &Arc<Self>, session: &Arc<Session>, site: &str, wait: Duration, asked: bool) -> ExtensionRead {
         let st = session.snapshot();
         let name = browser_name(&st.browser);
-        let ask = json!({"type": "cookies.get", "site": site, "synth": self.synth_label(), "asked": asked});
+        let ask = json!({"type": "cookies.get", "site": site, "synth": self.synth_label_for(None), "asked": asked});
         let Some(reply) = self.browsers.ask(session, ask, wait).await else {
             return ExtensionRead::NoAnswer(format!(
                 "no answer from the user ({name} is waiting for the owner to confirm {site}; try again once they did)"
@@ -737,7 +794,7 @@ impl Shared {
     /// Link one connected browser to the synth's vault. `ask` = the
     /// request came from the extension, so the owner confirms it here
     /// first; false = the owner clicked "link this browser" in this app.
-    async fn pair(self: &Arc<Self>, session: Arc<Session>, id: u64, ask: bool) -> Result<(), PairRefusal> {
+    async fn pair(self: &Arc<Self>, session: Arc<Session>, id: u64, ask: bool, synth: Option<String>) -> Result<(), PairRefusal> {
         {
             let mut st = session.state.lock().unwrap();
             if st.pairing || st.last_pair.is_some_and(|t| t.elapsed() < PAIR_COOLDOWN) {
@@ -747,7 +804,7 @@ impl Shared {
             }
             st.pairing = true;
         }
-        let result = self.pair_inner(&session, id, ask).await;
+        let result = self.pair_inner(&session, id, ask, synth.as_deref()).await;
         {
             let mut st = session.state.lock().unwrap();
             st.pairing = false;
@@ -759,12 +816,23 @@ impl Shared {
         result
     }
 
-    async fn pair_inner(self: &Arc<Self>, session: &Arc<Session>, id: u64, ask: bool) -> Result<(), PairRefusal> {
+    async fn pair_inner(self: &Arc<Self>, session: &Arc<Session>, id: u64, ask: bool, synth: Option<&str>) -> Result<(), PairRefusal> {
         let st = session.snapshot();
         let name = browser_name(&st.browser);
         if !self.has_synth() {
             return Err(PairRefusal::NotLinked);
         }
+        // Which synth's vault: the one the owner picked in the app, or
+        // the only one there is. From the browser, with several, the
+        // owner picks in the app.
+        let slot = match synth {
+            Some(id) => self.slot(id).ok_or(PairRefusal::NotLinked)?,
+            None => match self.slots().as_slice() {
+                [one] => one.clone(),
+                _ => return Err(PairRefusal::ChooseSynth),
+            },
+        };
+        let label = slot.display_name();
         if self.paused() {
             return Err(PairRefusal::Paused);
         }
@@ -780,7 +848,7 @@ impl Shared {
             // It holds a pairing already (made with a code typed by
             // hand). It is linked here only when that pairing is with
             // THIS synth's vault: the synth lists the browsers it knows.
-            let list = self
+            let list = slot
                 .requests
                 .call("vault.list", json!({}))
                 .await
@@ -792,13 +860,14 @@ impl Shared {
             self.update_browser(&st.install, |b| {
                 b.linked = true;
                 b.device_id = st.device_id.clone();
+                b.synth_id = slot.synth_id.clone();
             });
-            session.send(json!({"type": "pair.linked", "id": id, "synth": self.synth_label()}));
+            session.send(json!({"type": "pair.linked", "id": id, "synth": label}));
             self.journal().record(Entry::new(CAP, "vault.pair", name, "ok"));
             return Ok(());
         }
 
-        let answer = self
+        let answer = slot
             .requests
             .call("vault.pair_code", json!({"browser": st.browser}))
             .await
@@ -807,10 +876,14 @@ impl Shared {
                 PairRefusal::from_link_error(&e)
             })?;
         let code = answer.get("code").and_then(Value::as_str).and_then(clean_code).ok_or(PairRefusal::Failed)?;
-        session.state.lock().unwrap().code_sent = Some(Instant::now());
+        {
+            let mut live = session.state.lock().unwrap();
+            live.code_sent = Some(Instant::now());
+            live.code_synth = slot.synth_id.clone();
+        }
         // The code is short-lived and single use. It goes to the browser
         // the owner just confirmed and is written nowhere.
-        if !session.send(json!({"type": "pair.code", "id": id, "code": code, "synth": self.synth_label()})) {
+        if !session.send(json!({"type": "pair.code", "id": id, "code": code, "synth": label})) {
             return Err(PairRefusal::Failed);
         }
         Ok(())
@@ -818,9 +891,10 @@ impl Shared {
 
     /// The extension redeemed the code at the hub (or failed to).
     fn pair_done(&self, session: &Session, msg: &Value) {
-        let waiting = {
+        let (waiting, synth_id) = {
             let mut st = session.state.lock().unwrap();
-            st.code_sent.take().is_some_and(|t| t.elapsed() < PAIR_WINDOW)
+            let waiting = st.code_sent.take().is_some_and(|t| t.elapsed() < PAIR_WINDOW);
+            (waiting, std::mem::take(&mut st.code_synth))
         };
         if !waiting {
             return; // nobody asked: a "done" out of nowhere links nothing
@@ -840,6 +914,7 @@ impl Shared {
         self.update_browser(&st.install, |b| {
             b.linked = true;
             b.device_id = device_id;
+            b.synth_id = synth_id;
         });
         self.journal().record(Entry::new(CAP, "vault.pair", name, "ok"));
     }
@@ -879,6 +954,7 @@ impl Shared {
             if !paired || (!b.device_id.is_empty() && b.device_id != device_id) {
                 b.linked = false;
                 b.device_id = String::new();
+                b.synth_id = String::new();
             }
         });
         let mut ack = self.status_for(&install);
@@ -891,8 +967,15 @@ impl Shared {
         // the browser. (With "never ask" there are no per-site answers
         // to compare with, so nothing is taken back.)
         if self.settings().cookies.mode != CookiesMode::Auto {
+            let own = self.stored_browser(&install).filter(|b| b.linked).map(|b| b.synth_id);
             for site in sites {
-                if !self.grants().allows("cookies", &site) {
+                // The answers of the synth the browser is linked to; a
+                // browser not linked to one keeps what any synth may read.
+                let allowed = match own.as_deref() {
+                    Some(synth) => self.grants.allows(synth, "cookies", &site),
+                    None => self.grant_allows_any("cookies", &site),
+                };
+                if !allowed {
                     session.send(json!({"type": "site.revoke", "site": site}));
                     session.state.lock().unwrap().sites.retain(|x| *x != site);
                 }
@@ -921,6 +1004,7 @@ impl Shared {
             self.update_browser(&install, |b| {
                 b.linked = false;
                 b.device_id = String::new();
+                b.synth_id = String::new();
             });
         } else {
             self.emit(CoreEvent::Browsers);
@@ -935,7 +1019,7 @@ impl Shared {
                 let id = msg.get("id").and_then(Value::as_u64).unwrap_or(0);
                 let (me, session) = (self.clone(), session.clone());
                 tokio::spawn(async move {
-                    let _ = me.pair(session, id, true).await;
+                    let _ = me.pair(session, id, true, None).await;
                 });
             }
             "pair.done" => self.pair_done(session, &msg),
@@ -1108,6 +1192,7 @@ impl Core {
                     browser: b.browser,
                     connected: session.is_some(),
                     linked: b.linked,
+                    synth_id: Some(b.synth_id).filter(|id| b.linked && !id.is_empty()),
                     ext_version: b.ext_version,
                     sites,
                     all_sites,
@@ -1120,11 +1205,12 @@ impl Core {
     }
 
     /// The owner clicked "link this browser" in the app. The browser's
-    /// extension must be connected.
-    pub async fn browser_link(&self, install: &str) -> Result<(), PairRefusal> {
+    /// extension must be connected. `synth_id`: whose vault (None = the
+    /// only synth there is; with several the owner picks one).
+    pub async fn browser_link(&self, install: &str, synth_id: Option<&str>) -> Result<(), PairRefusal> {
         let shared = self.shared();
         let session = shared.browsers.by_install(install).ok_or(PairRefusal::Failed)?;
-        shared.pair(session, 0, false).await
+        shared.pair(session, 0, false, synth_id.map(str::to_string)).await
     }
 
     /// Unlink one browser: its extension forgets the vault pairing and
@@ -1144,6 +1230,7 @@ impl Core {
         shared.update_browser(install, |b| {
             b.linked = false;
             b.device_id = String::new();
+            b.synth_id = String::new();
         });
         shared
             .journal()
@@ -1153,8 +1240,8 @@ impl Core {
         }
         // Best effort: when the synth is offline the pairing stays at the
         // vault until the owner removes it there (the synth can list it).
-        shared
-            .requests
+        let slot = shared.vault_slot(Some(&stored.synth_id).filter(|id| !id.is_empty()).map(|s| s.as_str()))?;
+        slot.requests
             .call("vault.revoke_device", json!({"device_id": stored.device_id}))
             .await
             .map(|_| ())
@@ -1178,19 +1265,22 @@ impl Core {
     /// Which sites the synth's vault holds a login for, and which
     /// browsers are paired with it. Names and dates only: there is no
     /// request that returns a login.
-    pub async fn vault_list(&self) -> Result<VaultList, String> {
-        let v = self.shared().requests.call("vault.list", json!({})).await?;
+    /// `synth_id` None = the only synth there is.
+    pub async fn vault_list(&self, synth_id: Option<&str>) -> Result<VaultList, String> {
+        let slot = self.shared().vault_slot(synth_id)?;
+        let v = slot.requests.call("vault.list", json!({})).await?;
         Ok(parse_vault_list(&v))
     }
 
-    /// Delete one login from the synth's vault.
-    pub async fn vault_forget(&self, site: &str) -> Result<(), String> {
+    /// Delete one login from a synth's vault.
+    pub async fn vault_forget(&self, site: &str, synth_id: Option<&str>) -> Result<(), String> {
         let shared = self.shared();
+        let slot = shared.vault_slot(synth_id)?;
         let site = short_text(Some(&json!(site)), 253).to_ascii_lowercase();
         if !site.contains('.') || !site.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.') {
             return Err("bad request: not a site".into());
         }
-        let done = shared.requests.call("vault.forget", json!({"site": site})).await;
+        let done = slot.requests.call("vault.forget", json!({"site": site})).await;
         let outcome = match &done {
             Ok(_) => "ok".to_string(),
             Err(e) => format!("failed: {e}"),

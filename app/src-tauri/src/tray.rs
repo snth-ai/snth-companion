@@ -76,7 +76,7 @@ pub fn refresh(ctx: &Ctx) {
         .clone()
         .or(brief.synth_id.clone())
         .unwrap_or_default();
-    let status = i18n::tray_status(lang, brief.link_state, brief.paired, brief.paused, &synth);
+    let status = i18n::tray_status(lang, brief.link_state, brief.links.len(), brief.paused, &synth);
     if let Some(items) = ctx.tray.lock().unwrap().as_ref() {
         let _ = items.status.set_text(&status);
         let _ = items.toggle.set_text(if brief.paused {

@@ -1,7 +1,7 @@
 import { backend } from "../backend";
 import type { NetMode } from "../backend/types";
 import { formatBytes, formatUntil, monthName } from "../lib/format";
-import { useStore } from "../lib/store";
+import { grantSynth, useStore } from "../lib/store";
 import { ChoiceList, ListEditor, Notice, Row, Section, Switch, SwitchRow } from "../ui/controls";
 
 const GB = 1024 * 1024 * 1024;
@@ -30,21 +30,28 @@ export function Internet() {
     ...net.domains.map((d) => ({ key: `d:${d}`, label: d })),
     ...grants
       .filter((g) => !net.domains.includes(g.scope))
-      .map((g) => ({
-        key: `g:${g.scope}`,
-        label: g.scope,
-        tag: g.until === 0 ? t.tagAlways : g.until < 0 ? t.tagSession : t.tagUntil(formatUntil(g.until, lang)),
-      })),
+      .map((g) => {
+        const when = g.until === 0 ? t.tagAlways : g.until < 0 ? t.tagSession : t.tagUntil(formatUntil(g.until, lang));
+        const who = grantSynth(state, g);
+        // The synth id goes into the key: answers are kept per synth.
+        return { key: `g:${g.synth_id}\n${g.scope}`, label: g.scope, tag: who ? `${who}, ${when}` : when };
+      }),
   ];
 
+  const revokeAll = (site: string) => {
+    for (const g of grants.filter((x) => x.scope === site)) void act(() => backend.revokeGrant("net", site, g.synth_id));
+  };
+
   const removeSite = (key: string) => {
-    const site = key.slice(2);
-    if (key.startsWith("g:")) void act(() => backend.revokeGrant("net", site));
-    else {
+    if (key.startsWith("g:")) {
+      const [synthId, site] = key.slice(2).split("\n") as [string, string];
+      void act(() => backend.revokeGrant("net", site, synthId));
+    } else {
+      const site = key.slice(2);
       edit((d) => {
         d.net.domains = d.net.domains.filter((x) => x !== site);
       });
-      if (grants.some((g) => g.scope === site)) void act(() => backend.revokeGrant("net", site));
+      revokeAll(site);
     }
   };
 

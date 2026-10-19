@@ -190,7 +190,7 @@ function Details(props: { items: ApprovalDetail[]; s: Strings }) {
 }
 
 export function ApprovalView() {
-  const { state, s, name, act } = useStore();
+  const { state, s, name: firstName, act } = useStore();
   const t = s.approval;
   const [requests, setRequests] = useState<ApprovalRequest[]>([]);
   const [span, setSpan] = useState<Span>("once");
@@ -225,6 +225,8 @@ export function ApprovalView() {
   const current = live[0];
   const currentId = current?.id;
   const askEveryTime = state.core.settings.cookies.mode === "ask";
+  // Which synth asks: with several linked, the request says so.
+  const name = current?.synth || firstName;
   const words = current ? wording(current, s, name, askEveryTime) : null;
   const firstSpan = words?.spans[0];
 

@@ -669,25 +669,68 @@ impl Settings {
     }
 }
 
-/// The confirmed pairing, minus the token (that lives in the SecretStore).
-/// Kept on disk so a restart can reopen the link without pairing again.
+/// How a link's token was obtained: with a code from the synth's bot, or
+/// through the owner's platform account (`account.rs`). Only an account
+/// link is dropped when the account signs out, and only an account link
+/// can get a fresh token by itself after the synth refused the old one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkSource {
+    #[default]
+    Code,
+    Account,
+}
+
+/// One confirmed pairing, minus the token (that lives in the SecretStore
+/// under `pairing_token:<synth_id>`). Kept on disk so a restart can reopen
+/// the link without pairing again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredIdentity {
     pub synth_id: String,
     pub synth_url: String,
-    /// The friendly name from the last `hello_ack`, for the status line
-    /// while the link is down. Empty until the first link.
+    /// The friendly name from the last `hello_ack` (or the platform), for
+    /// the status line while the link is down. Empty until known.
     #[serde(default)]
     pub synth_name: String,
+    #[serde(default)]
+    pub source: LinkSource,
+    /// The hub the synth lives on, as the platform names it (account
+    /// links only): needed to ask the platform for a fresh token.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hub_id: String,
 }
 
 /// A grant that outlives the process: "always" (`until` = 0) or until a
-/// unix second. Session grants are never written.
+/// unix second. Session grants are never written. Each grant belongs to
+/// one synth: an answer given to one synth is never an answer to another.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredGrant {
+    /// The synth the grant was given to. Empty in a file of an app before
+    /// 0.1.13 (one synth only): the migration gives it to that synth.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub synth_id: String,
     pub capability: String,
     pub scope: String,
     pub until: i64,
+}
+
+/// The owner's platform account this computer is signed in with (the
+/// token itself is in the SecretStore under `account_token`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct StoredAccount {
+    pub id: String,
+    pub email: String,
+    #[serde(default)]
+    pub name: String,
+    /// The owner clicked "Connect" on the consent screen on this
+    /// computer: from then on a new synth of the account is connected by
+    /// the sync without asking again.
+    #[serde(default)]
+    pub consented: bool,
+    /// Synths of the account the owner disconnected on this computer: the
+    /// sync does not connect them again by itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
 }
 
 /// A browser whose SNTH Vault extension has talked to this app. Kept so the
@@ -706,6 +749,11 @@ pub struct StoredBrowser {
     /// The vault's id of that pairing ("dev_..."), for unlinking.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub device_id: String,
+    /// The synth whose vault the browser is linked to. Empty for a browser
+    /// that is not linked (and in a file of an app before 0.1.13, where
+    /// the migration gives a linked browser to the one synth there was).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub synth_id: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub ext_version: String,
     /// Unix seconds of its last hello.
@@ -721,9 +769,17 @@ pub struct Persisted {
     pub settings: Settings,
     /// Random, generated once, kept across restarts (connect.md device_id).
     pub device_id: String,
-    /// The confirmed pairing (no token). None = not paired.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The confirmed pairings (no tokens), one per synth, in the order
+    /// they were made.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub identities: Vec<StoredIdentity>,
+    /// The one pairing of an app before 0.1.13. Read, never written:
+    /// `migrate_links` moves it into `identities`.
+    #[serde(default, skip_serializing)]
     pub identity: Option<StoredIdentity>,
+    /// The platform account this computer is signed in with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<StoredAccount>,
     /// "Always" and until-time grants. Not part of `settings_rev`: the
     /// synth never sees them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -741,12 +797,44 @@ pub struct Persisted {
 }
 
 impl Persisted {
+    /// Bring the pairing of an app before 0.1.13 (one synth: `identity`,
+    /// grants and linked browsers without a synth) to the shape of this
+    /// one (a list of pairings, everything tagged with its synth).
+    /// Idempotent. True when something was moved. The token's key in the
+    /// SecretStore moves separately (`Core::new`), since only the core
+    /// holds the store.
+    pub fn migrate_links(&mut self) -> bool {
+        // The old field stays in memory (it is never written) so the core
+        // can move the token of that pairing too.
+        let Some(old) = self.identity.clone() else {
+            return false;
+        };
+        let id = old.synth_id.clone();
+        if !self.identities.iter().any(|i| i.synth_id == id) {
+            self.identities.insert(0, old);
+        }
+        for g in self.grants.iter_mut().filter(|g| g.synth_id.is_empty()) {
+            g.synth_id = id.clone();
+        }
+        for b in self.browsers.iter_mut().filter(|b| b.linked && b.synth_id.is_empty()) {
+            b.synth_id = id.clone();
+        }
+        true
+    }
+
+    /// The stored pairing with this synth.
+    pub fn identity_of(&self, synth_id: &str) -> Option<&StoredIdentity> {
+        self.identities.iter().find(|i| i.synth_id == synth_id)
+    }
+
     pub fn fresh(device_id: String) -> Persisted {
         Persisted {
             rev: 0,
             settings: Settings::default(),
             device_id,
+            identities: Vec::new(),
             identity: None,
+            account: None,
             grants: Vec::new(),
             egress_month: String::new(),
             egress_bytes: 0,
@@ -766,6 +854,8 @@ pub fn load(path: &Path, new_device_id: impl FnOnce() -> String) -> io::Result<P
             // a change the owner made, so the rev stays; the next save
             // writes the new shape.
             p.settings.migrate();
+            // One synth before 0.1.13, a list of them now.
+            p.migrate_links();
             Ok(p)
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Persisted::fresh(new_device_id())),

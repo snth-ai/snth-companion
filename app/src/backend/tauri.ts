@@ -15,6 +15,8 @@ export const tauriBackend: Backend = {
   pairConfirm: () => invoke("pair_confirm"),
   pairCancel: () => invoke("pair_cancel"),
   unpair: () => invoke("unpair"),
+  unpairSynth: (synthId) => invoke("unpair_synth", { synthId }),
+  reconnectSynth: (synthId) => invoke("reconnect_synth", { synthId }),
   finishOnboarding: (autostart) => invoke("finish_onboarding", { autostart }),
 
   applyPreset: (preset) => invoke("apply_preset", { preset }),
@@ -24,7 +26,12 @@ export const tauriBackend: Backend = {
   pickFolder: (write) => invoke("pick_folder", { write }),
   removeRoot: (path) => invoke("remove_root", { path }),
   setRootWrite: (path, write) => invoke("set_root_write", { path, write }),
-  revokeGrant: (capability, scope) => invoke("revoke_grant", { capability, scope }),
+  revokeGrant: (capability, scope, synthId) => invoke("revoke_grant", { capability, scope, synthId }),
+
+  loginCancel: () => invoke("login_cancel"),
+  accountConnect: () => invoke("account_connect"),
+  accountSync: () => invoke("account_sync"),
+  signOut: () => invoke("sign_out"),
 
   pause: () => invoke("pause"),
   resume: () => invoke("resume"),
@@ -42,10 +49,10 @@ export const tauriBackend: Backend = {
   appsCheck: () => invoke("apps_check"),
   appsRequestPermission: (app) => invoke("apps_request_permission", { app }),
 
-  loginsRefresh: () => invoke("logins_refresh"),
+  loginsRefresh: (synthId) => invoke("logins_refresh", { synthId }),
   safariCheck: () => invoke("safari_check"),
-  vaultForget: (site) => invoke("vault_forget", { site }),
-  browserLink: (install) => invoke("browser_link", { install }),
+  vaultForget: (site, synthId) => invoke("vault_forget", { site, synthId }),
+  browserLink: (install, synthId) => invoke("browser_link", { install, synthId }),
   browserUnlink: (install) => invoke("browser_unlink", { install }),
   browserForget: (install) => invoke("browser_forget", { install }),
 

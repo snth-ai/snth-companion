@@ -29,6 +29,7 @@ macro_rules! logln {
     }};
 }
 
+pub mod account;
 pub mod apps;
 pub mod browser;
 pub mod cookies;
@@ -53,6 +54,7 @@ pub mod rpc;
 pub mod secret;
 pub mod settings;
 pub mod shell;
+pub mod slot;
 pub mod tcc;
 pub mod tcp;
 #[cfg(test)]
@@ -61,11 +63,13 @@ pub mod wire;
 pub mod ws_io;
 
 pub use crate::core::{
-    Core, CoreConfig, CoreEvent, CuaAttach, CuaSession, LinkBrief, LinkState, Shared, Snapshot,
+    Brief, Core, CoreConfig, CoreEvent, CuaAttach, CuaSession, LinkState, Shared, Snapshot,
 };
+pub use crate::slot::{LinkBrief, LinkSlot};
+pub use settings::LinkSource;
 pub use cua_install::{FailCode, InstallState};
 pub use cookies::{CookieError, CookieRead, CookieSource, KeySource, MultiReader, WireCookie};
-pub use grant::{Approval, ApprovalRequest, Approver, Duration_, GrantStore};
+pub use grant::{Approval, ApprovalRequest, Approver, Duration_, GrantRow, GrantStore};
 pub use journal::{Entry, Journal};
 pub use pairing::{ClaimError, ClaimResult, HubClient, Pending, UreqHubClient};
 pub use proto::Refusal;

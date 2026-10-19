@@ -404,6 +404,50 @@ pub const TOOLS: &[(&str, Kind)] = &[
     ("probe", Kind::Free),
 ];
 
+/// The tools that only LOOK (read the screen, a window, the driver's own
+/// state) or keep the driver's bookkeeping, and so do nothing on the
+/// owner's computer. Every other tool, and any tool not known here, is an
+/// ACTION: it clicks, types, moves the pointer, starts, ends, moves or
+/// brings forward an app or a window, changes the clipboard or a page,
+/// or changes the agent's pointer. With several synths linked, one synth
+/// at a time drives (`Shared::lease_take`): another synth may look while
+/// it does, but its actions are refused until the driver has been quiet
+/// for `core::LEASE_QUIET`.
+pub const LOOK_ONLY_TOOLS: &[&str] = &[
+    "list_apps",
+    "list_windows",
+    "get_desktop_state",
+    "get_accessibility_tree",
+    "get_window_state",
+    "verify_state",
+    "zoom",
+    "debug_window_info",
+    "get_browser_state",
+    "get_screen_size",
+    "get_cursor_position",
+    "get_agent_cursor_state",
+    "clipboard_read",
+    "check_permissions",
+    "health_report",
+    "get_config",
+    "start_session",
+    "end_session",
+    "get_session",
+    "list_sessions",
+    "get_session_state",
+    "escalate_session",
+    "get_recording_state",
+    "parse_visual_regions",
+    "history_status",
+    "history_query",
+    "probe",
+];
+
+/// Does this tool act on the owner's computer (see `LOOK_ONLY_TOOLS`)?
+pub fn is_action(tool: &str) -> bool {
+    !LOOK_ONLY_TOOLS.contains(&tool)
+}
+
 pub fn kind_of(tool: &str) -> Option<Kind> {
     TOOLS.iter().find(|(name, _)| *name == tool).map(|(_, kind)| *kind)
 }
@@ -1285,6 +1329,28 @@ mod tests {
         assert_eq!(y.lines().filter(|l| l.trim_start().starts_with("display:")).count(), 1, "{y}");
         assert_eq!(y.lines().filter(|l| l.trim_start().starts_with("- bundle_id:")).count(), 1, "{y}");
         assert!(y.ends_with("  desktop:\n    display: false\n"));
+    }
+
+    #[test]
+    fn every_tool_is_either_a_look_or_an_action_and_unknown_ones_act() {
+        for tool in LOOK_ONLY_TOOLS {
+            assert!(kind_of(tool).is_some(), "{tool} is not a tool of the pinned driver");
+        }
+        let actions: Vec<&str> = TOOLS.iter().map(|(t, _)| *t).filter(|t| is_action(t)).collect();
+        assert_eq!(
+            actions,
+            [
+                "launch_app", "click", "double_click", "right_click", "drag", "scroll", "type_text",
+                "type_text_chars", "press_key", "hotkey", "set_value", "mouse_button_down", "mouse_button_up",
+                "mouse_drag", "parallel_mouse_drag", "invoke_menu", "bring_to_front", "set_window_frame",
+                "kill_app", "page", "move_cursor", "browser_prepare", "browser_navigate", "browser_click",
+                "browser_type", "browser_dialog", "browser_set_input_files", "browser_download",
+                "browser_pointer", "clipboard_write", "set_agent_cursor_enabled", "set_agent_cursor_motion",
+                "set_agent_cursor_theme", "set_config", "start_recording", "stop_recording",
+                "replay_trajectory", "install_ffmpeg", "install_extension", "check_for_update",
+            ]
+        );
+        assert!(is_action("a_tool_from_a_newer_driver"));
     }
 
     #[test]

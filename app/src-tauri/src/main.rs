@@ -5,6 +5,7 @@
 // No console window next to the app on Windows (release builds).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod account;
 mod actions;
 mod approvals;
 mod browsers;
@@ -40,7 +41,7 @@ use tokio::sync::{watch, Notify};
 
 use crate::approvals::{Approvals, UiApprover};
 use crate::prefs::PrefsFile;
-use crate::state::{Ctx, UPDATER_KEY_PLACEHOLDER};
+use crate::state::{Ctx, PLATFORM_URL, UPDATER_KEY_PLACEHOLDER};
 use crate::ui::UiEvent;
 
 /// The flag the autostart entry passes, so a launch at login stays in the
@@ -112,6 +113,8 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
         cua_private_root: Some(data_dir.join("cua")),
         cua_attach: CuaAttach::Private,
     });
+    // The owner's platform account: sign-in and the app's API.
+    core.set_platform(Arc::new(connect_core::account::UreqPlatformClient), PLATFORM_URL);
 
     // The first run of a new version: one line in the journal. And an
     // update restart leaves word whether to come back hidden.
@@ -129,11 +132,12 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
         prefs: Mutex::new(prefs),
         prefs_file,
         offered_roots: Mutex::new(HashSet::new()),
-        link_detail: Mutex::new((None, String::new())),
+        link_detail: Mutex::new(std::collections::HashMap::new()),
         pair_code: Mutex::new(None),
         helper_retry: Notify::new(),
         helper_retry_at: Mutex::new(None),
         relink: Notify::new(),
+        account_wake: Notify::new(),
         shutdown,
         tray: Mutex::new(None),
         device_name: core.shared().device_name(),
@@ -166,6 +170,9 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
     // Safari extension).
     logins::spawn_safari_door(ctx.clone(), shutdown_rx.clone());
     logins::sync(&ctx);
+    // The account's synths: at start, every 10 minutes, when the window
+    // comes up.
+    account::spawn_sync(ctx.clone(), shutdown_rx.clone());
     updates::spawn(ctx.clone(), shutdown_rx);
 
     tray::build(&handle, &ctx)?;
@@ -209,14 +216,16 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
     Ok(())
 }
 
-/// The link supervisor. `run_link` returns when the app shuts down or the
-/// owner unlinks; after an unlink it waits for the next pairing.
+/// The link supervisor: one reconnect loop per link (per synth). A loop
+/// ends when the app shuts down or its link is removed. After a new
+/// pairing (`relink`) a loop is started for every link that has none
+/// (`run_slot` returns at once for a link whose loop runs already).
 fn spawn_link(ctx: Arc<Ctx>, mut shutdown: watch::Receiver<bool>) {
     tauri::async_runtime::spawn(async move {
         loop {
-            ctx.core.run_link(None, shutdown.clone()).await;
-            if *shutdown.borrow() {
-                break;
+            for synth_id in ctx.core.link_ids() {
+                let (core, stop) = (ctx.core.clone(), shutdown.clone());
+                tauri::async_runtime::spawn(async move { core.run_slot(&synth_id, stop).await });
             }
             tokio::select! {
                 _ = ctx.relink.notified() => {}
@@ -288,13 +297,14 @@ fn spawn_event_forwarder(ctx: Arc<Ctx>) {
         loop {
             tokio::select! {
                 ev = events.recv() => match ev {
-                    Ok(CoreEvent::Link { state, detail }) => {
-                        // An unpaired core repeats "no pairing" every two
-                        // seconds; only a change is news.
+                    Ok(CoreEvent::Link { synth_id, state, detail }) => {
+                        // A link without a token repeats "no pairing" every
+                        // two seconds; only a change is news.
                         let changed = {
                             let mut last = ctx.link_detail.lock().unwrap();
-                            let changed = last.0 != Some(state) || last.1 != detail;
-                            *last = (Some(state), detail);
+                            let next = (state, detail);
+                            let changed = last.get(&synth_id) != Some(&next);
+                            last.insert(synth_id, next);
                             changed
                         };
                         if changed {
@@ -305,7 +315,11 @@ fn spawn_event_forwarder(ctx: Arc<Ctx>) {
                     // Linked or unlinked: the browsers learn or forget
                     // where the helper is, and what the vault held is no
                     // longer known.
-                    Ok(CoreEvent::Paired { .. } | CoreEvent::Unpaired) => {
+                    Ok(event @ (CoreEvent::Paired { .. } | CoreEvent::Unpaired { .. })) => {
+                        // A new link gets its loop.
+                        if matches!(event, CoreEvent::Paired { .. }) {
+                            ctx.relink.notify_one();
+                        }
                         logins::sync(&ctx);
                         ctx.vault.set(logins::VaultView::Unknown);
                         tray::refresh(&ctx);
@@ -385,6 +399,12 @@ fn main() {
             commands::pair_confirm,
             commands::pair_cancel,
             commands::unpair,
+            commands::unpair_synth,
+            commands::reconnect_synth,
+            commands::login_cancel,
+            commands::account_connect,
+            commands::account_sync,
+            commands::sign_out,
             commands::finish_onboarding,
             commands::apply_preset,
             commands::update_settings,
@@ -422,6 +442,14 @@ fn main() {
             commands::open_external,
         ])
         .on_window_event(|window, event| {
+            // The main window came up: a good moment to read the account.
+            if let WindowEvent::Focused(true) = event {
+                if window.label() != windows::APPROVAL {
+                    if let Some(ctx) = ctx_of(window.app_handle()) {
+                        ctx.account_wake.notify_one();
+                    }
+                }
+            }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 // Neither window is ever destroyed by its close button.
                 api.prevent_close();

@@ -5,7 +5,7 @@
 import { backend } from "../backend";
 import type { Grant } from "../backend/types";
 import { grantTime, shortPath } from "../lib/format";
-import { useStore } from "../lib/store";
+import { grantSynth, useStore } from "../lib/store";
 import { Section } from "../ui/controls";
 
 export function Remembered(props: { capability: "computer" | "files" | "shell"; title?: string }) {
@@ -28,15 +28,16 @@ export function Remembered(props: { capability: "computer" | "files" | "shell"; 
     <Section title={props.title ?? s.remembered.title}>
       <div className="group">
         {grants.map((g) => (
-          <div className="item" key={g.scope}>
+          <div className="item" key={`${g.synth_id}/${g.scope}`}>
             <span
               className={`item-text${props.capability === "shell" ? " selectable mono" : ""}`}
               title={props.capability === "files" ? g.scope : undefined}
             >
               {label(g)}
             </span>
+            {grantSynth(state, g) ? <span className="tag">{grantSynth(state, g)}</span> : null}
             <span className="item-sub">{grantTime(g, s, lang)}</span>
-            <button type="button" className="btn small" onClick={() => void act(() => backend.revokeGrant(g.capability, g.scope))}>
+            <button type="button" className="btn small" onClick={() => void act(() => backend.revokeGrant(g.capability, g.scope, g.synth_id))}>
               {s.cookies.revoke}
             </button>
           </div>

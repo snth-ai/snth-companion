@@ -67,9 +67,12 @@ pub fn notify_approval(app: &AppHandle, dto: &ApprovalDto) {
         return;
     };
     let lang = ctx.lang();
+    // The synth that asks; else the first link's name.
     let brief = ctx.core.link_brief();
-    let synth = brief
-        .synth_name
+    let synth = dto
+        .synth
+        .clone()
+        .or(brief.synth_name)
         .or(brief.synth_id)
         .unwrap_or_else(|| "SNTH".to_string());
     // A browser link is asked for by the owner's own browser, not by

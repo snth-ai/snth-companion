@@ -25,8 +25,10 @@ impl Lang {
     }
 }
 
-pub fn tray_status(lang: Lang, state: LinkState, paired: bool, paused: bool, synth: &str) -> String {
-    if !paired {
+/// The tray's status line. `links`: how many synths this computer is
+/// linked to; `synth`: the name of the first (shown when there is one).
+pub fn tray_status(lang: Lang, state: LinkState, links: usize, paused: bool, synth: &str) -> String {
+    if links == 0 {
         return match lang {
             Lang::En => "Not linked".into(),
             Lang::Ru => "Не подключено".into(),
@@ -38,11 +40,48 @@ pub fn tray_status(lang: Lang, state: LinkState, paired: bool, paused: bool, syn
             Lang::Ru => "На паузе".into(),
         };
     }
+    if links > 1 {
+        return match (lang, state) {
+            (Lang::En, LinkState::Linked) => format!("Linked to {links} synths"),
+            (Lang::Ru, LinkState::Linked) => format!("Подключено к {links} {}", synths_ru(links)),
+            (Lang::En, LinkState::NeedsRepair) => "Synths need relinking".into(),
+            (Lang::Ru, LinkState::NeedsRepair) => "Синтов нужно подключить заново".into(),
+            (Lang::En, _) => format!("Connecting to {links} synths..."),
+            (Lang::Ru, _) => format!("Подключение к {links} {}...", synths_ru(links)),
+        };
+    }
     match (lang, state) {
         (Lang::En, LinkState::Linked) => format!("Linked to {synth}"),
         (Lang::Ru, LinkState::Linked) => format!("Подключено: {synth}"),
+        (Lang::En, LinkState::NeedsRepair) => format!("{synth}: link again"),
+        (Lang::Ru, LinkState::NeedsRepair) => format!("{synth}: нужно подключить заново"),
         (Lang::En, _) => format!("Connecting to {synth}..."),
         (Lang::Ru, _) => format!("Подключение: {synth}..."),
+    }
+}
+
+/// "синту / синтам" after "к N" (dative plural for anything but 1, 21...).
+fn synths_ru(n: usize) -> &'static str {
+    if n % 10 == 1 && n % 100 != 11 {
+        "синту"
+    } else {
+        "синтам"
+    }
+}
+
+/// The notification after the sync connected this computer to a new
+/// synth of the account.
+pub fn connected_title(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "SNTH Connect",
+        Lang::Ru => "SNTH Connect",
+    }
+}
+
+pub fn connected_body(lang: Lang, synth: &str) -> String {
+    match lang {
+        Lang::En => format!("This computer is connected to {synth}"),
+        Lang::Ru => format!("Компьютер подключен к {synth}"),
     }
 }
 
@@ -153,6 +192,16 @@ mod tests {
     /// A notification can show on a locked screen: for a change in the
     /// owner's apps it says what kind of request waits, never who a
     /// message is for or anything else from the request.
+    #[test]
+    fn the_tray_counts_the_synths() {
+        assert_eq!(tray_status(Lang::En, LinkState::Linked, 1, false, "Mia"), "Linked to Mia");
+        assert_eq!(tray_status(Lang::En, LinkState::Linked, 2, false, "Mia"), "Linked to 2 synths");
+        assert_eq!(tray_status(Lang::Ru, LinkState::Linked, 2, false, "Mia"), "Подключено к 2 синтам");
+        assert_eq!(tray_status(Lang::Ru, LinkState::Linked, 21, false, "Mia"), "Подключено к 21 синту");
+        assert_eq!(tray_status(Lang::En, LinkState::Unpaired, 0, false, ""), "Not linked");
+        assert_eq!(tray_status(Lang::En, LinkState::Linked, 2, true, "Mia"), "Paused");
+    }
+
     #[test]
     fn an_apps_notification_names_no_recipient() {
         for lang in [Lang::En, Lang::Ru] {

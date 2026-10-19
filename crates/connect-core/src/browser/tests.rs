@@ -89,7 +89,7 @@ type Seen = Arc<Mutex<Vec<(String, Value)>>>;
 
 /// The synth's side of the app's requests.
 fn synth(core: &Core, answer: impl Fn(&str, &Value) -> Result<Value, String> + Send + 'static) -> Seen {
-    let shared = core.shared();
+    let shared = core.shared().slot("mia").expect("linked to mia");
     let (mut rx, _) = shared.requests.attach();
     shared.requests.set_supported(true);
     let seen: Seen = Arc::default();
@@ -407,7 +407,7 @@ async fn a_synth_that_is_away_or_too_old_is_named_as_the_reason() {
     // A link to a synth that does not answer requests.
     let (core, owner) = linked_core().await;
     owner.says(Approval::once());
-    let _attached = core.shared().requests.attach();
+    let _attached = core.shared().slot("mia").unwrap().requests.attach();
     let (mut ext, _) = greet(&core, INSTALL).await;
     ext.send(json!({"type": "pair.request", "id": 1})).await;
     assert_eq!(ext.recv_type("pair.refused").await["error"], "synth_outdated");
@@ -436,8 +436,8 @@ async fn a_done_nobody_asked_for_links_nothing() {
 async fn a_second_question_while_one_is_open_is_refused_as_busy() {
     let (core, owner) = linked_core().await;
     // The synth never answers, so the first pairing stays open.
-    let (_rx, _) = core.shared().requests.attach();
-    core.shared().requests.set_supported(true);
+    let (_rx, _) = core.shared().slot("mia").unwrap().requests.attach();
+    core.shared().slot("mia").unwrap().requests.set_supported(true);
     owner.says(Approval::once());
     let (mut ext, _) = greet(&core, INSTALL).await;
     ext.send(json!({"type": "pair.request", "id": 1})).await;
@@ -486,7 +486,7 @@ async fn the_owner_can_link_a_connected_browser_from_the_app_without_a_second_qu
     let (mut ext, _) = greet(&core, INSTALL).await;
     let linking = tokio::spawn({
         let core = core.clone();
-        async move { core.browser_link(INSTALL).await }
+        async move { core.browser_link(INSTALL, None).await }
     });
     let code = ext.recv_type("pair.code").await;
     assert_eq!((code["id"].as_u64(), code["code"].as_str()), (Some(0), Some("K7QW3MHX")));
@@ -496,7 +496,7 @@ async fn the_owner_can_link_a_connected_browser_from_the_app_without_a_second_qu
     wait_for(|| core.browsers()[0].linked).await;
 
     // A browser that is not connected cannot be linked.
-    assert_eq!(core.browser_link("ffffffffffffffffffffffffffffffff").await, Err(PairRefusal::Failed));
+    assert_eq!(core.browser_link("ffffffffffffffffffffffffffffffff", None).await, Err(PairRefusal::Failed));
 }
 
 fn cookie_reply(id: &Value) -> Value {
@@ -564,7 +564,7 @@ async fn a_standing_answer_keeps_the_site_readable_until_the_owner_takes_it_back
         s.cookies.mode = CookiesMode::AskNew;
     });
     let mut ext = link(&core, &owner, INSTALL).await;
-    core.shared().grants().record("cookies", "example.com", Approval::always());
+    core.shared().grants().record("mia", "cookies", "example.com", Approval::always());
 
     let reading = tokio::spawn({
         let shared = core.shared();
@@ -578,7 +578,7 @@ async fn a_standing_answer_keeps_the_site_readable_until_the_owner_takes_it_back
     assert_eq!(core.browsers()[0].sites, ["example.com"]);
 
     // The owner revokes the site in the app: the browser is told.
-    core.revoke("cookies", "example.com");
+    core.revoke(None, "cookies", "example.com");
     assert_eq!(ext.recv_type("site.revoke").await["site"], "example.com");
 }
 
@@ -638,7 +638,7 @@ async fn refused_or_unanswered_in_the_browser_is_the_owners_decision() {
 async fn a_site_the_owner_no_longer_allows_is_taken_back_at_hello() {
     let (core, _owner) = linked_core().await;
     core.mutate_settings(|s| s.cookies.mode = CookiesMode::AskNew);
-    core.shared().grants().record("cookies", "kept.com", Approval::always());
+    core.shared().grants().record("mia", "cookies", "kept.com", Approval::always());
     let mut ext = open(&core, ORIGIN).await;
     let mut hi = hello(INSTALL);
     hi["sites"] = json!(["kept.com", "gone.com", "www.not-a-site.com", 5]);
@@ -721,7 +721,7 @@ async fn the_vault_list_is_names_and_dates_only() {
         })),
         _ => Err("unknown method".into()),
     });
-    let list = core.vault_list().await.unwrap();
+    let list = core.vault_list(None).await.unwrap();
     assert_eq!(list.sites.len(), 2);
     assert_eq!(list.sites[0], VaultSite { site: "github.com".into(), has_totp: true, updated: 1_791_700_000, last_used: 1_791_800_000, use_count: 3 });
     assert_eq!(list.sites[1].site, "mail.example.org");
@@ -734,10 +734,10 @@ async fn the_vault_list_is_names_and_dates_only() {
 async fn forgetting_a_vault_login_goes_to_the_synth_and_into_the_journal() {
     let (core, _owner) = linked_core().await;
     let seen = usual_synth(&core);
-    core.vault_forget("GitHub.com").await.unwrap();
+    core.vault_forget("GitHub.com", None).await.unwrap();
     assert_eq!(seen.lock().unwrap()[0], ("vault.forget".to_string(), json!({"site": "github.com"})));
     assert!(journal_text(&core).contains("vault.forget"));
-    assert!(core.vault_forget("not a site").await.is_err());
+    assert!(core.vault_forget("not a site", None).await.is_err());
     assert_eq!(seen.lock().unwrap().len(), 1);
 }
 
@@ -959,7 +959,7 @@ async fn safari_pairs_through_the_app_like_any_browser() {
     let (mut ext, _) = greet_safari(&core, SAFARI_INSTALL).await;
     let linking = tokio::spawn({
         let core = core.clone();
-        async move { core.browser_link(SAFARI_INSTALL).await }
+        async move { core.browser_link(SAFARI_INSTALL, None).await }
     });
     let code = ext.recv_type("pair.code").await;
     assert_eq!(code["id"], 0);

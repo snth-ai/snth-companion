@@ -248,7 +248,7 @@ async fn files_method(shared: &Arc<Shared>, req: &Request) -> Result<Value, Stri
             // that same write, not new ones: a 50 MB push is one question,
             // not a hundred (`Transfers`).
             let continuing = mode == "append" && shared.transfers.continues(path, offset);
-            if s.files.ask_on_write && !continuing && !shared.grants().allows("files", path) {
+            if s.files.ask_on_write && !continuing && !shared.grant_allows("files", path) {
                 let req_ask = ApprovalRequest::new(
                     "files",
                     path,
@@ -343,7 +343,7 @@ async fn cookies_get(shared: &Arc<Shared>, req: &Request) -> Result<Value, Strin
     use crate::settings::CookiesMode;
     let need_ask = match s.cookies.mode {
         CookiesMode::Auto => false,
-        CookiesMode::AskNew => !shared.grants().allows("cookies", &domain),
+        CookiesMode::AskNew => !shared.grant_allows("cookies", &domain),
         CookiesMode::Ask => true,
     };
     if need_ask {

@@ -15,16 +15,32 @@ use tokio::sync::{broadcast, oneshot, watch};
 use crate::cookies::CookieSource;
 use crate::cua::{self, DriverEnv, PrivateDaemon};
 use crate::cua_install::{CuaInstaller, FailCode, InstallState, UreqFetcher};
-use crate::grant::{Approval, ApprovalRequest, Approver, GrantStore, APPROVAL_TIMEOUT};
+use crate::grant::{Approval, ApprovalRequest, Approver, GrantRow, GrantStore, APPROVAL_TIMEOUT};
 use crate::journal::{Entry, Journal};
 use crate::pairing::{HubClient, Pending};
 use crate::proto::Refusal;
 use crate::secret::SecretStore;
-use crate::settings::{self, Persisted, Preset, Root, Settings, StoredGrant, StoredIdentity};
+use crate::settings::{self, LinkSource, Persisted, Preset, Root, Settings, StoredGrant, StoredIdentity};
+use crate::slot::{LinkBrief, LinkSlot};
 use crate::wire;
 
-/// The keychain key the pairing token is stored under.
+/// The keychain key a pairing token is stored under: `pairing_token:<synth
+/// id>` (`slot::token_key`), one per synth. The bare key is where an app
+/// before 0.1.13 kept its one token (moved at the first start, see
+/// `Core::new`), and where the CLI keeps a token it was handed.
 pub const TOKEN_KEY: &str = "pairing_token";
+
+/// How long a synth keeps computer control after its last action: while
+/// it acts, and this long after, another synth's actions are refused.
+pub const LEASE_QUIET: Duration = Duration::from_secs(60);
+
+/// Who drives the computer right now.
+#[derive(Debug, Clone)]
+struct Lease {
+    synth_id: String,
+    name: String,
+    last: Instant,
+}
 
 /// Which Cua daemon the mcp pipe attaches to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,7 +52,7 @@ pub enum CuaAttach {
     User,
 }
 
-/// Where the synth link stands, for the UI status line.
+/// Where a synth link stands, for the UI status line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinkState {
@@ -50,16 +66,24 @@ pub enum LinkState {
     Reconnecting,
     /// Paused by the owner.
     Paused,
+    /// The synth refused this computer's token (HTTP 401): the link does
+    /// not dial again until it has a new one (a fresh token through the
+    /// account, or a new code from the bot).
+    NeedsRepair,
 }
 
 /// Events for the UI. Journal entries have their own subscription.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum CoreEvent {
-    Link { state: LinkState, detail: String },
+    Link { synth_id: String, state: LinkState, detail: String },
     Settings { rev: u64 },
     Paired { synth_id: String },
-    Unpaired,
+    /// One synth's link was removed. `remaining`: links left.
+    Unpaired { synth_id: String, remaining: usize },
+    /// The platform account signed in or out, or its list of synths
+    /// changed.
+    Account,
     Paused { paused: bool },
     /// A browser's extension connected, left, was linked or unlinked, or
     /// the sites it may read changed.
@@ -178,7 +202,6 @@ pub struct Shared {
 
     paused: AtomicBool,
     metered: AtomicBool,
-    pub(crate) stopping: AtomicBool, // unpair asked the link loop to stop reconnecting
     /// Streams the synth has open right now (see `Core::active_streams`).
     pub(crate) streams_open: AtomicUsize,
     /// Computer-control sessions that hold our daemon right now (see
@@ -194,18 +217,19 @@ pub struct Shared {
     cua_task: Mutex<Option<(String, Instant)>>,
     counters: Mutex<Counters>,
 
-    identity: RwLock<Option<Pending>>, // confirmed pairing (url, id, token-in-secret)
-    pending: Mutex<Option<Pending>>,   // claimed, not yet confirmed
-    pub(crate) synth: RwLock<Option<wire::HelloAck>>,
-    link_state: RwLock<LinkState>,
+    /// One slot per linked synth, in the order they were linked (see
+    /// slot.rs). The policy, the journal and everything above are shared.
+    pub(crate) links: RwLock<Vec<Arc<LinkSlot>>>,
+    pending: Mutex<Option<Pending>>, // claimed, not yet confirmed
+    /// The synth that drives the computer right now (see `LEASE_QUIET`).
+    lease: Mutex<Option<Lease>>,
+    /// The platform account: its client, the sign-in in progress, the
+    /// last list of synths (account.rs).
+    pub(crate) account: crate::account::State,
 
     events: broadcast::Sender<CoreEvent>,
-    pub(crate) settings_tx: watch::Sender<u64>, // rev, so the link pushes a settings msg
-    pub(crate) control_tx: watch::Sender<u64>,  // bumped on pause/resume so the link reacts
-    pub(crate) unpair_req: tokio::sync::Notify,  // the owner asked to unpair
-    pub(crate) unpair_ack: tokio::sync::Notify,  // the synth acknowledged
-    /// What the app asks the synth over the control stream (requests.rs).
-    pub(crate) requests: crate::requests::LinkRequests,
+    pub(crate) settings_tx: watch::Sender<u64>, // rev, so every link pushes a settings msg
+    pub(crate) control_tx: watch::Sender<u64>,  // bumped on pause/resume so every link reacts
     /// The owner's browsers, through the SNTH Vault extension (browser.rs).
     pub(crate) browsers: crate::browser::Hub,
     /// Ask a linked browser for cookies BEFORE reading browser files.
@@ -244,15 +268,49 @@ impl Shared {
     pub fn grants(&self) -> &GrantStore {
         &self.grants
     }
-    /// A confirmed pairing with a synth exists (link up or not).
+    /// A confirmed pairing with at least one synth exists (link up or
+    /// not).
     pub(crate) fn is_paired(&self) -> bool {
-        self.identity.read().unwrap().is_some()
+        self.links.read().unwrap().iter().any(|l| !l.adhoc)
     }
     /// This computer has a synth: a confirmed pairing, or (a host that
     /// was handed a token and an address directly, like the CLI) a link
     /// that has been up.
     pub(crate) fn has_synth(&self) -> bool {
-        self.is_paired() || self.synth.read().unwrap().is_some()
+        self.links
+            .read()
+            .unwrap()
+            .iter()
+            .any(|l| !l.adhoc || l.synth.read().unwrap().is_some())
+    }
+    /// Every link, in the order they were made.
+    pub fn slots(&self) -> Vec<Arc<LinkSlot>> {
+        self.links.read().unwrap().clone()
+    }
+    /// The link with this synth.
+    pub fn slot(&self, synth_id: &str) -> Option<Arc<LinkSlot>> {
+        self.links.read().unwrap().iter().find(|l| l.synth_id == synth_id).cloned()
+    }
+    /// The link the current work is for: the one it came in on, else the
+    /// only link there is (a host call, a test). None with several links
+    /// and no link of its own.
+    pub(crate) fn current_slot(&self) -> Option<Arc<LinkSlot>> {
+        if let Some(slot) = crate::slot::current() {
+            return Some(slot);
+        }
+        let links = self.links.read().unwrap();
+        if links.len() == 1 {
+            return links.first().cloned();
+        }
+        None
+    }
+    /// The synth the current work is for ("" when there is none).
+    pub(crate) fn current_synth_id(&self) -> String {
+        self.current_slot().map(|s| s.synth_id.clone()).unwrap_or_default()
+    }
+    /// Is there a live grant for the current synth?
+    pub fn grant_allows(&self, capability: &str, scope: &str) -> bool {
+        self.grants.allows(&self.current_synth_id(), capability, scope)
     }
     pub(crate) fn emit(&self, event: CoreEvent) {
         let _ = self.events.send(event);
@@ -262,9 +320,11 @@ impl Shared {
         self.save_locked(p);
     }
 
-    pub(crate) fn set_link_state(&self, s: LinkState, detail: &str) {
-        *self.link_state.write().unwrap() = s;
+    pub(crate) fn set_slot_state(&self, slot: &LinkSlot, s: LinkState, detail: &str) {
+        *slot.state.write().unwrap() = s;
+        *slot.detail.lock().unwrap() = detail.to_string();
         let _ = self.events.send(CoreEvent::Link {
+            synth_id: slot.synth_id.clone(),
             state: s,
             detail: detail.to_string(),
         });
@@ -272,15 +332,82 @@ impl Shared {
 
     /// The link learned the synth's identity from hello_ack. The friendly
     /// name is kept on disk too, for the status line while the link is down.
-    pub(crate) fn set_synth(&self, ack: wire::HelloAck) {
+    pub(crate) fn set_synth(&self, slot: &LinkSlot, ack: wire::HelloAck) {
         let name = ack.synth_name.clone();
-        *self.synth.write().unwrap() = Some(ack);
+        *slot.synth.write().unwrap() = Some(ack);
+        if name.is_empty() || slot.adhoc {
+            return;
+        }
+        *slot.stored_name.write().unwrap() = name.clone();
         let mut p = self.persisted.write().unwrap();
-        if let Some(id) = p.identity.as_mut() {
-            if id.synth_name != name && !name.is_empty() {
+        if let Some(id) = p.identities.iter_mut().find(|i| i.synth_id == slot.synth_id) {
+            if id.synth_name != name {
                 id.synth_name = name;
                 self.save_locked(&p);
             }
+        }
+    }
+
+    /// The token of one link, from the secret store.
+    pub(crate) fn token_of(&self, slot: &LinkSlot) -> Option<String> {
+        let own = self.secret.get(&slot.token_key).ok().flatten().filter(|t| !t.is_empty());
+        if own.is_none() && slot.legacy_token.load(Ordering::Acquire) {
+            return self.secret.get(TOKEN_KEY).ok().flatten().filter(|t| !t.is_empty());
+        }
+        own
+    }
+
+    pub(crate) fn secret(&self) -> &Arc<dyn SecretStore> {
+        &self.secret
+    }
+
+    // --- computer control: one synth at a time ---
+
+    /// The synth that holds computer control now: (id, name), while its
+    /// last action is less than `LEASE_QUIET` ago.
+    pub fn computer_driver(&self) -> Option<(String, String)> {
+        let lease = self.lease.lock().unwrap();
+        lease
+            .as_ref()
+            .filter(|l| l.last.elapsed() < LEASE_QUIET)
+            .map(|l| (l.synth_id.clone(), l.name.clone()))
+    }
+
+    /// May this synth act on the computer now? Err(name of the synth that
+    /// drives) when another synth acted less than `LEASE_QUIET` ago.
+    pub(crate) fn lease_check(&self, synth_id: &str) -> Result<(), String> {
+        match self.computer_driver() {
+            Some((holder, name)) if holder != synth_id => Err(name),
+            _ => Ok(()),
+        }
+    }
+
+    /// Take (or keep) computer control for this synth, at the moment its
+    /// action goes to the driver. Err(name) when another synth took it in
+    /// between. Checked and taken under one lock.
+    pub(crate) fn lease_take(&self, synth_id: &str, name: &str) -> Result<(), String> {
+        let mut lease = self.lease.lock().unwrap();
+        if let Some(l) = lease.as_ref() {
+            if l.synth_id != synth_id && l.last.elapsed() < LEASE_QUIET {
+                return Err(l.name.clone());
+            }
+        }
+        *lease = Some(Lease { synth_id: synth_id.to_string(), name: name.to_string(), last: Instant::now() });
+        Ok(())
+    }
+
+    /// Let go of computer control (the synth was unlinked).
+    fn lease_release(&self, synth_id: &str) {
+        let mut lease = self.lease.lock().unwrap();
+        if lease.as_ref().is_some_and(|l| l.synth_id == synth_id) {
+            *lease = None;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lease_age(&self, by: Duration) {
+        if let Some(l) = self.lease.lock().unwrap().as_mut() {
+            l.last -= by;
         }
     }
 
@@ -300,8 +427,8 @@ impl Shared {
             .grants
             .list()
             .into_iter()
-            .filter(|(_, _, until)| *until >= 0)
-            .map(|(capability, scope, until)| StoredGrant { capability, scope, until })
+            .filter(|g| g.until >= 0)
+            .map(|g| StoredGrant { synth_id: g.synth_id, capability: g.capability, scope: g.scope, until: g.until })
             .collect();
         let mut p = self.persisted.write().unwrap();
         if p.grants != durable {
@@ -334,16 +461,6 @@ impl Shared {
         let _ = self.control_tx.send(next);
     }
 
-    /// The token for the link, from the secret store.
-    pub fn token(&self) -> Option<String> {
-        self.secret.get(TOKEN_KEY).ok().flatten()
-    }
-
-    /// The confirmed synth WebSocket url, if paired.
-    pub(crate) fn synth_ws_url(&self) -> Option<String> {
-        self.identity.read().unwrap().as_ref().map(|p| p.ws_url())
-    }
-
     /// Ask the owner, bounded at 55 s. A late answer still records a grant
     /// for (capability, scope), so it applies to the next attempt. On
     /// timeout the caller gets a deny.
@@ -355,6 +472,14 @@ impl Shared {
     ) -> Approval {
         let (tx, rx) = oneshot::channel();
         let remember = req.remember;
+        // The answer is this synth's: the window names it, and a grant
+        // the owner gives is recorded for it alone.
+        let slot = self.current_slot();
+        let synth = slot.as_ref().map(|s| s.synth_id.clone()).unwrap_or_default();
+        let mut req = req;
+        if req.synth.is_none() {
+            req.synth = slot.map(|s| s.display_name());
+        }
         let fut = self.approver.ask(req);
         let me = self.clone();
         let cap = capability.to_string();
@@ -366,7 +491,7 @@ impl Shared {
             if appr.allow && !remember.allows(appr.duration) {
                 appr.duration = crate::grant::Duration_::Once;
             }
-            me.grants.record(&cap, &sc, appr);
+            me.grants.record(&synth, &cap, &sc, appr);
             me.persist_grants();
             let _ = tx.send(appr);
         });
@@ -412,7 +537,7 @@ impl Shared {
             }
             crate::settings::NetMode::Ask => {
                 if s.net.domains.iter().any(|d| d == &domain)
-                    || self.grants.allows("net", &domain)
+                    || self.grant_allows("net", &domain)
                 {
                     return Ok(());
                 }
@@ -764,6 +889,169 @@ impl Shared {
     }
 }
 
+impl Shared {
+    /// Store a confirmed pairing (`pair_confirm`, the account's connect):
+    /// the token under the synth's own key, the pairing on disk, a slot
+    /// for its link. A pairing with a synth that has a link already
+    /// replaces that link's token and wakes its loop (a refused token was
+    /// replaced). Returns whether this was the computer's first link.
+    pub(crate) fn add_link(&self, p: &Pending) -> Result<bool, String> {
+        if p.synth_id.is_empty() {
+            return Err("the synth has no id".into());
+        }
+        let key = crate::slot::token_key(&p.synth_id);
+        self.secret.set(&key, &p.token).map_err(|e| format!("store token: {e}"))?;
+        let first = !self.is_paired();
+        let identity = StoredIdentity {
+            synth_id: p.synth_id.clone(),
+            synth_url: p.synth_url.clone(),
+            synth_name: p.synth_name.clone(),
+            source: p.source,
+            hub_id: p.hub_id.clone(),
+        };
+        {
+            let mut persisted = self.persisted.write().unwrap();
+            match persisted.identities.iter_mut().find(|i| i.synth_id == p.synth_id) {
+                Some(have) => {
+                    have.synth_url = identity.synth_url.clone();
+                    have.source = identity.source;
+                    if !identity.hub_id.is_empty() {
+                        have.hub_id = identity.hub_id.clone();
+                    }
+                    if !identity.synth_name.is_empty() {
+                        have.synth_name = identity.synth_name.clone();
+                    }
+                }
+                None => persisted.identities.push(identity.clone()),
+            }
+            self.save_locked(&persisted);
+        }
+        let existing = self.slot(&p.synth_id);
+        match existing {
+            Some(slot) => {
+                // A token of its own now: an old one under the bare key
+                // that could not be moved is not needed any more.
+                if slot.legacy_token.swap(false, Ordering::AcqRel) {
+                    let _ = self.secret.delete(TOKEN_KEY);
+                }
+                *slot.url.write().unwrap() = p.synth_url.clone();
+                *slot.source.write().unwrap() = p.source;
+                if !p.hub_id.is_empty() {
+                    *slot.hub_id.write().unwrap() = p.hub_id.clone();
+                }
+                if !p.synth_name.is_empty() {
+                    *slot.stored_name.write().unwrap() = p.synth_name.clone();
+                }
+                slot.stopping.store(false, Ordering::Release);
+                self.set_slot_state(&slot, LinkState::Connecting, "paired again");
+                slot.wake.notify_one();
+            }
+            None => {
+                let slot = Arc::new(LinkSlot::from_identity(&identity));
+                self.links.write().unwrap().push(slot.clone());
+                self.set_slot_state(&slot, LinkState::Connecting, "paired");
+            }
+        }
+        self.emit(CoreEvent::Paired { synth_id: p.synth_id.clone() });
+        self.browsers_synth_added();
+        Ok(first)
+    }
+
+    /// Remove one link: its token, its grants, its stored pairing, its
+    /// browsers' link, its hold on the computer. The loop ends (the caller
+    /// set `stopping`). Idempotent.
+    pub(crate) fn wipe_slot(&self, slot: &Arc<LinkSlot>) {
+        slot.stopping.store(true, Ordering::Release);
+        slot.wake.notify_one();
+        let id = slot.synth_id.clone();
+        let _ = self.secret.delete(&slot.token_key);
+        if slot.legacy_token.swap(false, Ordering::AcqRel) {
+            let _ = self.secret.delete(TOKEN_KEY);
+        }
+        self.grants.clear_synth(&id);
+        let removed = {
+            let mut links = self.links.write().unwrap();
+            let before = links.len();
+            links.retain(|l| !Arc::ptr_eq(l, slot));
+            before != links.len()
+        };
+        {
+            let mut persisted = self.persisted.write().unwrap();
+            let before = (persisted.identities.len(), persisted.grants.len());
+            persisted.identities.retain(|i| i.synth_id != id);
+            persisted.grants.retain(|g| g.synth_id != id);
+            if before != (persisted.identities.len(), persisted.grants.len()) {
+                self.save_locked(&persisted);
+            }
+        }
+        self.lease_release(&id);
+        *slot.synth.write().unwrap() = None;
+        self.set_slot_state(slot, LinkState::Unpaired, "unpaired");
+        if removed {
+            let remaining = self.links.read().unwrap().len();
+            self.emit(CoreEvent::Unpaired { synth_id: id.clone(), remaining });
+            self.browsers_synth_removed(&id, remaining);
+        }
+    }
+
+    /// The CLI's link from an address and a token it was handed: not
+    /// stored, the token under the bare key.
+    fn adhoc_slot(&self, ws_url: &str) -> Arc<LinkSlot> {
+        let slot = Arc::new(LinkSlot::new(
+            String::new(),
+            ws_url.to_string(),
+            LinkSource::Code,
+            String::new(),
+            String::new(),
+            TOKEN_KEY.to_string(),
+            true,
+        ));
+        self.links.write().unwrap().push(slot.clone());
+        slot
+    }
+
+    /// The computer is signed in to a platform account.
+    pub(crate) fn account_signed_in(&self) -> bool {
+        self.persisted.read().unwrap().account.is_some()
+            && self.secret.get(crate::account::ACCOUNT_TOKEN_KEY).ok().flatten().is_some_and(|t| !t.is_empty())
+    }
+}
+
+/// Move the token of an app before 0.1.13 (bare `TOKEN_KEY`) to the key of
+/// the synth it belongs to. True when the settings file should be written
+/// in the new shape now.
+fn migrate_legacy_token(secret: &dyn SecretStore, p: &Persisted) -> bool {
+    let Some(old) = p.identity.as_ref() else {
+        return false;
+    };
+    match move_bare_token(secret, &old.synth_id) {
+        // Moved, or no token anywhere (the old pairing was already gone).
+        Ok(_) => true,
+        // Could not move it: the bare key stays, and the link reads it from
+        // there (`legacy_token`) until a later start moves it.
+        Err(()) => false,
+    }
+}
+
+/// Move the token under the bare `TOKEN_KEY` to this synth's own key:
+/// write, read back, and only then remove the bare key. Ok(true) when the
+/// synth's key holds a token now, Ok(false) when there was none anywhere,
+/// Err when the move failed (the bare key is kept).
+fn move_bare_token(secret: &dyn SecretStore, synth_id: &str) -> Result<bool, ()> {
+    let key = crate::slot::token_key(synth_id);
+    let have_new = secret.get(&key).ok().flatten().is_some_and(|t| !t.is_empty());
+    if !have_new {
+        let Some(token) = secret.get(TOKEN_KEY).ok().flatten().filter(|t| !t.is_empty()) else {
+            return Ok(false);
+        };
+        if secret.set(&key, &token).is_err() || secret.get(&key).ok().flatten().as_deref() != Some(token.as_str()) {
+            return Err(());
+        }
+    }
+    let _ = secret.delete(TOKEN_KEY);
+    Ok(true)
+}
+
 /// Where a daemon is and what it was started with.
 struct Endpoint {
     socket: String,
@@ -913,27 +1201,60 @@ impl Core {
         let (settings_tx, _) = watch::channel(persisted.rev);
         let (control_tx, _) = watch::channel(0);
 
-        // State that survives a restart: the confirmed pairing (only while
-        // its token is still in the secret store), the durable grants and
-        // this month's egress count.
-        let has_token = cfg
-            .secret
-            .get(TOKEN_KEY)
-            .ok()
-            .flatten()
-            .is_some_and(|t| !t.is_empty());
-        let identity = match (&persisted.identity, has_token) {
-            (Some(id), true) => Some(Pending {
-                synth_id: id.synth_id.clone(),
-                synth_url: id.synth_url.clone(),
-                token: String::new(), // the link reads it from the secret store
-            }),
-            _ => None,
-        };
+        // An app before 0.1.13 kept its one token under the bare key: it
+        // moves to the key of the synth it belongs to (the one pairing
+        // `settings::load` just moved into the list). Idempotent: once the
+        // synth's own key holds a token, the bare key is only removed.
+        let mut persisted = persisted;
+        let migrated = migrate_legacy_token(cfg.secret.as_ref(), &persisted);
+        if migrated {
+            if let Some(path) = &cfg.settings_path {
+                let _ = settings::save(path, &persisted);
+            }
+        }
+        persisted.identity = None;
+
+        // State that survives a restart: the confirmed pairings (each only
+        // while its token is still in the secret store), their durable
+        // grants and this month's egress count.
+        //
+        // A token of an app before 0.1.13 that could not be moved at an
+        // earlier start (the keychain refused the write) is still under the
+        // bare key while the file is in the new shape already: with exactly
+        // one stored pairing it is that pairing's. The move is tried again;
+        // until it works, the link reads the bare key.
+        let only_one = persisted.identities.len() == 1;
+        let links: Vec<Arc<LinkSlot>> = persisted
+            .identities
+            .iter()
+            .filter_map(|id| {
+                let own = cfg
+                    .secret
+                    .get(&crate::slot::token_key(&id.synth_id))
+                    .ok()
+                    .flatten()
+                    .is_some_and(|t| !t.is_empty());
+                let slot = LinkSlot::from_identity(id);
+                if !own {
+                    if !only_one {
+                        return None;
+                    }
+                    match move_bare_token(cfg.secret.as_ref(), &id.synth_id) {
+                        Ok(true) => {}
+                        Ok(false) => return None,
+                        Err(()) => {
+                            crate::logln!("could not move the pairing token to its own key; using the old one");
+                            slot.legacy_token.store(true, Ordering::Release);
+                        }
+                    }
+                }
+                Some(Arc::new(slot))
+            })
+            .collect();
         let grants = GrantStore::new();
-        if has_token {
-            for g in &persisted.grants {
-                grants.restore(&g.capability, &g.scope, g.until);
+        for g in &persisted.grants {
+            if links.iter().any(|l| l.synth_id == g.synth_id) {
+                grants.restore(&g.synth_id, &g.capability, &g.scope, g.until);
             }
         }
         let month = month_key();
@@ -995,7 +1316,6 @@ impl Core {
             cua_start_backoff: Mutex::new(StartBackoff::default()),
             paused: AtomicBool::new(false),
             metered: AtomicBool::new(false),
-            stopping: AtomicBool::new(false),
             streams_open: AtomicUsize::new(0),
             cua_sessions: AtomicUsize::new(0),
             cua_dir,
@@ -1006,27 +1326,18 @@ impl Core {
                 unsaved: 0,
                 last_flush: Instant::now(),
             }),
-            identity: RwLock::new(identity),
+            links: RwLock::new(links),
             pending: Mutex::new(None),
-            synth: RwLock::new(None),
-            link_state: RwLock::new(LinkState::Unpaired),
+            lease: Mutex::new(None),
+            account: crate::account::State::default(),
             events,
             settings_tx,
             control_tx,
-            unpair_req: tokio::sync::Notify::new(),
-            unpair_ack: tokio::sync::Notify::new(),
-            requests: crate::requests::LinkRequests::default(),
             browsers: crate::browser::Hub::default(),
             cookies_extension_first: AtomicBool::new(cfg!(windows)),
             transfers: crate::rpc::Transfers::default(),
             shell: crate::shell::State::default(),
         });
-        // A stored token means we are already paired: reflect it. The
-        // synth url/id come back from settings.json (see above); the CLI
-        // may also pass the url to run_link().
-        if has_token {
-            shared.set_link_state(LinkState::Connecting, "token present");
-        }
         Core { shared }
     }
 
@@ -1191,16 +1502,20 @@ impl Core {
 
     // --- grants ---
 
-    pub fn grant_list(&self) -> Vec<(String, String, i64)> {
+    /// Every live grant, with the synth it was given to.
+    pub fn grant_list(&self) -> Vec<GrantRow> {
         self.shared.grants.list()
     }
-    pub fn revoke(&self, capability: &str, scope: &str) {
-        self.shared.grants.revoke(capability, scope);
+    /// Take back one synth's grant. `synth_id` None = the grant of the
+    /// only synth there is (the CLI).
+    pub fn revoke(&self, synth_id: Option<&str>, capability: &str, scope: &str) {
+        let synth = synth_id.map(str::to_string).unwrap_or_else(|| self.shared.current_synth_id());
+        self.shared.grants.revoke(&synth, capability, scope);
         self.shared.persist_grants();
-        // A site taken back here is taken back in the browsers too: no
-        // extension keeps the right to read its cookies.
+        // A site taken back here is taken back in that synth's browsers
+        // too: none of them keeps the right to read its cookies.
         if capability == "cookies" {
-            self.shared.browsers_revoke_site(scope);
+            self.shared.browsers_revoke_site(&synth, scope);
         }
     }
 
@@ -1243,17 +1558,12 @@ impl Core {
         self.shared.paused.store(true, Ordering::Release);
         self.shared.shell.stop_all();
         self.shared.stop_cua().await;
-        self.shared.set_link_state(LinkState::Paused, "paused by the owner");
         let _ = self.shared.events.send(CoreEvent::Paused { paused: true });
         self.shared.bump_control();
     }
 
     pub fn resume(&self) {
         self.shared.paused.store(false, Ordering::Release);
-        // Restore the link status if we had paused a live link.
-        if self.shared.synth.read().unwrap().is_some() {
-            self.shared.set_link_state(LinkState::Linked, "resumed");
-        }
         let _ = self.shared.events.send(CoreEvent::Paused { paused: false });
         self.shared.bump_control();
     }
@@ -1262,22 +1572,32 @@ impl Core {
 
     // --- pairing ---
 
-    /// Claim a code against the hub. The result is held in memory only;
-    /// NOTHING is stored and no link is opened until `pair_confirm`.
-    /// Returns the synth identity to show on the confirmation screen.
+    /// Claim a code. The result is held in memory only; NOTHING is stored
+    /// and no link is opened until `pair_confirm`. Returns the synth
+    /// identity to show on the confirmation screen.
+    ///
+    /// While the computer is signed in to a platform account the code goes
+    /// to the platform (`/api/app/v1/link-code`), which also ties the
+    /// synth to the account; otherwise to the hub (claim-pair), as before.
     pub async fn pair_begin(&self, hub_url: String, code: String) -> Result<Pending, String> {
-        let hub = self.shared.hub.clone();
-        let pending = tokio::task::spawn_blocking(move || hub.claim(&hub_url, &code))
-            .await
-            .map_err(|e| format!("join: {e}"))?
-            .map_err(|e| e.to_string())?;
-        let p = Pending::from_claim(pending);
+        let p = if self.shared.account_signed_in() {
+            crate::account::link_code(&self.shared, &code).await?
+        } else {
+            let hub = self.shared.hub.clone();
+            let claimed = tokio::task::spawn_blocking(move || hub.claim(&hub_url, &code))
+                .await
+                .map_err(|e| format!("join: {e}"))?
+                .map_err(|e| e.to_string())?;
+            Pending::from_claim(claimed)
+        };
         *self.shared.pending.lock().unwrap() = Some(p.clone());
         Ok(p)
     }
 
     /// Confirm the pending pairing: store the token and remember the synth
-    /// url/id. Only now may a link open.
+    /// url/id. Only now may a link open. A pairing with a synth this
+    /// computer is linked to already replaces that link's token (a new
+    /// code after the synth refused the old one).
     pub fn pair_confirm(&self) -> Result<Pending, String> {
         let p = self
             .shared
@@ -1286,52 +1606,38 @@ impl Core {
             .unwrap()
             .take()
             .ok_or("no pending pairing to confirm")?;
-        self.shared
-            .secret
-            .set(TOKEN_KEY, &p.token)
-            .map_err(|e| format!("store token: {e}"))?;
-        self.shared.stopping.store(false, Ordering::Release);
-        *self.shared.identity.write().unwrap() = Some(p.clone());
-        {
-            let mut persisted = self.shared.persisted.write().unwrap();
-            persisted.identity = Some(StoredIdentity {
-                synth_id: p.synth_id.clone(),
-                synth_url: p.synth_url.clone(),
-                synth_name: String::new(),
-            });
-            self.shared.save_locked(&persisted);
-        }
-        self.shared.set_link_state(LinkState::Connecting, "paired");
-        let _ = self.shared.events.send(CoreEvent::Paired {
-            synth_id: p.synth_id.clone(),
-        });
-        self.shared.browsers_link_changed(true);
+        self.shared.add_link(&p)?;
         Ok(p)
     }
 
-    /// Unpair: tell the synth, wait briefly for `unpair_ack`, then wipe
-    /// the token, grants and local state regardless of the answer.
-    pub async fn unpair(&self) {
+    /// Unpair one synth: tell it, wait briefly for `unpair_ack`, then wipe
+    /// its token, its grants, its browsers and its stored pairing
+    /// regardless of the answer. The other links, the settings and the
+    /// journal stay.
+    pub async fn unpair_synth(&self, synth_id: &str) {
+        let Some(slot) = self.shared.slot(synth_id) else {
+            return;
+        };
         // Stop the reconnect loop so a link that drops during unpair does
         // not race back online before we wipe the token.
-        self.shared.stopping.store(true, Ordering::Release);
-        // Send the unpair over any live link (Linked or Paused), then wait
-        // briefly for the ack. We wipe regardless of the answer.
-        let live = !matches!(
-            *self.shared.link_state.read().unwrap(),
-            LinkState::Unpaired | LinkState::Connecting | LinkState::Reconnecting
-        );
-        if live {
-            self.shared.unpair_req.notify_one();
+        slot.stopping.store(true, Ordering::Release);
+        slot.wake.notify_one();
+        // Send the unpair over a live link, then wait briefly for the ack.
+        // We wipe regardless of the answer.
+        if slot.state() == LinkState::Linked {
+            slot.unpair_req.notify_one();
             // The synth acks then closes at once, so our reader may see EOF
             // before the ack; a short bounded wait is enough and we wipe
             // regardless (connect.md).
-            let _ = tokio::time::timeout(
-                Duration::from_secs(3),
-                self.shared.unpair_ack.notified(),
-            )
-            .await;
+            let _ = tokio::time::timeout(Duration::from_secs(3), slot.unpair_ack.notified()).await;
         }
+        self.shared.wipe_slot(&slot);
+    }
+
+    /// Unpair every synth (in parallel: each waits up to 3 s for its ack).
+    pub async fn unpair(&self) {
+        let ids: Vec<String> = self.shared.slots().iter().map(|s| s.synth_id.clone()).collect();
+        futures::future::join_all(ids.iter().map(|id| self.unpair_synth(id))).await;
         self.wipe_local();
     }
 
@@ -1344,35 +1650,48 @@ impl Core {
         self.shared.pending.lock().unwrap().clone()
     }
 
-    /// The confirmed synth url, if paired.
+    /// The first link's synth url, if paired.
     pub fn synth_url(&self) -> Option<String> {
-        self.shared.identity.read().unwrap().as_ref().map(|p| p.ws_url())
+        self.shared.slots().first().map(|s| s.ws_url())
     }
 
-    /// Is this computer paired (a confirmed synth and its token on hand)?
+    /// Is this computer paired with at least one synth (a confirmed
+    /// pairing and its token on hand)?
     pub fn is_paired(&self) -> bool {
-        self.shared.identity.read().unwrap().is_some()
+        self.shared.is_paired()
     }
 
-    /// Wipe the token, grants and pending/identity. Called after a bounded
-    /// wait for `unpair_ack` (the link sends `unpair` first). Idempotent.
+    /// The ids of every link, in the order they were made.
+    pub fn link_ids(&self) -> Vec<String> {
+        self.shared.slots().iter().filter(|s| !s.adhoc).map(|s| s.synth_id.clone()).collect()
+    }
+
+    /// Every link as the UI shows it.
+    pub fn links(&self) -> Vec<LinkBrief> {
+        let paused = self.shared.paused();
+        self.shared.slots().iter().map(|s| s.brief(paused)).collect()
+    }
+
+    /// Wipe every token, grant, pending pairing and stored pairing.
+    /// Called after a bounded wait for `unpair_ack` (the link sends
+    /// `unpair` first). Idempotent.
     pub fn wipe_local(&self) {
+        for slot in self.shared.slots() {
+            slot.stopping.store(true, Ordering::Release);
+            slot.wake.notify_one();
+            self.shared.wipe_slot(&slot);
+        }
         let _ = self.shared.secret.delete(TOKEN_KEY);
         self.shared.grants.clear();
-        *self.shared.identity.write().unwrap() = None;
         *self.shared.pending.lock().unwrap() = None;
-        *self.shared.synth.write().unwrap() = None;
         {
             let mut persisted = self.shared.persisted.write().unwrap();
-            if persisted.identity.is_some() || !persisted.grants.is_empty() {
-                persisted.identity = None;
+            if !persisted.identities.is_empty() || !persisted.grants.is_empty() {
+                persisted.identities.clear();
                 persisted.grants.clear();
                 self.shared.save_locked(&persisted);
             }
         }
-        self.shared.set_link_state(LinkState::Unpaired, "unpaired");
-        let _ = self.shared.events.send(CoreEvent::Unpaired);
-        self.shared.browsers_link_changed(false);
     }
 
     // --- cua helpers for the UI ---
@@ -1517,36 +1836,19 @@ impl Core {
 
     /// The cheap part of the snapshot: no Cua probe, no await. For a tray
     /// label that is refreshed on every event.
-    pub fn link_brief(&self) -> LinkBrief {
-        let synth = self.shared.synth.read().unwrap().clone();
-        let identity = self.shared.identity.read().unwrap().clone();
-        let paired = identity.is_some();
-        let stored_name = self
-            .shared
-            .persisted
-            .read()
-            .unwrap()
-            .identity
-            .as_ref()
-            .map(|i| i.synth_name.clone())
-            .filter(|n| !n.is_empty());
-        LinkBrief {
-            link_state: *self.shared.link_state.read().unwrap(),
-            paired,
-            paused: self.shared.paused(),
-            synth_id: synth
-                .as_ref()
-                .map(|s| s.synth_id.clone())
-                .or_else(|| identity.as_ref().map(|i| i.synth_id.clone())),
-            // Before the first hello_ack of this run, fall back to what
-            // the pairing stored, so the UI can name the synth offline.
-            synth_name: synth
-                .as_ref()
-                .map(|s| s.synth_name.clone())
-                .filter(|n| !n.is_empty())
-                .or(if paired { stored_name } else { None }),
-            synth_url: identity.as_ref().map(|i| i.synth_url.clone()),
-            synth_version: synth.as_ref().map(|s| s.synth_version.clone()),
+    pub fn link_brief(&self) -> Brief {
+        let paused = self.shared.paused();
+        let links = self.links();
+        let first = links.first();
+        Brief {
+            link_state: aggregate_state(&links, paused),
+            paired: self.shared.is_paired(),
+            paused,
+            synth_id: first.map(|l| l.synth_id.clone()).filter(|id| !id.is_empty()),
+            synth_name: first.and_then(|l| l.synth_name.clone()),
+            synth_url: first.map(|l| l.synth_url.clone()),
+            synth_version: first.and_then(|l| l.synth_version.clone()),
+            links,
         }
     }
 
@@ -1565,6 +1867,7 @@ impl Core {
             synth_name: brief.synth_name,
             synth_url: brief.synth_url,
             synth_version: brief.synth_version,
+            links: brief.links,
             idle_seconds: presence.idle_seconds,
             screen_locked: presence.screen_locked,
             paused: self.shared.paused(),
@@ -1574,21 +1877,94 @@ impl Core {
             cua_version,
             cua_status,
             computer_task: self.shared.computer_task(),
+            computer_driver: self.shared.computer_driver().map(|(_, name)| name),
             egress_month: counters.0,
             egress_bytes: counters.1,
         }
     }
 
-    /// Run the link loop until shutdown. The CLI calls this; a Tauri shell
-    /// spawns it. `ws_url` overrides the paired synth url (for tests).
-    pub async fn run_link(&self, ws_url: Option<String>, shutdown: watch::Receiver<bool>) {
-        crate::link::run_forever(self.shared.clone(), ws_url, shutdown).await;
+    /// One reconnect loop for the computer's single link: the CLI calls
+    /// this. `ws_url` overrides the paired synth url; without a pairing,
+    /// a url and the token under the bare `TOKEN_KEY` make a link that is
+    /// not stored (`connectd run --url --token`). Returns when the app
+    /// shuts down or the link is unpaired. A host with several links runs
+    /// `run_slot` per link instead.
+    pub async fn run_link(&self, ws_url: Option<String>, mut shutdown: watch::Receiver<bool>) {
+        loop {
+            if *shutdown.borrow() {
+                return;
+            }
+            let slot = match (self.shared.slots().first().cloned(), &ws_url) {
+                (Some(slot), _) => slot,
+                (None, Some(url)) => self.shared.adhoc_slot(url),
+                (None, None) => {
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                        _ = shutdown.changed() => {}
+                    }
+                    continue;
+                }
+            };
+            crate::link::run_forever(self.shared.clone(), slot, ws_url.clone(), shutdown).await;
+            return;
+        }
+    }
+
+    /// The reconnect loop of one link. Returns at once when that link is
+    /// unknown or a loop runs it already; else when the app shuts down or
+    /// the link is unpaired. The shell calls it for every link it has
+    /// (and again after a new pairing: a second call is harmless).
+    pub async fn run_slot(&self, synth_id: &str, shutdown: watch::Receiver<bool>) {
+        let Some(slot) = self.shared.slot(synth_id) else {
+            return;
+        };
+        if slot.running.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        crate::link::run_forever(self.shared.clone(), slot.clone(), None, shutdown).await;
+        slot.running.store(false, Ordering::Release);
+    }
+
+    /// The owner asks a link that needs a new token to try again: an
+    /// account link gets a fresh token from the platform; a link made with
+    /// a code cannot (Err("needs_code"): the owner asks the bot for a new
+    /// code, and `pair_begin` + `pair_confirm` with it replace the token).
+    pub async fn reconnect_synth(&self, synth_id: &str) -> Result<(), String> {
+        let slot = self.shared.slot(synth_id).ok_or("unknown_synth")?;
+        if slot.source() != LinkSource::Account {
+            return Err("needs_code".into());
+        }
+        crate::account::remint(&self.shared, &slot).await?;
+        slot.wake.notify_one();
+        Ok(())
     }
 }
 
-/// Who we are linked to and how the link stands (see `Core::link_brief`).
+/// How the computer's links stand together, for a single status line: a
+/// pause first, then the best a link does.
+pub fn aggregate_state(links: &[LinkBrief], paused: bool) -> LinkState {
+    if links.is_empty() {
+        return LinkState::Unpaired;
+    }
+    if paused {
+        return LinkState::Paused;
+    }
+    for want in [LinkState::Linked, LinkState::Connecting, LinkState::Reconnecting] {
+        if links.iter().any(|l| l.state == want) {
+            return want;
+        }
+    }
+    if links.iter().all(|l| l.state == LinkState::NeedsRepair) {
+        return LinkState::NeedsRepair;
+    }
+    LinkState::Unpaired
+}
+
+/// Who we are linked to and how the links stand (see `Core::link_brief`).
+/// The `synth_*` fields are the first link's, for a host that shows one
+/// name; `links` has them all.
 #[derive(Debug, Clone, Serialize)]
-pub struct LinkBrief {
+pub struct Brief {
     pub link_state: LinkState,
     pub paired: bool,
     pub paused: bool,
@@ -1596,19 +1972,24 @@ pub struct LinkBrief {
     pub synth_name: Option<String>,
     pub synth_url: Option<String>,
     pub synth_version: Option<String>,
+    pub links: Vec<LinkBrief>,
 }
 
 /// A read-only picture of the core for the UI.
 #[derive(Debug, Clone, Serialize)]
 pub struct Snapshot {
+    /// The links together (`aggregate_state`).
     pub link_state: LinkState,
-    /// A confirmed pairing exists (whether or not the link is up).
+    /// A confirmed pairing exists (whether or not a link is up).
     pub paired: bool,
+    /// The first link's synth (a host that shows one name).
     pub synth_id: Option<String>,
     pub synth_name: Option<String>,
-    /// The paired synth's base url (https://...), if paired.
+    /// The first link's base url (https://...), if paired.
     pub synth_url: Option<String>,
     pub synth_version: Option<String>,
+    /// Every link.
+    pub links: Vec<LinkBrief>,
     pub idle_seconds: u64,
     pub screen_locked: bool,
     pub paused: bool,
@@ -1621,6 +2002,9 @@ pub struct Snapshot {
     /// cut to what the driver shows under the agent's cursor. The synth's
     /// own words: show them as such. None when nothing is running.
     pub computer_task: Option<String>,
+    /// The name of the synth that holds computer control right now (one
+    /// synth drives at a time); None when none does.
+    pub computer_driver: Option<String>,
     pub egress_month: String,
     pub egress_bytes: u64,
 }
@@ -2217,14 +2601,15 @@ mod tests {
         // begin stores nothing
         let p = core.pair_begin("https://hub".into(), "123456".into()).await.unwrap();
         assert_eq!(p.synth_id, "mia");
-        assert_eq!(secret.get(TOKEN_KEY).unwrap(), None);
-        // confirm stores the token
+        assert_eq!(secret.get(&crate::slot::token_key("mia")).unwrap(), None);
+        // confirm stores the token, under the synth's own key
         core.pair_confirm().unwrap();
-        assert_eq!(secret.get(TOKEN_KEY).unwrap().as_deref(), Some("tok-abc"));
+        assert_eq!(secret.get(&crate::slot::token_key("mia")).unwrap().as_deref(), Some("tok-abc"));
+        assert_eq!(secret.get(TOKEN_KEY).unwrap(), None);
         assert_eq!(core.synth_url().as_deref(), Some("wss://mia.snth.ai/api/connect/ws"));
         // unpair wipes it
         core.wipe_local();
-        assert_eq!(secret.get(TOKEN_KEY).unwrap(), None);
+        assert_eq!(secret.get(&crate::slot::token_key("mia")).unwrap(), None);
     }
 
     #[tokio::test]
@@ -2234,7 +2619,7 @@ mod tests {
         core.pair_cancel();
         assert!(core.pending().is_none());
         core.pair_confirm().unwrap_err();
-        assert_eq!(secret.get(TOKEN_KEY).unwrap(), None);
+        assert_eq!(secret.get(&crate::slot::token_key("mia")).unwrap(), None);
     }
 
     #[tokio::test]
@@ -2251,7 +2636,7 @@ mod tests {
         let sh = core.shared();
         // AutoAllow grants Always, so the first ask caches the domain.
         sh.net_allows("www.youtube.com", "the synth says: watch a video").await.unwrap();
-        assert!(sh.grants().allows("net", "youtube.com"));
+        assert!(sh.grants().allows("", "net", "youtube.com"));
         // second call passes without asking (grant cached)
         sh.net_allows("m.youtube.com", "again").await.unwrap();
     }
@@ -2308,7 +2693,7 @@ mod tests {
         assert!(matches!(e, Refusal::Denied(_)));
         // The late answer lands; the grant is recorded for next time.
         tokio::time::sleep(Duration::from_secs(80)).await;
-        assert!(sh.grants().allows("net", "youtube.com"));
+        assert!(sh.grants().allows("", "net", "youtube.com"));
         // Next attempt passes without asking.
         sh.net_allows("m.youtube.com", "").await.unwrap();
     }
@@ -2352,6 +2737,7 @@ mod tests {
         sh.net_allows("www.youtube.com", "").await.unwrap();
         // A session grant must NOT be written.
         sh.grants().record(
+            "mia",
             "cookies",
             "session-only.com",
             Approval { allow: true, duration: crate::grant::Duration_::Session },
@@ -2371,15 +2757,15 @@ mod tests {
         assert_eq!(snap.synth_url.as_deref(), Some("https://mia.snth.ai"));
         assert_eq!(snap.egress_bytes, 1234);
         let sh = core.shared();
-        assert!(sh.grants().allows("net", "youtube.com"));
-        assert!(!sh.grants().allows("cookies", "session-only.com"));
+        assert!(sh.grants().allows("mia", "net", "youtube.com"));
+        assert!(!sh.grants().allows("mia", "cookies", "session-only.com"));
 
         // Revoke is durable too.
-        core.revoke("net", "youtube.com");
+        core.revoke(Some("mia"), "net", "youtube.com");
         drop(sh);
         drop(core);
         let core = file_core(&dir, secret.clone());
-        assert!(!core.shared().grants().allows("net", "youtube.com"));
+        assert!(!core.shared().grants().allows("mia", "net", "youtube.com"));
 
         // Unpair wipes the stored pairing.
         core.wipe_local();
@@ -2400,7 +2786,7 @@ mod tests {
         core.pair_confirm().unwrap();
         drop(core);
         // The keychain entry is gone (say, the user deleted it).
-        secret.delete(TOKEN_KEY).unwrap();
+        secret.delete(&crate::slot::token_key("mia")).unwrap();
         let core = file_core(&dir, secret);
         assert!(!core.is_paired());
         assert!(!core.snapshot().await.paired);

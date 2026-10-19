@@ -18,6 +18,8 @@ const ICONS: Record<LineKind, () => React.JSX.Element> = {
 
 export function Activity() {
   const { state, journal, s, lang, name } = useStore();
+  // Whose line it is matters once more than one synth uses this computer.
+  const several = state.core.links.length > 1;
   const t = s.activity;
   const [filter, setFilter] = useState<Filter>("all");
 
@@ -49,7 +51,7 @@ export function Activity() {
   return (
     <>
       <h1 className="page-title">{s.nav.activity}</h1>
-      <p className="page-lead">{t.lead(name)}</p>
+      <p className="page-lead">{several ? t.leadMany : t.lead(name)}</p>
 
       <div className="filters" role="group" aria-label={s.nav.activity}>
         {filters.map((f) => (
@@ -75,6 +77,7 @@ export function Activity() {
                   <li className={`line${line.refused ? " refused" : ""}`} key={line.key}>
                     <span className="line-time">{formatClock(line.time, lang)}</span>
                     <Icon />
+                    {several && line.synth ? <span className="tag">{line.synth}</span> : null}
                     <span className="line-text selectable">{line.text}</span>
                     {note ? <span className="line-note">{note}</span> : null}
                   </li>
