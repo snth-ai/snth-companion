@@ -378,6 +378,123 @@ export interface LoginsState {
   vault_synth: string | null;
 }
 
+// --- the island ---
+
+/** A synth's face (FaceConfig v1). The shape lives with the face module
+ * (island/face/schema.ts); here it only travels. */
+export type FaceConfig = Record<string, unknown>;
+
+export type HotkeyKind = "voice" | "screen_voice" | "text";
+export interface Hotkeys {
+  voice: string;
+  screen_voice: string;
+  text: string;
+}
+
+export type MicPermission = "granted" | "denied" | "not_asked" | "unknown";
+
+export interface IslandSettings {
+  /** Off by default (a test feature). */
+  enabled: boolean;
+  /** The synth the keys talk to; "" = the first linked synth. */
+  main_synth: string;
+  /** Accelerators; "" = that key is off. */
+  hotkeys: Hotkeys;
+}
+
+/** The Island screen. */
+export interface IslandState {
+  /** The island can be shown on this system (macOS, Windows). */
+  available: boolean;
+  settings: IslandSettings;
+  /** The synth the keys talk to right now; null without links. */
+  main_synth: string | null;
+  /** synth_id -> its face; absent = the default preset of its id. */
+  faces: Record<string, FaceConfig>;
+  /** synth_id -> it takes island messages (announced the feature). */
+  supported: Record<string, boolean>;
+  /** This system's default keys. */
+  defaults: Hotkeys;
+  /** The keys are registered with the system right now. */
+  keys_active: boolean;
+  /** A key the system would not give: "taken" or "bad". */
+  key_problems: Partial<Record<HotkeyKind, string>>;
+  mic: MicPermission;
+}
+
+/** What face.set answered. */
+export type FaceSetResult = { result: "saved"; face: FaceConfig } | { result: "invalid"; reason: string };
+
+export interface IslandRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** Where the island is: the window, the notch in it, the closed shape. */
+export interface IslandPlacement {
+  window: IslandRect;
+  notch: IslandRect;
+  pill: IslandRect;
+  /** A real notch (the shape merges with it) or one drawn as if. */
+  real_notch: boolean;
+}
+
+export interface IslandSynth {
+  id: string;
+  name: string;
+  online: boolean;
+}
+
+/** The last message the owner sent from the island. */
+export interface IslandMessage {
+  synth_id: string;
+  message_id: string;
+  stage: "accepted" | "working" | "done" | "error";
+  /** When this stage began (unix ms). */
+  at_ms: number;
+  /** done: a short summary of the answer; error: a short text. */
+  summary: string;
+  /** Where the answer went: telegram, tguser, imessage... */
+  channel: string;
+}
+
+export interface IslandNotice {
+  code: string;
+  detail: string;
+  at_ms: number;
+}
+
+/** Everything the island window renders. */
+export interface IslandView {
+  os: string;
+  lang: "en" | "ru";
+  placement: IslandPlacement | null;
+  synth: IslandSynth | null;
+  face: FaceConfig | null;
+  supported: boolean;
+  synths: IslandSynth[];
+  paused: boolean;
+  driving: boolean;
+  task: string | null;
+  hold: "voice" | "screen_voice" | null;
+  hold_since_ms: number;
+  text_open: boolean;
+  sending: boolean;
+  message: IslandMessage | null;
+  notice: IslandNotice | null;
+  approval: ApprovalRequest | null;
+  hover: boolean;
+  hotkeys: Hotkeys;
+  mic: MicPermission;
+}
+
+export type IslandSignal =
+  | { type: "view"; view: IslandView }
+  | { type: "gaze"; x: number; y: number; agent: boolean }
+  | { type: "level"; level: number };
+
 export interface UiState {
   core: Snapshot;
   link_detail: string;
@@ -398,6 +515,8 @@ export interface UiState {
   logins: LoginsState;
   /** The SNTH account. */
   account: AccountState;
+  /** The island (the Island screen). */
+  island: IslandState;
   prefs: {
     onboarded: boolean;
     /** "en" / "ru" when the owner picked one; null = follow the system. */
@@ -516,6 +635,8 @@ export type ExternalTarget =
   | "privacy_screen"
   | "privacy_automation"
   | "privacy_full_disk"
+  /** The island's microphone. */
+  | "privacy_microphone"
   | "helper"
   | "vault_extension"
   /** Safari's settings, at the extension that ships in this app. */
@@ -532,7 +653,9 @@ export type UiEvent =
   | { type: "journal"; entry: Entry }
   | { type: "approval"; request: ApprovalRequest }
   | { type: "approval_closed"; id: number }
-  | { type: "pair_link" };
+  | { type: "pair_link" }
+  /** The island asked the main window to show a screen. */
+  | { type: "open_screen"; screen: string };
 
 /** Everything the UI can ask of the shell. Two implementations: the real
  * one (Tauri commands) and the in-memory mock used in a plain browser. */
@@ -620,6 +743,30 @@ export interface Backend {
   setDeveloper(enabled: boolean): Promise<UiState>;
   diagnostics(): Promise<string>;
   openExternal(target: ExternalTarget): Promise<void>;
+
+  // --- the island: the Island screen ---
+  islandSet(enabled: boolean | null, mainSynth: string | null): Promise<UiState>;
+  /** Err: bad_shortcut, conflict:<voice|screen_voice|text|stop>, shortcut_unavailable. */
+  islandHotkeySet(which: HotkeyKind, accelerator: string): Promise<UiState>;
+  islandHotkeyReset(which: HotkeyKind): Promise<UiState>;
+  faceRefresh(synthId: string): Promise<UiState>;
+  faceSet(synthId: string, face: FaceConfig, patch: boolean): Promise<FaceSetResult>;
+  /** "Ask <name> to design their own face": a line of text to that synth. */
+  islandAskDesign(synthId: string): Promise<void>;
+  /** The microphone: make the system ask, or open its privacy settings. */
+  islandMic(): Promise<void>;
+
+  // --- the island window ---
+  islandView(): Promise<IslandView>;
+  islandLayout(hit: IslandRect, faceX: number, faceY: number): Promise<void>;
+  islandTextSubmit(text: string): Promise<void>;
+  islandTextCancel(): Promise<void>;
+  islandSelectSynth(synthId: string): Promise<void>;
+  /** "Stop": pause, as the stop shortcut does. */
+  islandStop(): Promise<void>;
+  islandOpenApp(): Promise<void>;
+  /** The island window's own signals: its view, the gaze, the mic level. */
+  subscribeIsland(listener: (signal: IslandSignal) => void): () => void;
 
   subscribe(listener: (event: UiEvent) => void): () => void;
 }

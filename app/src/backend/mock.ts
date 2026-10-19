@@ -67,6 +67,8 @@
 //         &login=denied|expired makes that sign-in fail.
 //         &connectfail=connect_unavailable|synth_outdated|synth_unreachable
 //         makes connecting to Maya fail with that error.)
+//   &island=...   (the Island screen and the island window: see
+//        mockIsland.ts for the scenarios)
 //   &lang=en|ru  &theme=light|dark  &os=macos|windows|linux
 //
 // Nothing here touches the network, the disk or the real computer.
@@ -103,7 +105,12 @@ import type {
   UiState,
   UpdateBlock,
   UpdateStatus,
+  FaceConfig,
+  HotkeyKind,
+  IslandRect,
+  IslandSignal,
 } from "./types";
+import { MockIslandScreen, MockIslandWindow, stagedIslandState } from "./mockIsland";
 
 const params = new URLSearchParams(window.location.search);
 const HOME = "/Users/alex";
@@ -759,6 +766,12 @@ class MockBackend implements Backend {
   private safariSteps = 0;
   private updateTimers: number[] = [];
   private workTimer: number | undefined;
+  private islandScreen = new MockIslandScreen(
+    () => this.state,
+    () => this.changed(),
+  );
+  /** The island window's own mock (island.html). */
+  readonly islandWin = new MockIslandWindow();
 
   constructor() {
     const roots = [
@@ -832,6 +845,7 @@ class MockBackend implements Backend {
       // The vault is asked when the Logins page opens (`loginsRefresh`).
       logins: { ...stagedBrowsers(os), vault: { state: "unknown" }, vault_synth: "mia" },
       account: signedOut(),
+      island: stagedIslandState(os, [linkOf("mia", "code")]),
       prefs: {
         onboarded: true,
         language: params.get("lang"),
@@ -860,6 +874,8 @@ class MockBackend implements Backend {
     this.stageApps(os);
     this.applyScenario();
     this.refreshApps();
+    this.state.island = stagedIslandState(os, this.state.core.links);
+    if (params.get("island") === "nolink") this.setLink(0, "reconnecting", "connect: no answer in 15s");
   }
 
   /** The app list follows the settings and the system. */
@@ -1705,6 +1721,7 @@ class MockBackend implements Backend {
   }
 
   approvalAnswer(id: number, allow: boolean, duration: AnswerDuration, hours?: number) {
+    this.islandWin.answerApproval();
     const req = this.approvals.find((a) => a.id === id);
     if (!req) return this.reply(false);
     this.approvals = this.approvals.filter((a) => a.id !== id);
@@ -1995,6 +2012,74 @@ class MockBackend implements Backend {
         `Cua Driver: ${c.cua_version || "not installed"} (status ${c.cua_status})`,
       ].join("\n"),
     );
+  }
+
+  // --- the island ---
+
+  islandSet(enabled: boolean | null, mainSynth: string | null) {
+    return this.islandScreen.set(enabled, mainSynth);
+  }
+
+  islandHotkeySet(which: HotkeyKind, accelerator: string) {
+    return this.islandScreen.setHotkey(which, accelerator);
+  }
+
+  islandHotkeyReset(which: HotkeyKind) {
+    return this.islandScreen.resetHotkey(which);
+  }
+
+  faceRefresh(_synthId: string) {
+    return this.islandScreen.faceRefresh();
+  }
+
+  faceSet(synthId: string, face: FaceConfig, _patch: boolean) {
+    return this.islandScreen.faceSet(synthId, face);
+  }
+
+  islandAskDesign(synthId: string) {
+    return this.islandScreen.askDesign(synthId);
+  }
+
+  islandMic() {
+    if (this.state.island.mic === "not_asked") {
+      this.state.island.mic = "granted";
+      this.emit({ type: "state" });
+    } else console.info("[mock] would open: privacy_microphone");
+    return this.reply(undefined);
+  }
+
+  islandView() {
+    return this.islandWin.get();
+  }
+
+  islandLayout(hit: IslandRect, faceX: number, faceY: number) {
+    this.islandWin.layout(hit, faceX, faceY);
+    return Promise.resolve();
+  }
+
+  islandTextSubmit(text: string) {
+    return this.islandWin.textSubmit(text);
+  }
+
+  islandTextCancel() {
+    return this.islandWin.textCancel();
+  }
+
+  islandSelectSynth(synthId: string) {
+    return this.islandWin.selectSynth(synthId);
+  }
+
+  islandStop() {
+    return this.islandWin.stop();
+  }
+
+  islandOpenApp() {
+    console.info("[mock] would open the app at its Island screen");
+    return Promise.resolve();
+  }
+
+  subscribeIsland(listener: (signal: IslandSignal) => void) {
+    return this.islandWin.subscribe(listener);
   }
 
   openExternal(target: string) {

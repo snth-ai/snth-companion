@@ -8,14 +8,15 @@ import { Computer } from "./screens/Computer";
 import { Files } from "./screens/Files";
 import { General } from "./screens/General";
 import { Internet } from "./screens/Internet";
+import { Island } from "./screens/Island";
 import { Logins } from "./screens/Logins";
 import { Onboarding, type Step } from "./screens/Onboarding";
 import { PairSheet } from "./screens/Pairing";
 import { Status } from "./screens/Status";
-import { IconApps, IconCookie, IconFolder, IconGlobe, IconList, IconPause, IconPlay, IconPointer, IconSliders, IconStatus } from "./ui/icons";
+import { IconApps, IconCookie, IconIsland, IconFolder, IconGlobe, IconList, IconPause, IconPlay, IconPointer, IconSliders, IconStatus } from "./ui/icons";
 
-export type Screen = "status" | "internet" | "computer" | "files" | "apps" | "cookies" | "activity" | "general";
-const SCREENS: Screen[] = ["status", "internet", "cookies", "computer", "files", "apps", "activity", "general"];
+export type Screen = "status" | "internet" | "computer" | "files" | "apps" | "island" | "cookies" | "activity" | "general";
+const SCREENS: Screen[] = ["status", "internet", "cookies", "computer", "files", "apps", "island", "activity", "general"];
 
 function Sidebar(props: { screen: Screen; go: (screen: Screen) => void }) {
   const { state, s, act } = useStore();
@@ -48,6 +49,7 @@ function Sidebar(props: { screen: Screen; go: (screen: Screen) => void }) {
     { screen: "computer", icon: <IconPointer />, title: s.nav.computer, off: !settings.computer.enabled },
     { screen: "files", icon: <IconFolder />, title: s.nav.files, off: !settings.files.enabled },
     { screen: "apps", icon: <IconApps />, title: s.nav.apps, off: !settings.apps.enabled },
+    { screen: "island", icon: <IconIsland />, title: s.nav.island, off: !state.island.settings.enabled },
     { screen: "activity", icon: <IconList />, title: s.nav.activity },
     { screen: "general", icon: <IconSliders />, title: s.nav.general },
   ];
@@ -122,6 +124,18 @@ export function App(props: { initialScreen?: string | null; initialStep?: Step }
     mainRef.current?.scrollTo({ top: 0 });
   };
 
+  // The island's "Open SNTH Connect" brings the window up at a screen.
+  useEffect(
+    () =>
+      backend.subscribe((event) => {
+        if (event.type === "open_screen" && SCREENS.includes(event.screen as Screen)) {
+          setScreen(event.screen as Screen);
+          mainRef.current?.scrollTo({ top: 0 });
+        }
+      }),
+    [],
+  );
+
   // A pairing link while this computer is already linked: it adds another
   // synth (or gives one a new key). The sheet shows who the code belongs
   // to; nothing changes before Connect, and the settings stay. (While not
@@ -167,6 +181,7 @@ export function App(props: { initialScreen?: string | null; initialStep?: Step }
         {screen === "computer" ? <Computer /> : null}
         {screen === "files" ? <Files /> : null}
         {screen === "apps" ? <Apps /> : null}
+        {screen === "island" ? <Island /> : null}
         {screen === "activity" ? <Activity /> : null}
         {screen === "general" ? <General /> : null}
       </main>

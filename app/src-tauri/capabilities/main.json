@@ -59,6 +59,7 @@
     "allow-island-hotkey-reset",
     "allow-face-refresh",
     "allow-face-set",
-    "allow-island-ask-design"
+    "allow-island-ask-design",
+    "allow-island-mic"
   ]
 }

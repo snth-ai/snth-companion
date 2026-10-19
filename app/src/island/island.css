@@ -1,0 +1,447 @@
+/* The island window. The page is transparent; only the shape is drawn.
+   Always black with white text, whatever the system theme: it has to
+   merge with the notch. */
+
+html.island,
+html.island body,
+html.island #root {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  overflow: hidden;
+  width: 100%;
+  height: 100%;
+  font: 13px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  color: #fff;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+.isl-root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.isl-shape {
+  --spring: cubic-bezier(0.22, 1.28, 0.36, 1);
+  position: absolute;
+  top: 0;
+  background: #000;
+  overflow: visible;
+  transition:
+    width 0.42s var(--spring),
+    height 0.42s var(--spring),
+    left 0.42s var(--spring),
+    border-radius 0.3s ease;
+  box-shadow: 0 0 0 0 transparent;
+}
+
+.isl-root.open .isl-shape {
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.35);
+}
+
+/* Where the shape meets the top of the screen, its sides flare out the
+   way the notch's do (two concave corners). */
+.isl-shape::before,
+.isl-shape::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  width: 8px;
+  height: 8px;
+  pointer-events: none;
+}
+.isl-shape::before {
+  left: -8px;
+  background: radial-gradient(circle at 0 100%, transparent 7.5px, #000 8px);
+}
+.isl-shape::after {
+  right: -8px;
+  background: radial-gradient(circle at 100% 100%, transparent 7.5px, #000 8px);
+}
+
+.isl-band {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.isl-ear {
+  display: flex;
+  align-items: center;
+  flex: none;
+  height: 100%;
+}
+.isl-ear.left {
+  justify-content: flex-start;
+  padding-left: 6px;
+  box-sizing: border-box;
+}
+.isl-ear.right {
+  justify-content: flex-end;
+  padding-right: 12px;
+  box-sizing: border-box;
+}
+.isl-notch {
+  flex: none;
+  height: 100%;
+}
+
+.isl-face {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+}
+
+.isl-body {
+  overflow: hidden;
+  padding: 0 16px 14px;
+}
+.isl-root:not(.open) .isl-body {
+  padding: 0;
+  height: 0;
+}
+
+.isl-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-top: 6px;
+  animation: isl-in 0.32s ease both;
+}
+.isl-text {
+  min-width: 0;
+  flex: 1;
+}
+.isl-name {
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: 0.01em;
+}
+.isl-status {
+  color: rgba(255, 255, 255, 0.66);
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+.isl-timer {
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+
+.isl-summary,
+.isl-task {
+  margin: 10px 0 0;
+  color: rgba(255, 255, 255, 0.92);
+  user-select: text;
+  -webkit-user-select: text;
+  animation: isl-in 0.32s ease both;
+}
+.isl-task {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 12px;
+}
+
+.isl-notice {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffd6a0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  justify-content: space-between;
+  animation: isl-in 0.3s ease both;
+}
+
+.isl-approval {
+  margin-top: 10px;
+  animation: isl-in 0.3s ease both;
+}
+.isl-ask {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 12px;
+}
+.isl-ask-title {
+  font-weight: 600;
+  margin: 2px 0 10px;
+}
+
+.isl-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+.isl-spacer {
+  flex: 1;
+}
+
+.isl-btn {
+  appearance: none;
+  border: 0;
+  border-radius: 999px;
+  padding: 6px 14px;
+  font: inherit;
+  font-weight: 500;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.14);
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+.isl-btn:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+.isl-btn:active {
+  transform: scale(0.97);
+}
+.isl-btn.primary {
+  background: var(--accent);
+  color: #111;
+}
+.isl-btn.danger {
+  background: rgba(255, 82, 82, 0.22);
+  color: #ff9f9f;
+}
+.isl-btn:focus-visible,
+.isl-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.isl-synths {
+  display: flex;
+  gap: 4px;
+}
+.isl-chip {
+  appearance: none;
+  border: 0;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.75);
+  background: transparent;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+  cursor: pointer;
+}
+.isl-chip[aria-checked="true"] {
+  color: #111;
+  background: #fff;
+  box-shadow: none;
+}
+.isl-chip.off {
+  opacity: 0.5;
+}
+
+.isl-input {
+  margin-top: 10px;
+}
+.isl-input input {
+  box-sizing: border-box;
+  width: 100%;
+  border: 0;
+  outline: 0;
+  border-radius: 12px;
+  padding: 9px 12px;
+  font: inherit;
+  font-size: 14px;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  user-select: text;
+  -webkit-user-select: text;
+}
+.isl-input input:focus {
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+}
+.isl-input input::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+.isl-hint {
+  margin-top: 6px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+/* The right ear: what the synth is doing, in one glyph. */
+.isl-wave {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 16px;
+}
+.isl-wave i {
+  display: block;
+  width: 3px;
+  height: 16px;
+  border-radius: 2px;
+  background: var(--accent);
+  transform-origin: center;
+  transition: transform 0.08s linear;
+}
+.isl-glyph {
+  width: 16px;
+  height: 16px;
+}
+.isl-glyph.ok {
+  color: #5fe08f;
+}
+.isl-dots {
+  display: inline-flex;
+  gap: 3px;
+}
+.isl-dots i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.8);
+  animation: isl-dot 1.2s ease-in-out infinite;
+}
+.isl-dots i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.isl-dots i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+.isl-ring {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.18);
+  border-top-color: var(--accent);
+  animation: isl-spin 0.9s linear infinite;
+}
+.isl-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.isl-dot.amber {
+  background: #ffb547;
+  animation: isl-pulse 1.4s ease-in-out infinite;
+}
+.isl-dot.dim {
+  background: rgba(255, 255, 255, 0.25);
+}
+.isl-bang {
+  font-weight: 700;
+  color: #ff8a80;
+}
+
+@keyframes isl-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+@keyframes isl-dot {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+@keyframes isl-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes isl-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .isl-shape {
+    transition-duration: 0.01s;
+  }
+  .isl-head,
+  .isl-summary,
+  .isl-task,
+  .isl-notice,
+  .isl-approval {
+    animation: none;
+  }
+  .isl-dots i,
+  .isl-ring,
+  .isl-dot.amber {
+    animation: none;
+  }
+}
+
+/* --- the browser review stage (island.html in mock mode) --- */
+
+.isl-stage {
+  padding: 16px;
+  background: #e9e9ee;
+  min-height: 100vh;
+  box-sizing: border-box;
+  overflow: auto;
+}
+html.island body:has(.isl-stage),
+html.island #root:has(.isl-stage) {
+  overflow: auto;
+  height: auto;
+  user-select: auto;
+}
+.isl-desktop {
+  position: relative;
+  height: 520px;
+  margin: 0 auto 14px;
+  border-radius: 14px;
+  overflow: hidden;
+  background:
+    radial-gradient(1200px 500px at 20% 110%, #ffb199 0%, transparent 60%),
+    radial-gradient(900px 500px at 90% 0%, #8ec5ff 0%, transparent 55%),
+    linear-gradient(160deg, #5b6cff, #b46bd8);
+  color: #fff;
+}
+.isl-desktop.win {
+  background: linear-gradient(160deg, #0f4c81, #3a7bd5);
+}
+.isl-menubar {
+  position: absolute;
+  inset: 0 0 auto 0;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 0 16px;
+  font-size: 13px;
+  background: rgba(255, 255, 255, 0.18);
+  backdrop-filter: blur(20px);
+}
+.isl-menubar-right {
+  margin-left: auto;
+}
+.isl-hw-notch {
+  position: absolute;
+  top: 0;
+  background: #000;
+  border-radius: 0 0 10px 10px;
+}
+.isl-frame {
+  position: absolute;
+  top: 0;
+  outline: 1px dashed rgba(255, 255, 255, 0.35);
+}
+.isl-stage-hint {
+  position: absolute;
+  bottom: 16px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 13px;
+  opacity: 0.85;
+}

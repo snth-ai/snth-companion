@@ -104,6 +104,29 @@ export function MockStage(props: { approvalOnly?: boolean }) {
         ))}
       </div>
       <div className="mock-bar">
+        {/* The Island screen's scenarios, and the island window itself. */}
+        {(["on", "outdated", "taken", "micdenied", "two", "nolink"] as const).map((scenario) => (
+          <button
+            key={scenario}
+            type="button"
+            className="btn small"
+            aria-pressed={params.get("island") === scenario}
+            onClick={() => {
+              const next = new URLSearchParams(window.location.search);
+              next.set("screen", "island");
+              next.set("island", scenario);
+              if (scenario === "two") next.set("account", "two");
+              window.location.search = next.toString();
+            }}
+          >
+            island: {scenario}
+          </button>
+        ))}
+        <a className="btn small" href={`island.html${window.location.search}`}>
+          island window
+        </a>
+      </div>
+      <div className="mock-bar">
         <button type="button" className="btn small" onClick={() => mockBackend.simulateActivity()}>
           {s.activity}
         </button>

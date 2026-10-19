@@ -2,7 +2,7 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { resolve } from "node:path";
 
-// Two pages: the main window and the approval window. The dev server binds
+// Three pages: the main window, the approval window and the island. The dev server binds
 // to loopback only; `tauri dev` expects it on 1420.
 export default defineConfig({
   plugins: [react()],
@@ -23,6 +23,7 @@ export default defineConfig({
       input: {
         main: resolve(__dirname, "index.html"),
         approval: resolve(__dirname, "approval.html"),
+        island: resolve(__dirname, "island.html"),
       },
     },
   },
