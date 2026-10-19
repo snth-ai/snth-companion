@@ -115,6 +115,8 @@ pub struct PrefsDto {
     pub autostart: bool,
     pub stop_shortcut: String,
     pub stop_shortcut_active: bool,
+    /// Developer mode: the developer section (the command line) is shown.
+    pub developer: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -133,6 +135,9 @@ pub struct AppInfo {
     pub secret_store: &'static str,
     pub cua_pinned_version: &'static str,
     pub cua_path: String,
+    /// The shell the synth's commands run in here: "pwsh", "powershell",
+    /// "zsh", "bash", "sh"...
+    pub os_shell: String,
 }
 
 /// Everything the UI renders from, in one object.
@@ -197,6 +202,7 @@ pub async fn build_state(ctx: &Ctx) -> UiState {
             autostart: prefs.autostart,
             stop_shortcut: prefs.stop_shortcut,
             stop_shortcut_active: *ctx.shortcut_active.lock().unwrap(),
+            developer: prefs.developer,
         },
         app: AppInfo {
             version: ctx.app.package_info().version.to_string(),
@@ -210,6 +216,7 @@ pub async fn build_state(ctx: &Ctx) -> UiState {
             secret_store: ctx.secret_store,
             cua_pinned_version: connect_core::cua::PINNED_VERSION,
             cua_path: ctx.cua_bin.clone(),
+            os_shell: connect_core::shell::os_shell().label.clone(),
         },
         core,
     }
@@ -227,6 +234,9 @@ pub fn matching_preset(s: &Settings) -> Preset {
         probe.computer.look = s.computer.look.clone();
         probe.computer.apps = s.computer.apps.clone();
         probe.computer.experiment = s.computer.experiment;
+        // The command line is off in every preset: on, the settings are
+        // custom; its mode alone (while off) does not count.
+        probe.shell.mode = s.shell.mode;
         if &probe == s {
             return p;
         }

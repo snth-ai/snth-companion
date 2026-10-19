@@ -49,6 +49,7 @@ export function MockStage(props: { approvalOnly?: boolean }) {
     ["event", "event"],
     ["shortcutinput", "shortcut"],
     ["openurl", "link"],
+    ["shell", "command"],
     ["other", "unknown"],
   ];
 

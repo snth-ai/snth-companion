@@ -131,6 +131,14 @@ export const IconUpdate = () => (
   </Svg>
 );
 
+/** The command line: a prompt and a cursor. */
+export const IconTerminal = () => (
+  <Svg>
+    <rect x="2" y="3" width="12" height="10" rx="1.5" />
+    <path d="m4.8 6.3 1.9 1.7-1.9 1.7M8.4 10h2.8" />
+  </Svg>
+);
+
 export const IconBlock = () => (
   <Svg>
     <circle cx="8" cy="8" r="6" />

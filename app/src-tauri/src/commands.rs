@@ -228,6 +228,10 @@ pub async fn update_settings(ctx: Cx<'_>, settings: Settings) -> Result<UiState,
     // Only apps this build knows, and only the switches that differ from
     // the default, so equal choices compare equal to a preset.
     next.apps.normalize(connect_core::apps::APPS);
+    // The command line can only be switched on with developer mode on: the
+    // webview cannot turn it on around the hidden switch.
+    let developer = ctx.prefs.lock().unwrap().developer;
+    shell_needs_developer(&mut next, developer);
     ctx.core.mutate_settings(move |s| {
         next.files.roots = s.files.roots.clone();
         next.computer.tool_denylist = s.computer.tool_denylist.clone();
@@ -235,6 +239,28 @@ pub async fn update_settings(ctx: Cx<'_>, settings: Settings) -> Result<UiState,
         next.preset = matching_preset(&next);
         *s = next;
     });
+    Ok(build_state(&ctx).await)
+}
+
+/// Without developer mode the command line is off, whatever the webview
+/// sent.
+fn shell_needs_developer(next: &mut Settings, developer: bool) {
+    if !developer {
+        next.shell.enabled = false;
+    }
+}
+
+/// Developer mode on or off. Off also switches the command line off (and
+/// so stops a command that runs): nothing of it stays on out of sight.
+#[tauri::command]
+pub async fn set_developer(ctx: Cx<'_>, enabled: bool) -> Result<UiState, String> {
+    ctx.update_prefs(|p| p.developer = enabled);
+    if !enabled && ctx.core.settings().shell.enabled {
+        ctx.core.mutate_settings(|s| {
+            s.shell.enabled = false;
+            s.preset = matching_preset(s);
+        });
+    }
     Ok(build_state(&ctx).await)
 }
 
@@ -779,6 +805,9 @@ pub async fn diagnostics(ctx: Cx<'_>) -> Result<String, String> {
         format!("files: {} ({} folders, ask before writing {})", on(s.files.enabled), s.files.roots.len(), on(s.files.ask_on_write)),
         format!("apps: {} (mode {:?}, on: {})", on(s.apps.enabled), s.apps.mode,
             ctx.core.apps_views().iter().filter(|v| v.on).map(|v| v.id).collect::<Vec<_>>().join(" ")),
+        // On or off and the mode, never a command.
+        format!("command line: {} (mode {:?}, {}, developer mode {})", on(s.shell.enabled), s.shell.mode,
+            st.app.os_shell, on(st.prefs.developer)),
         format!("remembered permissions: {}", st.grants.len()),
         String::new(),
         format!("Cua Driver: {} (status {}, expected {})",
@@ -916,6 +945,23 @@ mod tests {
         assert!(matches!(matching_preset(&s), Preset::Careful));
         s.computer.foreground = connect_core::settings::Foreground::Always;
         assert!(matches!(matching_preset(&s), Preset::Custom));
+    }
+
+    #[test]
+    fn the_command_line_makes_the_settings_custom_and_needs_developer_mode() {
+        use connect_core::settings::ShellMode;
+        let mut s = Settings::from_preset(Preset::Full, vec![]);
+        s.shell.mode = ShellMode::Auto;
+        assert!(matches!(matching_preset(&s), Preset::Full), "a mode alone, while off, is no change");
+        s.shell.enabled = true;
+        assert!(matches!(matching_preset(&s), Preset::Custom));
+
+        let mut next = s.clone();
+        shell_needs_developer(&mut next, false);
+        assert!(!next.shell.enabled, "the webview turned the command line on without developer mode");
+        let mut next = s.clone();
+        shell_needs_developer(&mut next, true);
+        assert!(next.shell.enabled);
     }
 
     #[test]

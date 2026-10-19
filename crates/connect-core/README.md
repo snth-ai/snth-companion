@@ -1,9 +1,9 @@
 # connect-core
 
 The core of SNTH Connect: one outbound WebSocket from the owner's computer
-to their cloud synth, giving the synth five capabilities under the owner's
-policy (internet, cookies, computer control, files, and the owner's own
-apps). UI-free. The Tauri shell holds a single [`Core`] and drives it with
+to their cloud synth, giving the synth six capabilities under the owner's
+policy (internet, cookies, computer control, files, the owner's own apps,
+and the command line). UI-free. The Tauri shell holds a single [`Core`] and drives it with
 commands; `connectd` (sibling crate) is the headless CLI over the same API.
 
 Protocol v1 is implemented exactly from
@@ -168,6 +168,13 @@ In every preset Messages is off until the owner switches it on, and a
 message sent as the owner is asked about every time. A settings file from
 before apps existed loads with apps off.
 
+The command line (`shell`) is off in EVERY preset, `full` included, and on a
+fresh install; a preset turns it off (keeping its mode). A settings file from
+before it existed loads with it off. Its switch is shown only in the app's
+developer mode (a shell preference, not a setting), and the shell refuses
+to switch it on while developer mode is off; turning developer mode off
+turns the command line off. With it on, the settings are `custom`.
+
 `Settings` covers net (enabled, mode all/ask/list, domains, local-network
 toggle, monthly cap, skip-on-metered), cookies (enabled, mode), computer
 (enabled, mode ask/auto/away, foreground never/idle/ask/always, away-idle
@@ -175,7 +182,7 @@ minutes, `apps`: which apps the synth may use, see "Which apps", tool
 denylist, `look`: how it looks on the screen, see "How it looks", and
 `experiment`, see "Experiment"), files (enabled, roots with a write
 flag, ask-on-write), apps (enabled, mode ask/ask_new/auto, per-app switches
-that differ from the default). `settings_rev` grows by one on every change;
+that differ from the default), shell (enabled, mode ask/auto). `settings_rev` grows by one on every change;
 writes are atomic.
 
 ## What the core enforces (so the UI need not)
@@ -213,6 +220,8 @@ writes are atomic.
 - **apps**: everything below, in ONE function (`apps::handle`, the only way
   an `apps.<app>.<action>` rpc call reaches a backend). See "The owner's
   apps".
+- **shell**: one function (`shell::exec`, the only way `shell.exec` runs
+  anything). See "The command line".
 
 The synth has no message that changes settings or grants.
 
@@ -739,3 +748,52 @@ macOS scripts are constants. What the synth sent travels as arguments of
 the script (`on run argv`), never as script text. `scripts/check-applescripts.sh`
 compiles all of them against the real apps' dictionaries without running
 them (inside a sandbox that forbids sending anything to an app).
+
+## The command line (`shell.rs`)
+
+`shell.exec {command, cwd?, timeout_ms?, stdin_b64?, reason?}` runs one
+command and answers `{exit_code, stdout_b64, stderr_b64, stdout_bytes,
+stderr_bytes, truncated_stdout, truncated_stderr, duration_ms, timed_out,
+shell}`. Full access by definition: the command runs as the owner, and the
+shared folders of `files` do not limit it.
+
+The gate, in order: paused (`denied: the command line is paused by the
+owner`), the switch (`denied: the command line is turned off on this
+computer; ...`), `Request::parse` (command 1 byte .. 8 KiB, no NUL; `cwd`
+absolute and an existing folder, default the home folder; `timeout_ms`
+default 120 s, clamped to 1 s .. 30 min; `stdin_b64` at most 4 MiB), the ask
+in mode `ask` (`ApprovalRequest` capability `shell`, scope = the exact
+command, details `command` / `cwd` / `shell`; `Remember::AlwaysOnly`, or
+`Never` for a command over several lines or longer than 2000 bytes), the
+run, one journal line (`target` = the command, plus `cwd`, `exit_code`,
+`duration_ms`, `bytes` = stdout + stderr; never the output).
+`permission.request` refuses capability `shell`.
+
+The run (`shell::run`):
+
+| | Windows | macOS / Linux |
+|---|---|---|
+| shell | `pwsh.exe` when on the PATH, else `powershell.exe` | `$SHELL` (absolute, exists), else `/bin/zsh` (Mac) / `/bin/sh` |
+| arguments | `-NoProfile -NonInteractive -EncodedCommand <base64 UTF-16LE>`: UTF-8 output without a BOM, no progress, plain text, the command, then the exit code (the last native program's, else 1 when the last command failed) | `-l -c <command>` (the login profile's PATH) |
+| window | `CREATE_NO_WINDOW` (`proc::command`) | - |
+| a stop | `TerminateJobObject` on the Job Object the process was put in right after the start (the whole tree) | SIGTERM to the process group, 1.5 s, SIGKILL |
+
+Each of stdout and stderr keeps its LAST 1 MiB (`OUTPUT_CAP`). No stdin =
+`Stdio::null`, never an open pipe a program could wait on. A stop is the
+timeout, the synth closing the stream (`rpc::handle` watches the stream for
+its end while `shell.exec` runs), or `State::stop_all`: `Core::pause` (the
+pause button and the stop shortcut) and any settings change that leaves the
+command line off. A process the command started in the background is not
+killed when the command ends by itself; its output is read for 2 s more.
+
+`capabilities.shell = {enabled, mode, os_shell}` in the hello (`os_shell`:
+`pwsh`, `powershell`, or the login shell's file name), additive.
+
+Tests: `src/shell/tests.rs` run the real shell of the machine (PowerShell on
+the Windows CI runner): output in UTF-8, exit codes (also of a native
+program), stdin, cwd, the tail of a long output, a timeout, the process
+group dying with it (Unix), the cancel, the owner's stop, and the gate (off,
+paused, ask with the exact-command "always", auto, a bad request asks
+nobody, pause and switching off stop a running command, a preset turns it
+off, `permission.request`). `rpc::tests::shell_exec_runs_while_the_stream_is_open_and_stops_when_it_closes`
+covers the cancel over a stream.

@@ -55,6 +55,7 @@ export const tauriBackend: Backend = {
   checkUpdate: () => invoke("check_update"),
   installUpdate: () => invoke("install_update"),
   setAutoUpdate: (enabled) => invoke("set_auto_update", { enabled }),
+  setDeveloper: (enabled) => invoke("set_developer", { enabled }),
   diagnostics: () => invoke("diagnostics"),
   openExternal: (target) => invoke("open_external", { target }),
 

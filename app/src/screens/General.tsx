@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { backend } from "../backend";
-import type { HealthItem, HealthReport, UiState } from "../backend/types";
+import type { HealthItem, HealthReport, ShellMode, UiState } from "../backend/types";
 import { acceleratorFromEvent, formatClock, hostOf, shortcutKeys } from "../lib/format";
 import { useStore } from "../lib/store";
-import { Keys, More, Notice, Row, Section, Segmented, Sheet, SwitchRow } from "../ui/controls";
+import { ChoiceList, Keys, More, Notice, Row, Section, Segmented, Sheet, SwitchRow } from "../ui/controls";
 import { IconBlock, IconCheck, IconX } from "../ui/icons";
+import { Remembered } from "./Remembered";
 
 type LangChoice = "system" | "en" | "ru";
 
@@ -306,6 +307,85 @@ function HelperCheck() {
   );
 }
 
+/** The shell's name as people know it. */
+function shellName(label: string): string {
+  if (label === "pwsh") return "PowerShell 7";
+  if (label === "powershell") return "Windows PowerShell";
+  return label || "the shell";
+}
+
+/** The developer section: the command line. Turning it on asks once
+ * more, with the warning in full: it is full access. */
+function CommandLine() {
+  const { state, s, name, edit } = useStore();
+  const t = s.general.shell;
+  const sh = state.core.settings.shell;
+  const [confirming, setConfirming] = useState(false);
+
+  return (
+    <>
+      <Section title={t.title}>
+        <div className="group">
+          <SwitchRow
+            strong
+            title={t.enable(name)}
+            desc={t.enableDesc(name, shellName(state.app.os_shell))}
+            checked={sh.enabled}
+            onChange={(v) => (v ? setConfirming(true) : edit((d) => void (d.shell.enabled = false)))}
+          />
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <Notice kind={sh.enabled ? "danger" : "warn"} title={t.warningTitle}>
+            {t.warning(name)}
+          </Notice>
+        </div>
+      </Section>
+
+      <fieldset disabled={!sh.enabled}>
+        <Section title={t.modeTitle} note={t.stopNote}>
+          <ChoiceList<ShellMode>
+            label={t.modeTitle}
+            value={sh.mode}
+            onChange={(v) => edit((d) => void (d.shell.mode = v))}
+            options={[
+              { value: "ask", title: t.ask, desc: t.askDesc },
+              { value: "auto", title: t.auto, desc: t.autoDesc(name) },
+            ]}
+          />
+        </Section>
+      </fieldset>
+
+      <Remembered capability="shell" title={t.remembered} />
+
+      {confirming ? (
+        <Sheet
+          title={t.confirmTitle(name)}
+          onCancel={() => setConfirming(false)}
+          actions={
+            <>
+              <button type="button" className="btn" data-autofocus onClick={() => setConfirming(false)}>
+                {s.common.cancel}
+              </button>
+              <button
+                type="button"
+                className="btn danger solid"
+                onClick={() => {
+                  setConfirming(false);
+                  edit((d) => void (d.shell.enabled = true));
+                }}
+              >
+                {t.confirm}
+              </button>
+            </>
+          }
+        >
+          <p style={{ marginTop: 10, lineHeight: 1.45 }}>{t.warning(name)}</p>
+        </Sheet>
+      ) : null}
+    </>
+  );
+}
+
 function Diagnostics() {
   const { state, s } = useStore();
   const t = s.general;
@@ -431,6 +511,19 @@ export function General() {
           </div>
         ) : null}
       </Section>
+
+      <Section>
+        <div className="group">
+          <SwitchRow
+            title={t.developer}
+            desc={t.developerDesc}
+            checked={state.prefs.developer}
+            onChange={(v) => void act(() => backend.setDeveloper(v))}
+          />
+        </div>
+      </Section>
+
+      {state.prefs.developer ? <CommandLine /> : null}
 
       <Section>
         <div className="group">

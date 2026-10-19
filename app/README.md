@@ -79,7 +79,8 @@ URL parameters stage a screen or a state directly:
 | `link` | what "Link this browser" does: `ok` (default), `synth_offline`, `synth_outdated`, `other_synth`, `busy`, `failed` |
 | `step` (with `screen=onboarding`) | `1` welcome, `2` code, `3` confirmation, `4` preset, `5` folders, `6` computer control, `7` done |
 | `state` | `paused`, `working`, `connecting`, `offline`, `repair`, `empty`, `off`, `appsoff` (only Apps off), `metered` |
-| `approval` | `net`, `cookies`, `cookiesext` (a sign-in a linked browser will ask about too: "Step 1 of 2"), `vault` (a browser asks to be linked: not the synth asking), `computer`, `foreground`, `files`, `other`, `queue` (shows the approval window alone); for the owner's apps: `message` (a message as the owner, with "always for this person"), `messageask` (the same when nothing may be remembered, with a hostile reason), `event`, `reminder`, `note`, `shortcut`, `shortcutinput`, `clipboard`, `openurl`, `openfile`, `openapp` |
+| `approval` | `net`, `cookies`, `cookiesext` (a sign-in a linked browser will ask about too: "Step 1 of 2"), `vault` (a browser asks to be linked: not the synth asking), `computer`, `foreground`, `files`, `other`, `queue` (shows the approval window alone); for the owner's apps: `message` (a message as the owner, with "always for this person"), `messageask` (the same when nothing may be remembered, with a hostile reason), `event`, `reminder`, `note`, `shortcut`, `shortcutinput`, `clipboard`, `openurl`, `openfile`, `openapp`; for the command line: `shell` (the whole command, its folder and the shell, with "always this exact command") |
+| `developer` | `1`: developer mode on, so General shows the Command line section (the switch asks once more with the warning; off by default, off in every preset) |
 | `apps` | the macOS permissions of the apps: `granted` (default), `noperm` (macOS has not asked yet), `denied`, `nodisk` (Messages may be controlled, its history cannot be read) |
 | `messages` | `on`: the Messages switch, which is off by default |
 | `preset` | `careful` (default), `balanced`, `full` |
@@ -116,7 +117,7 @@ Examples: `?screen=logins`, `?screen=logins&logins=offline&ext=closed&os=windows
 `?screen=general&health=noperm`, `?screen=general&health=bounded&which=only&lang=ru`,
 `?screen=general&health=nodaemon&os=windows`,
 `?screen=apps&apps=noperm&messages=on`, `?screen=apps&os=windows`,
-`?approval=message&lang=ru`.
+`?approval=message&lang=ru`, `?screen=general&developer=1`, `?approval=shell&lang=ru`.
 `/approval.html` is the approval window's own page.
 
 In the mock pairing step: any 6 digits work; `000000` is "not valid",
@@ -304,6 +305,16 @@ hidden "Advanced" override that accepts only `https://` addresses.
   refusals.
 - Pause is remembered (`shell.json`): a relaunch stays paused until the owner
   resumes.
+- Developer mode (`shell.json` `developer`, General): shows the developer
+  section, today the command line (`settings.shell`, the core's
+  `shell.rs`). `update_settings` refuses to switch the command line on
+  while developer mode is off, and `set_developer(false)` switches it off
+  (which also stops a command that runs). The command line's own switch
+  asks once more, with the full warning, before it turns on. Its approval
+  window shows the command in a fixed-width face with its folder and shell;
+  the only thing that can be remembered is "always this exact command"
+  (listed under the section, with Revoke). Activity lists each command with
+  its exit code, folder, time and output size, never the output.
 - Updates of the app itself are in `src/updates.rs`: the schedule, the quiet
   moment, the macOS safety copy, and the relaunch (a small shell waits for
   the old process to end and opens the app through the system, so macOS

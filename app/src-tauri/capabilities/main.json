@@ -43,6 +43,7 @@
     "allow-check-update",
     "allow-install-update",
     "allow-set-auto-update",
+    "allow-set-developer",
     "allow-diagnostics",
     "allow-open-external"
   ]

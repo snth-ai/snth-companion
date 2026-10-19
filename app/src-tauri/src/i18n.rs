@@ -135,6 +135,9 @@ pub fn approval_body(lang: Lang, capability: &str, scope: &str) -> String {
         (Lang::Ru, "apps") if scope.starts_with("messages.send:") => "Отправить сообщение от вашего имени".into(),
         (Lang::En, "apps") => "Change something in your apps".into(),
         (Lang::Ru, "apps") => "Изменить что-то в ваших приложениях".into(),
+        // A command: never the command itself on a lock screen.
+        (Lang::En, "shell") => "Run a command on this computer".into(),
+        (Lang::Ru, "shell") => "Выполнить команду на этом компьютере".into(),
         // The SNTH Vault extension in a browser on this computer.
         (Lang::En, "vault") => "Share site passwords with your synth from this browser".into(),
         (Lang::Ru, "vault") => "Передавать синту пароли сайтов из этого браузера".into(),
@@ -158,6 +161,8 @@ mod tests {
             let other = approval_body(lang, "apps", "shortcuts.run:Unlock Front Door");
             assert!(!other.contains("Unlock") && !other.is_empty(), "{other}");
             assert_ne!(send, other);
+            let cmd = approval_body(lang, "shell", "rm -rf ~/Secret");
+            assert!(!cmd.contains("Secret") && !cmd.is_empty(), "{cmd}");
         }
     }
 }

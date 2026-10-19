@@ -8,13 +8,14 @@ import { grantTime, shortPath } from "../lib/format";
 import { useStore } from "../lib/store";
 import { Section } from "../ui/controls";
 
-export function Remembered(props: { capability: "computer" | "files" }) {
+export function Remembered(props: { capability: "computer" | "files" | "shell"; title?: string }) {
   const { state, s, lang, act } = useStore();
   const grants = state.grants.filter((g) => g.capability === props.capability);
   if (grants.length === 0) return null;
 
   const label = (g: Grant): string => {
     if (props.capability === "files") return shortPath(g.scope);
+    if (props.capability === "shell") return g.scope;
     if (g.scope === "task") return s.remembered.task;
     if (g.scope.startsWith("foreground:")) {
       const tool = g.scope.slice("foreground:".length);
@@ -24,11 +25,14 @@ export function Remembered(props: { capability: "computer" | "files" }) {
   };
 
   return (
-    <Section title={s.remembered.title}>
+    <Section title={props.title ?? s.remembered.title}>
       <div className="group">
         {grants.map((g) => (
           <div className="item" key={g.scope}>
-            <span className="item-text" title={props.capability === "files" ? g.scope : undefined}>
+            <span
+              className={`item-text${props.capability === "shell" ? " selectable mono" : ""}`}
+              title={props.capability === "files" ? g.scope : undefined}
+            >
               {label(g)}
             </span>
             <span className="item-sub">{grantTime(g, s, lang)}</span>

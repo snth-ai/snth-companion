@@ -265,6 +265,8 @@ function presetSettings(preset: Exclude<Preset, "custom">, roots: Settings["file
     computer: { enabled: true, mode: "ask", foreground: "never", away_idle_minutes: 5, apps: { policy: "all", except: [], only: [] }, tool_denylist: [], look: defaultLook(), experiment: "default" },
     files: { enabled: true, roots, ask_on_write: true },
     apps: { enabled: true, mode: "ask", apps: {} },
+    // Off in every preset.
+    shell: { enabled: false, mode: "ask" },
     preset,
   };
   if (preset === "balanced") {
@@ -319,6 +321,7 @@ function offSettings(): Settings {
     computer: { enabled: false, mode: "ask", foreground: "never", away_idle_minutes: 5, apps: { policy: "all", except: [], only: [] }, tool_denylist: [], look: defaultLook(), experiment: "default" },
     files: { enabled: false, roots: [], ask_on_write: false },
     apps: { enabled: false, mode: "ask", apps: {} },
+    shell: { enabled: false, mode: "ask" },
     preset: "custom",
   };
 }
@@ -328,6 +331,17 @@ const GB = 1024 * 1024 * 1024;
 
 function seedJournal(): Entry[] {
   const t = now();
+  const cmd = (ago: number, target: string, outcome: string, exit_code: number | undefined, duration_ms: number, bytes: number): Entry => ({
+    time: t - ago,
+    capability: "shell",
+    action: "shell.exec",
+    target,
+    outcome,
+    cwd: `${HOME}/Downloads`,
+    ...(exit_code === undefined ? {} : { exit_code }),
+    duration_ms,
+    bytes,
+  });
   const e = (ago: number, capability: string, action: string, target: string, outcome: string, bytes?: number, count?: number): Entry => ({
     time: t - ago,
     capability,
@@ -367,6 +381,9 @@ function seedJournal(): Entry[] {
     e(2500, "apps", "notes.search", "", "ok", undefined, 3),
     e(2400, "apps", "shortcuts.run", "Morning Routine", "ok"),
     e(2300, "apps", "open.url", "booking.com", "ok"),
+    cmd(1600, "ffmpeg -y -ss 00:00:05 -i trip.mp4 -t 30 -c copy trip-short.mp4", "ok", 0, 2400, 18_200),
+    cmd(1500, "ffmpeg -i missing.mp4 out.mp4", "exit 1", 1, 180, 900),
+    cmd(1400, "Remove-Item -Recurse old-photos", "denied: owner", undefined, 0, 0),
     e(900, "apps", "notify.show", "", "ok"),
     e(640, "files", "files.read", `${HOME}/Downloads/boarding-pass.pdf`, "ok"),
     e(600, "net", "dial", "www.aviasales.ru:443", "ok", 3_400_000),
@@ -521,6 +538,19 @@ const APPROVAL_KINDS: Record<string, ApprovalKind> = {
     summary: "link Microsoft Edge to the synth's login vault",
     reason: "",
     remember: "never",
+  },
+  // A command on the command line: the whole command and its folder.
+  shell: {
+    capability: "shell",
+    scope: "ffmpeg -y -ss 00:00:05 -i trip.mp4 -t 30 -c copy trip-short.mp4",
+    summary: `run a command in ${HOME}/Downloads`,
+    reason: "You asked for the first 30 seconds of the trip video, without the shaky start.",
+    details: [
+      { key: "command", value: "ffmpeg -y -ss 00:00:05 -i trip.mp4 -t 30 -c copy trip-short.mp4" },
+      { key: "cwd", value: `${HOME}/Downloads` },
+      { key: "shell", value: "zsh" },
+    ],
+    remember: "always",
   },
   computer: {
     capability: "computer",
@@ -744,6 +774,7 @@ class MockBackend implements Backend {
         autostart: true,
         stop_shortcut: "CommandOrControl+Alt+Period",
         stop_shortcut_active: true,
+        developer: params.get("developer") === "1",
       },
       app: {
         version: "0.1.0",
@@ -757,6 +788,7 @@ class MockBackend implements Backend {
         secret_store: "system keychain",
         cua_pinned_version: "0.34.1",
         cua_path: `${HOME}/Library/Application Support/ai.snth.connect/cua/releases/0.34.1/cua-driver`,
+        os_shell: os === "windows" ? "pwsh" : os === "macos" ? "zsh" : "bash",
       },
     };
     // The two permissions exist on macOS only.
@@ -1183,10 +1215,13 @@ class MockBackend implements Backend {
 
   applyPreset(preset: Exclude<Preset, "custom">) {
     // A preset is a policy: the look and the experiment the owner chose stay.
+    // The command line is off in every preset; its mode stays.
     const { look, experiment } = this.state.core.settings.computer;
+    const shellMode = this.state.core.settings.shell.mode;
     this.state.core.settings = presetSettings(preset, this.state.core.settings.files.roots);
     this.state.core.settings.computer.look = look;
     this.state.core.settings.computer.experiment = experiment;
+    this.state.core.settings.shell.mode = shellMode;
     this.refreshApps();
     return this.changed();
   }
@@ -1200,12 +1235,15 @@ class MockBackend implements Backend {
     next.apps.apps = Object.fromEntries(
       Object.entries(next.apps.apps).filter(([id, on]) => id in APP_ACTIONS && on !== (id !== "messages")),
     );
+    // The command line only with developer mode on, as the shell does.
+    if (!this.state.prefs.developer) next.shell.enabled = false;
     next.preset = "custom";
     for (const p of ["careful", "balanced", "full"] as const) {
       // How it looks and the experiment are not part of a preset.
       const probe = presetSettings(p, next.files.roots);
       probe.computer.look = next.computer.look;
       probe.computer.experiment = next.computer.experiment;
+      probe.shell.mode = next.shell.mode;
       if (JSON.stringify(probe) === JSON.stringify({ ...next, preset: p })) next.preset = p;
     }
     this.state.core.settings = next;
@@ -1390,6 +1428,13 @@ class MockBackend implements Backend {
       const named = action === "shortcuts.run" || action === "open.url" || action === "open.app";
       const target = action === "open.file" ? (req.details.find((d) => d.key === "path")?.value ?? "") : named ? rest.join(":") : "";
       this.record("apps", action!, target, allow ? "ok" : "denied: owner");
+    } else if (req.capability === "shell") {
+      // The command, its folder, how it ended. Never its output.
+      const cwd = req.details.find((d) => d.key === "cwd")?.value;
+      const entry: Entry = { time: now(), capability: "shell", action: "shell.exec", target: req.scope, outcome: allow ? "ok" : "denied: owner", ...(cwd ? { cwd } : {}) };
+      if (allow) Object.assign(entry, { exit_code: 0, duration_ms: 2300, bytes: 18_000 });
+      this.journal.push(entry);
+      this.emit({ type: "journal", entry });
     }
   }
 
@@ -1586,6 +1631,12 @@ class MockBackend implements Backend {
     this.record("app", "update", version, "ok");
     this.emit({ type: "state" });
     return this.snapshot();
+  }
+
+  setDeveloper(enabled: boolean) {
+    this.state.prefs.developer = enabled;
+    if (!enabled) this.state.core.settings.shell.enabled = false;
+    return this.changed();
   }
 
   setAutoUpdate(enabled: boolean) {
