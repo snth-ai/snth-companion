@@ -383,6 +383,13 @@ fn main() {
                         island::on_key(&ctx, kind, event.state());
                         return;
                     }
+                    // Escape while a wake by name records: cancel it.
+                    if island::wake::is_escape(&ctx, shortcut.id()) {
+                        if event.state() == ShortcutState::Pressed {
+                            island::wake::cancel(&ctx);
+                        }
+                        return;
+                    }
                     // Else it is "stop".
                     if event.state() != ShortcutState::Pressed || !actions::is_stop_shortcut(&ctx, shortcut.id()) {
                         return;
@@ -465,6 +472,12 @@ fn main() {
             commands::island_stt_delete,
             commands::island_stt_offer,
             commands::island_stt_card_hide,
+            commands::island_wake_set,
+            commands::island_wake_phrase,
+            commands::island_wake_download,
+            commands::island_wake_download_cancel,
+            commands::island_wake_delete,
+            commands::island_wake_cancel,
             commands::face_refresh,
             commands::face_set,
             commands::island_ask_design,

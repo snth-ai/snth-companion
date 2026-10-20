@@ -76,6 +76,12 @@ const COMMANDS: &[&str] = &[
     "island_stt_download",
     "island_stt_cancel",
     "island_stt_delete",
+    // wake by name: the switch, the phrase, its model (main window)
+    "island_wake_set",
+    "island_wake_phrase",
+    "island_wake_download",
+    "island_wake_download_cancel",
+    "island_wake_delete",
     // the island window
     "island_view",
     "island_layout",
@@ -87,6 +93,7 @@ const COMMANDS: &[&str] = &[
     "island_mic",
     "island_stt_offer",
     "island_stt_card_hide",
+    "island_wake_cancel",
 ];
 
 fn main() {

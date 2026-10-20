@@ -173,6 +173,16 @@ mod capture {
         pub fn read_from(&self, from: usize) -> Vec<i16> {
             self.shared.lock().map(|s| s.samples.get(from..).map(<[i16]>::to_vec).unwrap_or_default()).unwrap_or_default()
         }
+
+        /// Forget the first `n` samples: the next index 0 is the old `n`.
+        /// Wake by name keeps only the last seconds while it listens, and
+        /// cuts the recording to the request when the name is heard.
+        pub fn drop_front(&self, n: usize) {
+            if let Ok(mut s) = self.shared.lock() {
+                let n = n.min(s.samples.len());
+                s.samples.drain(..n);
+            }
+        }
     }
 
     struct Shared {
@@ -233,6 +243,13 @@ mod capture {
     /// Start recording from the default input. Err with a short reason
     /// when there is no microphone or it cannot be opened.
     pub fn start(on_level: Arc<dyn Fn(f32) + Send + Sync>) -> Result<Recording, String> {
+        start_on(None, on_level)
+    }
+
+    /// Start recording from the input with this CoreAudio UID (cpal's
+    /// device id), or the default input for None. Wake by name uses it to
+    /// stay off a Bluetooth headset's microphone.
+    pub fn start_on(uid: Option<String>, on_level: Arc<dyn Fn(f32) + Send + Sync>) -> Result<Recording, String> {
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
         let (done_tx, done_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
@@ -249,7 +266,11 @@ mod capture {
             .name("island-mic".into())
             .spawn(move || {
                 let host = cpal::default_host();
-                let Some(device) = host.default_input_device() else {
+                let device = match &uid {
+                    Some(uid) => host.input_devices().ok().and_then(|mut all| all.find(|d| d.id().is_ok_and(|id| id.id() == uid))),
+                    None => host.default_input_device(),
+                };
+                let Some(device) = device else {
                     let _ = ready_tx.send(Err("no_microphone".into()));
                     return;
                 };
@@ -344,9 +365,15 @@ mod capture {
         pub fn read_from(&self, _from: usize) -> Vec<i16> {
             Vec::new()
         }
+
+        pub fn drop_front(&self, _n: usize) {}
     }
 
     pub fn start(_on_level: Arc<dyn Fn(f32) + Send + Sync>) -> Result<Recording, String> {
+        Err("unsupported".into())
+    }
+
+    pub fn start_on(_uid: Option<String>, _on_level: Arc<dyn Fn(f32) + Send + Sync>) -> Result<Recording, String> {
         Err("unsupported".into())
     }
 
@@ -361,7 +388,7 @@ mod capture {
     }
 }
 
-pub use capture::{start, Recording};
+pub use capture::{start, start_on, Recording, Tap};
 
 // --- the permission ---
 

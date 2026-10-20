@@ -139,6 +139,24 @@ fn speech_goes_to_the_synth_and_the_offer_waits_on_a_fresh_install_and_in_an_old
 }
 
 #[test]
+fn wake_by_name_is_off_by_default_and_the_phrase_is_tidied() {
+    let fresh = settings::Persisted::fresh("d".into());
+    assert!(!fresh.island.wake, "wake by name is off by default");
+    assert_eq!(fresh.island.wake_phrase, "");
+    // A file of 0.1.20 knows nothing of it.
+    let old: crate::island::IslandSettings = serde_json::from_value(json!({"enabled": true, "stt": "device"})).unwrap();
+    assert!(!old.wake);
+    let mut s = crate::island::IslandSettings { wake: true, wake_phrase: "  эй   подруга \n".into(), ..old };
+    s.normalize();
+    assert_eq!(s.wake_phrase, "эй подруга");
+    s.wake_phrase = "я".repeat(100);
+    s.normalize();
+    assert_eq!(s.wake_phrase.chars().count(), crate::island::WAKE_PHRASE_MAX);
+    let raw = serde_json::to_value(&s).unwrap();
+    assert_eq!(raw["wake"], true);
+}
+
+#[test]
 fn the_offer_is_answered_once() {
     use SttOffer::*;
     assert!(Pending.open() && Shown.open() && !Accepted.open() && !Declined.open());

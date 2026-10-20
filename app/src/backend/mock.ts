@@ -2049,6 +2049,30 @@ class MockBackend implements Backend {
     return this.islandScreen.sttDelete();
   }
 
+  islandWakeSet(on: boolean) {
+    return this.islandScreen.wakeSet(on);
+  }
+
+  islandWakePhrase(phrase: string) {
+    return this.islandScreen.wakePhrase(phrase);
+  }
+
+  islandWakeDownload() {
+    return this.islandScreen.wakeDownload();
+  }
+
+  islandWakeDownloadCancel() {
+    return this.islandScreen.wakeDownloadCancel();
+  }
+
+  islandWakeDelete() {
+    return this.islandScreen.wakeDelete();
+  }
+
+  islandWakeCancel() {
+    return this.islandWin.wakeCancel();
+  }
+
   islandSttOffer(accept: boolean) {
     return this.islandWin.sttOffer(accept);
   }

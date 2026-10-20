@@ -1141,6 +1141,52 @@ pub fn island_stt_card_hide(ctx: Cx<'_>) {
     crate::island::stt_card_hide(&ctx);
 }
 
+/// Wake by name on or off. On fetches its model when it is not here.
+/// Err: "unsupported".
+#[tauri::command]
+pub async fn island_wake_set(ctx: Cx<'_>, on: bool) -> Result<UiState, String> {
+    crate::island::wake::set(&ctx, on)?;
+    Ok(build_state(&ctx).await)
+}
+
+/// The owner's extra wake phrase ("" = the name alone).
+#[tauri::command]
+pub async fn island_wake_phrase(ctx: Cx<'_>, phrase: String) -> Result<UiState, String> {
+    crate::island::wake::set_phrase(&ctx, &phrase);
+    Ok(build_state(&ctx).await)
+}
+
+/// Fetch wake by name's model (again, after a failure). Err: "no_space",
+/// "unsupported".
+#[tauri::command]
+pub async fn island_wake_download(ctx: Cx<'_>) -> Result<UiState, String> {
+    let result = crate::island::wake::download(&ctx);
+    let state = build_state(&ctx).await;
+    result.map(|_| state)
+}
+
+/// Stop the download of wake by name's model.
+#[tauri::command]
+pub async fn island_wake_download_cancel(ctx: Cx<'_>) -> Result<UiState, String> {
+    ctx.island.wake_word.models.cancel();
+    Ok(build_state(&ctx).await)
+}
+
+/// Delete wake by name's model; the mode switches off.
+#[tauri::command]
+pub async fn island_wake_delete(ctx: Cx<'_>) -> Result<UiState, String> {
+    let ctx2 = ctx.inner().clone();
+    tokio::task::spawn_blocking(move || crate::island::wake::delete(&ctx2)).await.map_err(|e| e.to_string())??;
+    Ok(build_state(&ctx).await)
+}
+
+/// The island window: a click on the island while a wake records cancels
+/// it.
+#[tauri::command]
+pub fn island_wake_cancel(ctx: Cx<'_>) {
+    crate::island::wake::cancel(&ctx);
+}
+
 /// Read a synth's face again (the editor opens).
 #[tauri::command]
 pub async fn face_refresh(ctx: Cx<'_>, synth_id: String) -> Result<UiState, String> {

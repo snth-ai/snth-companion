@@ -64,6 +64,11 @@
     "allow-island-stt-set",
     "allow-island-stt-download",
     "allow-island-stt-cancel",
-    "allow-island-stt-delete"
+    "allow-island-stt-delete",
+    "allow-island-wake-set",
+    "allow-island-wake-phrase",
+    "allow-island-wake-download",
+    "allow-island-wake-download-cancel",
+    "allow-island-wake-delete"
   ]
 }

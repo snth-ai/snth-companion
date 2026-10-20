@@ -18,11 +18,16 @@
 // that went stays a moment after the release. The synth's offer to turn
 // it on (and then the model's download) is a card the shell sends only
 // while the island is idle.
+//
+// Wake by name: while it listens a small dim dot sits in the closed
+// island's right ear (a hollow ring while it paused by itself; hovering
+// says why). The name heard, the island opens as for a hold; a click on
+// it cancels the wake.
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { quickAnswer } from "../approval/ApprovalView";
 import { backend } from "../backend";
-import type { IslandView, SttCard } from "../backend/types";
+import type { IslandView, SttCard, WakeStatus } from "../backend/types";
 import { stringsFor } from "../i18n";
 import { shortcutText } from "../lib/format";
 import { Face, faceFor, faceWidth, type FaceState } from "./faceApi";
@@ -429,6 +434,8 @@ export function IslandApp() {
   const closedR = Math.min(12, p.pill.h / 2);
   const radius = closedR + (24 - closedR) * Math.min(1, Math.max(0, k));
   const keys = view.hotkeys.voice ? shortcutText(view.hotkeys.voice, view.os) : "";
+  const wake: WakeStatus = view.wake ?? { state: "off" };
+  const woke = Boolean(view.hold && wake.state === "woke");
 
   // The line under the name.
   let status: ReactNode = null;
@@ -439,7 +446,7 @@ export function IslandApp() {
   else if (view.synth && !view.synth.online) status = t.offline(name);
   else if (view.hold) status = (
     <>
-      {view.hold === "screen_voice" ? t.releaseShot : t.release}
+      {woke ? t.wakeListening : view.hold === "screen_voice" ? t.releaseShot : t.release}
       <span className="isl-timer">{mmss(now - view.hold_since_ms)}</span>
     </>
   );
@@ -453,7 +460,9 @@ export function IslandApp() {
     status = t.error;
     detail = m.summary ? <p className="isl-summary selectable">{m.summary}</p> : null;
   } else if (view.driving) status = t.driving;
+  else if (wake.state === "listening" && name) status = t.idleWake(keys, name);
   else status = keys ? t.idle(keys) : name;
+  const wakeNote = view.hover && wake.state === "paused" ? t.wakePaused[wake.reason] ?? null : null;
   if (view.task && (view.driving || m?.stage === "working")) {
     detail = detail ?? <p className="isl-task">{view.task}</p>;
   }
@@ -487,12 +496,20 @@ export function IslandApp() {
         ref={shapeRef}
         className={`isl-shape state-${state}${p.real_notch ? " notch" : ""}`}
         style={{ ["--accent" as string]: accent, left, width, height, borderBottomLeftRadius: radius, borderBottomRightRadius: radius }}
+        onClick={woke ? () => void backend.islandWakeCancel() : undefined}
       >
         <div className="isl-band" style={{ height: notchH }}>
           <div className="isl-ear left" style={{ width: (p.pill.w - p.notch.w) / 2 }} />
           <div className="isl-notch" style={{ width: p.notch.w }} />
           <div className="isl-ear right" style={{ width: (p.pill.w - p.notch.w) / 2 }}>
             <Glyph state={state} sending={view.sending} />
+            {state === "idle" && !open && (wake.state === "listening" || wake.state === "paused") ? (
+              <span
+                className={`isl-wake${wake.state === "paused" ? " paused" : ""}`}
+                title={wake.state === "paused" ? t.wakePaused[wake.reason] : t.wakeHint(name)}
+                aria-label={wake.state === "paused" ? t.wakePaused[wake.reason] : t.wakeHint(name)}
+              />
+            ) : null}
           </div>
         </div>
 
@@ -521,6 +538,7 @@ export function IslandApp() {
                     <div className="isl-status" role="status">
                       {status}
                     </div>
+                    {wakeNote ? <div className="isl-wake-note">{wakeNote}</div> : null}
                     {transcriptShown ? (
                       <div className={`isl-live${view.hold ? "" : " sent"}`} aria-live="polite">
                         {tailOf(transcript)}

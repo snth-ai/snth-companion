@@ -12,17 +12,24 @@
 //         Speech recognition: stt = on this computer, the model here;
 //         sttdl = its download at 34%; sttspace = the disk was too full;
 //         sttold = on, but Mia does not take text yet; sttintel = a Mac
-//         without Apple silicon, where it is not available)
+//         without Apple silicon, where it is not available. Wake by name:
+//         wake = on and listening; wakedl = its model downloading;
+//         wakecall = paused, another app uses the microphone; wakebt =
+//         paused, the only microphone is in AirPods)
 //   island.html?island=idle|hover|listening|screen|sending|accepted|thinking|
 //        working|driving|done|error|approval|text|offline|outdated|
 //        micdenied|asking|paused|two|shot|live|liveloading|livesent|
-//        heardnothing|offer|offerdl|offerready|offerfail
+//        heardnothing|offer|offerdl|offerready|offerfail|wakeidle|
+//        wakepaused|woke|wokename
 //        (live = a hold with its words recognized on this computer;
 //         liveloading = the same while the model is still loading;
 //         heardnothing = a hold dropped as silence by the voice detector;
 //         livesent = the text going after the release; offer = Mia's offer
 //         of on-device speech-to-text; offerdl, offerready, offerfail = the
-//         model's download after "Turn on", done, failed)
+//         model's download after "Turn on", done, failed; wakeidle = wake
+//         by name listening (the dot in the right ear); wakepaused = it
+//         paused for a call; woke = "Мия, ..." heard, the request being
+//         recorded with its words; wokename = "Мия" alone, waiting)
 //        (the island window on a desktop; &notch=0 draws a Mac without a
 //         notch, &os=windows a Windows screen. The pointer over the desktop
 //         is the gaze; the strip under it plays a hold, a line of text, a
@@ -52,10 +59,13 @@ import type {
   SttMode,
   SttModelStatus,
   UiState,
+  WakeStatus,
 } from "./types";
 
 /** The two model files, as the app pins them (stt/model.rs). */
 export const STT_SIZE = 574_041_195 + 885_098;
+/** Wake by name's files (wake/mod.rs): the voice detector, whisper tiny. */
+export const WAKE_SIZE = 885_098 + 32_152_673;
 
 const params = new URLSearchParams(window.location.search);
 
@@ -79,6 +89,17 @@ export function canonical(accelerator: string): string {
   }
   if (!key && mods.size === 0) return "";
   return [...[...mods].sort(), key].join("+");
+}
+
+/** The names the app answers to (wake/names.rs, `Names::shown`), for a
+ * Latin name. */
+export function wakeNames(name: string, phrase: string): string[] {
+  const out = [name];
+  const low = name.toLowerCase();
+  if (low === "mia") out.push("Мия", "Миа");
+  if (low === "maya") out.push("Майя");
+  if (phrase.trim()) out.push(phrase.trim());
+  return out;
 }
 
 /** The face Mia set for herself in the mock: her preset, a little
@@ -109,14 +130,43 @@ export function stagedIslandState(os: string, links: LinkBrief[]): IslandState {
         : scenario === "sttspace"
           ? { state: "failed", code: "no_space", detail: `${STT_SIZE + 300 * 1024 * 1024} ${412 * 1024 * 1024}` }
           : { state: "missing" };
+  const wakeOn = scenario.startsWith("wake") && scenario !== "wakeintel";
+  const wakeModel: SttModelStatus =
+    scenario === "wakedl" ? { state: "downloading", done: Math.round(WAKE_SIZE * 0.4), total: WAKE_SIZE } : wakeOn ? { state: "ready" } : { state: "missing" };
+  const wakeStatus: WakeStatus = !wakeOn
+    ? { state: "off" }
+    : scenario === "wakedl"
+      ? { state: "waiting", need: "model" }
+      : scenario === "wakecall"
+        ? { state: "paused", reason: "mic_busy" }
+        : scenario === "wakebt"
+          ? { state: "paused", reason: "bt_mic" }
+          : { state: "listening" };
   return {
     available: os !== "linux",
-    settings: { enabled, main_synth: main, hotkeys: defaultHotkeys(os), stt: stt ? "device" : "synth", stt_offer: stt ? "accepted" : "pending" },
+    settings: {
+      enabled,
+      main_synth: main,
+      hotkeys: defaultHotkeys(os),
+      stt: stt ? "device" : "synth",
+      stt_offer: stt ? "accepted" : "pending",
+      wake: wakeOn,
+      wake_phrase: "",
+    },
     main_synth: mainId,
     faces: scenario === "off" ? {} : { mia: MIA_FACE },
     supported,
     device_stt: deviceStt,
     stt: { available: os === "macos" && scenario !== "sttintel", model, size: STT_SIZE },
+    wake: {
+      ...wakeStatus,
+      available: os === "macos" && scenario !== "sttintel" && scenario !== "wakeintel",
+      model: wakeModel,
+      size: WAKE_SIZE,
+      names: wakeNames("Mia", ""),
+      wakes: wakeOn ? 3 : 0,
+      dropped: wakeOn ? 1 : 0,
+    },
     defaults: defaultHotkeys(os),
     keys_active: enabled && scenario !== "nolink" && links.length > 0,
     key_problems: scenario === "taken" ? { voice: "taken" } : {},
@@ -233,6 +283,75 @@ export class MockIslandScreen {
     return this.changed();
   }
 
+  // --- wake by name ---
+
+  private wakeTimer = 0;
+
+  /** The status the listener would have now. */
+  private wakeStatus(): WakeStatus {
+    const isl = this.state().island;
+    if (!isl.settings.wake) return { state: "off" };
+    if (isl.wake.model.state !== "ready") return { state: "waiting", need: "model" };
+    return { state: "listening" };
+  }
+
+  private setWake(status: WakeStatus) {
+    const w = this.state().island.wake;
+    delete (w as { need?: string }).need;
+    delete (w as { reason?: string }).reason;
+    Object.assign(w, status);
+  }
+
+  wakeSet(on: boolean): Promise<UiState> {
+    const isl = this.state().island;
+    if (on && !isl.wake.available) return Promise.reject("unsupported");
+    isl.settings.wake = on;
+    this.setWake(this.wakeStatus());
+    if (on) return this.wakeDownload();
+    return this.changed();
+  }
+
+  wakePhrase(phrase: string): Promise<UiState> {
+    const isl = this.state().island;
+    isl.settings.wake_phrase = phrase.trim().split(/\s+/).join(" ").slice(0, 40);
+    isl.wake.names = wakeNames("Mia", isl.settings.wake_phrase);
+    return this.changed();
+  }
+
+  /** A pretend download: about 2 s. */
+  wakeDownload(): Promise<UiState> {
+    const isl = this.state().island;
+    if (isl.wake.model.state === "ready" || isl.wake.model.state === "downloading") return this.changed();
+    isl.wake.model = { state: "downloading", done: 0, total: WAKE_SIZE };
+    this.setWake(this.wakeStatus());
+    window.clearInterval(this.wakeTimer);
+    this.wakeTimer = window.setInterval(() => {
+      const m = isl.wake.model;
+      if (m.state !== "downloading") return window.clearInterval(this.wakeTimer);
+      const done = Math.min(m.total, m.done + WAKE_SIZE / 8);
+      isl.wake.model = done >= m.total ? { state: "ready" } : { state: "downloading", done, total: m.total };
+      if (done >= m.total) window.clearInterval(this.wakeTimer);
+      this.setWake(this.wakeStatus());
+      void this.changed();
+    }, 250);
+    return this.changed();
+  }
+
+  wakeDownloadCancel(): Promise<UiState> {
+    window.clearInterval(this.wakeTimer);
+    this.state().island.wake.model = { state: "missing" };
+    this.setWake(this.wakeStatus());
+    return this.changed();
+  }
+
+  wakeDelete(): Promise<UiState> {
+    const isl = this.state().island;
+    isl.wake.model = { state: "missing" };
+    isl.settings.wake = false;
+    this.setWake({ state: "off" });
+    return this.changed();
+  }
+
   /** The synth designs its own face a moment later (a new look arrives). */
   async askDesign(synthId: string): Promise<void> {
     await new Promise((r) => window.setTimeout(r, 400));
@@ -316,6 +435,7 @@ export class MockIslandWindow {
       transcript: null,
       stt_loading: scenario === "liveloading",
       stt_card: null,
+      wake: scenario === "wakepaused" ? { state: "paused", reason: "mic_busy" } : scenario.startsWith("wake") || scenario.startsWith("woke") ? { state: "listening" } : { state: "off" },
     };
     const ru = lang === "ru";
     const spoken = ru
@@ -379,6 +499,16 @@ export class MockIslandWindow {
         break;
       case "offerfail":
         this.view.stt_card = { kind: "failed", code: "no_space" };
+        break;
+      case "woke":
+        this.view.hold = "voice";
+        this.view.wake = { state: "woke" };
+        this.view.transcript = ru ? "Мия, найди билеты в Бангкок на" : "Mia, find me tickets to Bangkok for";
+        break;
+      case "wokename":
+        this.view.hold = "voice";
+        this.view.wake = { state: "woke" };
+        this.view.transcript = ru ? "Мия." : "Mia.";
         break;
     }
     // Stills stay still: no notice expires while a reviewer looks.
@@ -534,6 +664,68 @@ export class MockIslandWindow {
       this.send({ type: "level", level: 0 });
       this.playAnswer();
     });
+  }
+
+  /** Wake by name: "Мия, найди билеты в Бангкок", said, not held. The
+   * island opens listening as for a hold, the words come, a second of
+   * silence sends it (the name stripped), the answer follows. */
+  playWake(nameOnly = false) {
+    const ru = this.view.lang === "ru";
+    const name = ru ? "Мия" : "Mia";
+    const request = (ru ? "найди билеты в Бангкок на пятницу" : "find me tickets to Bangkok for Friday").split(" ");
+    this.view.wake = { state: "woke" };
+    this.view.hold = "voice";
+    this.view.hold_since_ms = Date.now();
+    this.view.message = null;
+    this.view.notice = null;
+    this.view.stt_card = null;
+    this.view.transcript = `${name},`;
+    this.changed();
+    for (let i = 0; i < 70; i++) this.later(i * 50, () => this.send({ type: "level", level: nameOnly && i > 10 ? 0.05 : Math.abs(Math.sin(i / 3)) * 0.8 + Math.random() * 0.2 }));
+    if (nameOnly) {
+      // Nothing follows the name: back to sleep, nothing sent.
+      this.later(3500, () => {
+        this.view.hold = null;
+        this.view.transcript = null;
+        this.view.wake = { state: "listening" };
+        this.send({ type: "level", level: 0 });
+        this.changed();
+      });
+      return;
+    }
+    for (let k = 1; k <= Math.ceil(request.length / 2); k++) {
+      this.later(k * 550, () => {
+        this.view.transcript = `${name}, ${request.slice(0, k * 2).join(" ")}`;
+        this.changed();
+      });
+    }
+    this.later(3600, () => {
+      this.view.hold = null;
+      this.view.wake = { state: "listening" };
+      const text = request.join(" ");
+      this.view.transcript = text.charAt(0).toUpperCase() + text.slice(1) + ".";
+      this.send({ type: "level", level: 0 });
+      this.playAnswer();
+    });
+  }
+
+  /** The listener pauses for a call, and comes back after it. */
+  toggleWakePause() {
+    this.view.wake = this.view.wake.state === "paused" ? { state: "listening" } : { state: "paused", reason: "mic_busy" };
+    this.changed();
+  }
+
+  /** Escape or a click on the island during a wake: nothing is sent. */
+  wakeCancel() {
+    if (this.view.wake.state !== "woke") return Promise.resolve();
+    this.timers.forEach((t) => window.clearTimeout(t));
+    this.timers = [];
+    this.view.hold = null;
+    this.view.transcript = null;
+    this.view.wake = { state: "listening" };
+    this.send({ type: "level", level: 0 });
+    this.changed();
+    return Promise.resolve();
   }
 
   /** The synth's offer of on-device speech-to-text, on an idle island. */
