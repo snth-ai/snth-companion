@@ -172,6 +172,18 @@ pub struct IslandDto {
     /// A key the system would not give ("taken", "bad"), by key.
     pub key_problems: std::collections::HashMap<connect_core::island::HotkeyKind, String>,
     pub mic: crate::island::audio::MicPermission,
+    pub stt: SttDto,
+}
+
+/// On-device speech-to-text on the Island screen (the switch itself is
+/// in the settings: `stt`, `stt_offer`).
+#[derive(Debug, Clone, Serialize)]
+pub struct SttDto {
+    /// The engine is in this build (Apple silicon).
+    pub available: bool,
+    pub model: crate::island::stt::model::Status,
+    /// The download, in bytes.
+    pub size: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -275,6 +287,11 @@ pub async fn build_state(ctx: &Ctx) -> UiState {
             keys_active: ctx.island.keys_active(),
             key_problems: ctx.island.problems(),
             mic: crate::island::audio::permission(),
+            stt: SttDto {
+                available: crate::island::stt::available(),
+                model: ctx.island.stt.models.status(),
+                size: crate::island::stt::model::total_size(),
+            },
         },
         prefs: PrefsDto {
             onboarded: prefs.onboarded,
