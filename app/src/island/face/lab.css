@@ -1,0 +1,315 @@
+/* The face lab page: dark, quiet, the black island cards are the subject. */
+
+:root {
+  color-scheme: dark;
+  --lab-bg: #161417;
+  --lab-panel: #1f1c20;
+  --lab-line: #2e2a2f;
+  --lab-text: #ece8ea;
+  --lab-text-2: #a29ba0;
+  --lab-text-3: #6f696d;
+  --lab-accent: #e8508f;
+  --lab-font: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--lab-bg);
+  color: var(--lab-text);
+  font: 14px/1.45 var(--lab-font);
+  -webkit-font-smoothing: antialiased;
+}
+
+.lab {
+  min-height: 100vh;
+  padding: 28px 32px 40px;
+  max-width: 1360px;
+  margin: 0 auto;
+}
+
+.lab-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px 32px;
+  margin-bottom: 28px;
+}
+
+.lab h1 {
+  margin: 0 0 4px;
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.lab-sub {
+  margin: 0;
+  color: var(--lab-text-2);
+}
+
+.lab-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.lab-seg {
+  display: inline-flex;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--lab-panel);
+  border: 1px solid var(--lab-line);
+}
+
+.lab button {
+  font: inherit;
+  color: var(--lab-text-2);
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  padding: 6px 11px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.lab button:hover {
+  color: var(--lab-text);
+  background: #2a262b;
+}
+
+.lab button:focus-visible {
+  outline: 2px solid var(--lab-accent);
+  outline-offset: 1px;
+}
+
+.lab-seg button.on {
+  color: var(--lab-text);
+  background: #343036;
+}
+
+.lab-toggle,
+.lab-reset {
+  border: 1px solid var(--lab-line) !important;
+  background: var(--lab-panel) !important;
+  border-radius: 10px !important;
+  padding: 8px 12px !important;
+}
+
+.lab-toggle.on {
+  color: var(--lab-text) !important;
+  border-color: var(--lab-accent) !important;
+  box-shadow: inset 0 0 0 1px var(--lab-accent);
+}
+
+.lab kbd {
+  font: 11px/1 ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--lab-text-3);
+  border: 1px solid var(--lab-line);
+  border-radius: 4px;
+  padding: 2px 4px;
+}
+
+.lab-grid {
+  display: grid;
+  gap: 20px;
+  align-items: start;
+}
+
+@media (max-width: 1000px) {
+  .lab-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+}
+
+.lab-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 18px 14px 22px;
+  border-radius: 16px;
+  background: var(--lab-panel);
+  border: 1px solid var(--lab-line);
+}
+
+.lab-col header {
+  align-self: stretch;
+  min-height: 62px;
+}
+
+.lab-col h2 {
+  margin: 0 0 3px;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.lab-col header p {
+  margin: 0;
+  color: var(--lab-text-2);
+  font-size: 12.5px;
+}
+
+.lab-0 h2 {
+  color: var(--lab-text-2);
+}
+
+/* The open island: black, rounded, the face centred at 84 px. */
+.lab-open {
+  width: 100%;
+  max-width: 260px;
+  height: 128px;
+  border-radius: 28px;
+  background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* The closed island: a black band at notch height, the face on its left ear. */
+.lab-closed {
+  width: 100%;
+  max-width: 220px;
+  height: 34px;
+  border-radius: 0 0 12px 12px;
+  background: #000;
+  display: flex;
+  align-items: center;
+  padding-left: 8px;
+}
+
+.lab-face,
+.lab-face-small {
+  line-height: 0;
+}
+
+.lab-notes {
+  margin-top: 26px;
+  color: var(--lab-text-2);
+  max-width: 760px;
+}
+
+.lab-notes h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--lab-text);
+}
+
+.lab-notes ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.lab-notes li {
+  margin: 2px 0;
+}
+
+/* C2's live tuning, under its islands. */
+.lab-tune {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 6px;
+  padding-top: 14px;
+  border-top: 1px solid var(--lab-line);
+}
+
+.lab-slider {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+  color: var(--lab-text-2);
+}
+
+.lab-slider.off {
+  opacity: 0.45;
+}
+
+.lab-slider-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.lab-slider output {
+  color: var(--lab-text);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.lab-slider input[type="range"] {
+  width: 100%;
+  accent-color: var(--lab-accent);
+  margin: 0;
+}
+
+.lab-bored {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 12px;
+  align-items: end;
+}
+
+.lab-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--lab-text);
+  padding-bottom: 2px;
+}
+
+.lab-check input {
+  accent-color: var(--lab-accent);
+  margin: 0;
+}
+
+.lab-tune-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.lab-copy,
+.lab-defaults {
+  border: 1px solid var(--lab-line) !important;
+  background: #2a262b !important;
+  padding: 7px 11px !important;
+  font-size: 12.5px !important;
+}
+
+.lab-copy {
+  color: var(--lab-text) !important;
+  border-color: var(--lab-accent) !important;
+}
+
+.lab-copied {
+  font-size: 12px;
+  color: var(--lab-text-2);
+}
+
+.lab-json {
+  width: 100%;
+  min-height: 160px;
+  background: #121013;
+  color: var(--lab-text);
+  border: 1px solid var(--lab-line);
+  border-radius: 8px;
+  font: 11.5px/1.4 ui-monospace, "SF Mono", Menlo, monospace;
+  padding: 8px;
+  resize: vertical;
+}

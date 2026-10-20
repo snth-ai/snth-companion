@@ -13,7 +13,36 @@
 // Reduced motion: every state has one fixed pose, a state change is a short
 // cross-fade, nothing blinks or wanders; only the microphone meter moves.
 
+// The .ts extension keeps this file runnable as is under `node --test`.
+import { DEFAULT_PILL_MOTION, makeRig, type FaceAttention, type MotionStyle, type Rig, type RigFrame, type SmoothTuning } from "./rig.ts";
 import type { FaceConfig, FaceState, IdleEmote } from "./schema";
+
+// ---------- the clock ----------
+//
+// Every face reads time from here. The rate is 1 except in the face lab,
+// which slows it down (0.25x) to inspect motion; changing it rebases, so
+// time never jumps.
+
+let clockScale = 1;
+let clockRealBase = 0;
+let clockVirtBase = 0;
+
+/** Face time in seconds for a performance.now() / rAF timestamp (ms). */
+export function faceClock(realMs: number = performance.now()): number {
+  return (clockVirtBase + (realMs - clockRealBase) * clockScale) / 1000;
+}
+
+/** Face time runs at this rate (1 = real time). */
+export function setFaceTimeScale(scale: number): void {
+  const now = performance.now();
+  clockVirtBase = clockVirtBase + (now - clockRealBase) * clockScale;
+  clockRealBase = now;
+  clockScale = Math.max(0.01, scale);
+}
+
+export function faceTimeScale(): number {
+  return clockScale;
+}
 
 /** How far lids.rest = 1 closes the eye (a sliver always shows). */
 export const LID_REST = 0.58;
@@ -142,6 +171,9 @@ export interface Frame {
   /** Pill eyes: the springy settle after a blink, a damped wave around 0
    * (+ = landed low and squashed). Absent for other shapes. */
   rebound?: number;
+  /** Pill eyes with a motion style other than classic: the gaze rig's
+   * head, breath and attention (see rig.ts). */
+  rig?: RigFrame;
 }
 
 export interface EmoteRun {
@@ -712,6 +744,36 @@ function applyEmote(p: Pose, e: EmoteRun, rest: number, baseSmile: number): void
   }
 }
 
+/** The head style's attention shows on the pose: a startle widens the eyes
+ * (and parts the mouth), a pointer close by brings a happy squint. */
+function applyRig(p: Pose, r: RigFrame): void {
+  const s = r.surprise;
+  if (s > 0.001) {
+    p.stretch += 0.2 * s;
+    p.sL += 0.07 * s;
+    p.sR += 0.07 * s;
+    p.open = lerp(p.open, 0.35, s);
+    p.lL = lerp(p.lL, 0, s);
+    p.lR = lerp(p.lR, 0, s);
+  }
+  // The squint is the cheeks pushing the beans up from below and the lids
+  // coming down a little: shorter, a touch wider, still a bean (a full happy
+  // arch reads as a cloud here).
+  const q = r.squint * (1 - s);
+  if (q > 0.001) {
+    p.lL = lerp(p.lL, 0.26, q);
+    p.lR = lerp(p.lR, 0.26, q);
+    p.uL = lerp(p.uL, 0.14, q);
+    p.uR = lerp(p.uR, 0.14, q);
+    // Lowered, so the squint does not lift the gaze off the pointer below.
+    p.eyL += 0.22 * q;
+    p.eyR += 0.22 * q;
+    p.lowCurve = lerp(p.lowCurve, 0.2, q);
+    p.stretch -= 0.06 * q;
+    p.smile = lerp(p.smile, Math.max(p.smile, 0.9), q);
+  }
+}
+
 /** The moment of each state a still picture (and reduced motion) shows. */
 export const HERO_TIME: Partial<Record<FaceState, number>> = {
   accepted: 0.12,
@@ -731,6 +793,20 @@ export interface SimInput {
   reduced: boolean;
   autoSleep: boolean;
   compact: boolean;
+  /** Pill eyes only: how the gaze moves (rig.ts). Default DEFAULT_PILL_MOTION. */
+  motionStyle?: MotionStyle;
+  /** Live tuning of the smooth style (the lab's sliders). */
+  rigTuning?: Partial<SmoothTuning>;
+  /** What the host knows about the pointer (rig.ts FaceAttention). */
+  attention?: FaceAttention;
+  /** Nothing to draw (the island is tucked away, the page is hidden): the
+   * loop stops completely until this goes false. */
+  paused?: boolean;
+}
+
+/** The motion style in effect: the rig works on pill eyes only. */
+export function styleOf(input: Pick<SimInput, "face" | "motionStyle">): MotionStyle {
+  return input.face.eyes.shape === "pill" ? (input.motionStyle ?? DEFAULT_PILL_MOTION) : "classic";
 }
 
 interface Spring {
@@ -851,8 +927,11 @@ export class FaceSim {
   private fadeFrom: Frame | null = null;
   private fadeStart = 0;
 
+  /** The gaze rig (pill eyes with a motion style), else null. */
+  private rig: Rig | null = null;
+
   constructor(input: SimInput, onFrame: (frame: Frame) => void) {
-    const now = performance.now() / 1000;
+    const now = faceClock();
     this.input = input;
     this.onFrame = onFrame;
     this.state = input.state;
@@ -867,19 +946,37 @@ export class FaceSim {
     this.fix = { ...g };
     this.pose = targetPose(this.targetInput(now));
     this.vel = Object.fromEntries(CHANNELS.map((c) => [c, 0])) as Pose;
+    this.syncRig(now);
+  }
+
+  /** Makes or drops the rig when the style (or the eye shape) changes. */
+  private syncRig(now: number): void {
+    const style = styleOf(this.input);
+    if (style === "classic") {
+      this.rig = null;
+      return;
+    }
+    if (this.rig?.style === style) {
+      this.rig.setTuning?.(this.input.rigTuning);
+      return;
+    }
+    this.rig = makeRig(style, now, { x: this.pose.gx, y: this.pose.gy }, this.input.rigTuning);
+    this.rig?.noteCursor(this.input.gaze, now, Boolean(this.input.attention?.agent));
   }
 
   /** The first frame, before any animation. */
   frame(): Frame {
-    const now = performance.now() / 1000;
+    const now = faceClock();
     return this.makeFrame(now, 0, 0);
   }
 
   update(next: SimInput): void {
     const prev = this.input;
     this.input = next;
-    const now = performance.now() / 1000;
+    const now = faceClock();
     if (next.face.motion.blink !== prev.face.motion.blink) this.blinkAt = now + this.blinkGap();
+    this.syncRig(now);
+    if (next.paused && !prev.paused) this.halt();
     const g = next.gaze;
     const p = this.prevGaze;
     if (g && (!p || Math.abs(g.x - p.x) > 0.004 || Math.abs(g.y - p.y) > 0.004)) {
@@ -892,6 +989,7 @@ export class FaceSim {
         this.nextWander = now + rand(6, 12);
       }
       this.prevGaze = g;
+      this.rig?.noteCursor(g, now, Boolean(next.attention?.agent));
       if (wasAsleep) this.startBlinks(now + 0.25, 2);
     }
     this.wake();
@@ -899,7 +997,7 @@ export class FaceSim {
 
   /** Plays an idle emote now (editor preview, demo). */
   playEmote(kind: IdleEmote): void {
-    const now = performance.now() / 1000;
+    const now = faceClock();
     this.emote = { kind, start: now, side: Math.random() < 0.5 ? 1 : -1 };
     this.wake();
   }
@@ -917,13 +1015,22 @@ export class FaceSim {
     this.timer = null;
   }
 
+  /** Paused: no frame, no timer. The clock restarts on the next wake. */
+  private halt(): void {
+    if (this.raf) cancelAnimationFrame(this.raf);
+    if (this.timer) clearTimeout(this.timer);
+    this.raf = 0;
+    this.timer = null;
+    this.resting = true;
+  }
+
   private wake(): void {
-    if (!this.running || this.raf) return;
+    if (!this.running || this.raf || this.input.paused) return;
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    if (this.resting) this.last = performance.now() / 1000;
+    if (this.resting) this.last = faceClock();
     this.raf = requestAnimationFrame(this.tick);
   }
 
@@ -993,13 +1100,15 @@ export class FaceSim {
     if (this.wander && now < this.wander.until) look = this.wander.to;
     const g = this.input.gaze ?? NO_GAZE;
     const amp = state === "driving" ? 1 : 0.25 + 0.75 * this.input.face.motion.curiosity;
+    // With the rig the head turn is drawn from the rig, not leaned by the pose.
+    const lean = this.rig ? { x: 0, y: 0 } : { x: clamp(g.x, -1, 1) * amp, y: clamp(g.y, -1, 1) * amp };
     return {
       face: this.input.face,
       state,
       st,
       t: now,
       look,
-      lean: { x: clamp(g.x, -1, 1) * amp, y: clamp(g.y, -1, 1) * amp },
+      lean,
       level: this.level,
       emote,
       reduced: this.input.reduced,
@@ -1016,11 +1125,14 @@ export class FaceSim {
     const g = this.input.gaze ?? NO_GAZE;
     const amp = driving ? 1 : 0.25 + 0.75 * cur;
     const want: Vec = { x: clamp(g.x, -1, 1) * amp, y: clamp(g.y, -1, 1) * amp };
-    if (reduced || driving) {
+    if (reduced || driving || this.rig) {
       // Reduced motion and driving: straight onto the target, no saccades.
+      // With the rig the saccades happen there; only the daydreaming glances
+      // stay here (and the head style has its own attention instead).
+      if (this.rig && !reduced && !driving && this.rig.style !== "head" && this.rig.style !== "smooth") this.daydream(now, state, live);
+      else this.wander = null;
       this.fix = want;
       this.jitter = { x: 0, y: 0 };
-      this.wander = null;
       return;
     }
     const thresh = 0.05 + (1 - cur) * 0.12;
@@ -1041,6 +1153,12 @@ export class FaceSim {
       this.jitter = { x: rand(-a, a), y: rand(-a, a) * 0.7 };
       this.nextMicro = now + rand(2.2, 6.5) / (0.5 + live);
     }
+    this.daydream(now, state, live);
+  }
+
+  /** A glance elsewhere now and then when the pointer has rested a while. */
+  private daydream(now: number, state: FaceState, live: number): void {
+    const awake = now - this.lastGazeAt < DEEP_REST;
     if (state === "idle" && live > 0 && awake && now - this.lastGazeAt > 5 && now > this.nextWander && !this.emote) {
       this.wander = { to: { x: rand(-0.75, 0.75), y: rand(-0.35, 0.45) }, until: now + rand(0.6, 1.4) };
       this.nextWander = now + rand(5, 14) / (0.3 + live);
@@ -1050,8 +1168,8 @@ export class FaceSim {
 
   private tick = (ms: number): void => {
     this.raf = 0;
-    if (!this.running) return;
-    const now = ms / 1000;
+    if (!this.running || this.input.paused) return;
+    const now = faceClock(ms);
     const dt = clamp(now - this.last, 0, 0.1);
     this.last = now;
     this.resting = false;
@@ -1107,12 +1225,23 @@ export class FaceSim {
       this.nextEmote = now + this.emoteGap(now);
     }
 
-    // Blinks: none while asleep, offline or in reduced motion.
+    // The state's wish for this moment; the rig turns its gaze into saccades
+    // (and may ask for a blink timed with a large one).
+    const target = targetPose(this.targetInput(now));
     const noBlinks = reduced || this.state === "sleeping" || this.state === "offline";
+    let rigEye: Vec | null = null;
+    if (this.rig) {
+      const out = this.rig.step(now, dt, { want: { x: target.gx, y: target.gy }, cursor: this.input.gaze, state: this.state, reduced, attention: this.input.attention });
+      rigEye = out.eye;
+      if (out.blink && !noBlinks && this.blinkStart < 0) this.startBlinks(now, 1);
+      if (!reduced) applyRig(target, this.rig.frame(now));
+    }
+
+    // Blinks: none while asleep, offline or in reduced motion.
     if (!noBlinks && this.blinkStart < 0 && now >= this.blinkAt) {
       this.blinkStart = now;
       const slow = face.motion.blink < 0.3 ? 1.25 : 1;
-      const v = rand(0.92, 1.12) * slow;
+      const v = rand(0.92, 1.12) * slow * (this.rig?.blinkScale?.() ?? 1);
       this.blinkClose = BLINK_CLOSE * v;
       this.blinkLen = (BLINK_CLOSE + BLINK_HOLD + BLINK_OPEN) * v;
       this.blinksLeft -= 1;
@@ -1130,7 +1259,6 @@ export class FaceSim {
     const blink = this.blinkValue(now);
 
     // Springs, in substeps of at most 1/120 s.
-    const target = targetPose(this.targetInput(now));
     let moving = false;
     if (reduced) {
       this.pose = target;
@@ -1139,6 +1267,8 @@ export class FaceSim {
       const steps = Math.max(1, Math.ceil(dt / (1 / 120)));
       const h = dt / steps;
       for (const ch of CHANNELS) {
+        // The rig owns the gaze (set below); its own busy() says when it moves.
+        if (rigEye && (ch === "gx" || ch === "gy")) continue;
         const grp = GROUP[ch];
         let sp = springs.get(grp);
         if (!sp) {
@@ -1158,19 +1288,29 @@ export class FaceSim {
         if (Math.abs(to - x) > eps || Math.abs(v) > eps * 8) moving = true;
       }
     }
+    if (rigEye) {
+      // The rig owns the gaze: its saccades are drawn as they are.
+      this.pose.gx = rigEye.x;
+      this.pose.gy = rigEye.y;
+      this.vel.gx = 0;
+      this.vel.gy = 0;
+      if (this.rig!.busy(now)) moving = true;
+    }
 
     const st = now - this.stateAt;
     const timeline = TIMELINE[this.state];
     const inTimeline = !reduced && timeline !== undefined && st < timeline + 0.6;
     const fading = this.fadeFrom !== null && now - this.fadeStart < FADE;
     if (!fading) this.fadeFrom = null;
-    const fps = reduced ? (this.state === "listening" && this.level > 0.01 ? 30 : 0) : ambientFps(this.state, this.level);
+    const rigFps = this.rig && this.state !== "offline" ? this.rig.ambientFps(reduced) : 0;
+    const fps = reduced ? (this.state === "listening" && this.level > 0.01 ? 30 : 0) : Math.max(ambientFps(this.state, this.level), rigFps);
     // Fast things (a blink, an emote, a one-shot timeline, a cross-fade) get
     // every frame; the slow ambient motion of a state gets its capped rate.
     // The symbols beside the eyes fade in over 150 ms after a state change.
     const symbolIn = !reduced && SYMBOL_STATES.has(this.state) && st < 0.2;
     const settling = !reduced && now - this.reboundAt < REBOUND;
-    const fast = blink > 0 || this.blinkStart >= 0 || this.emote !== null || inTimeline || fading || symbolIn || settling;
+    const rigBusy = !reduced && this.rig !== null && this.rig.busy(now);
+    const fast = blink > 0 || this.blinkStart >= 0 || this.emote !== null || inTimeline || fading || symbolIn || settling || rigBusy;
     const capped = fps > 0 && !fast;
     const busy = fast || (moving && fps === 0);
 
@@ -1200,23 +1340,26 @@ export class FaceSim {
         else nexts.push(this.lastGazeAt + 5.01);
       }
     }
+    if (this.rig && !reduced) nexts.push(...this.rig.wakeTimes());
     if (this.input.state === "idle" && this.input.autoSleep && face.motion.sleepy_after_min > 0)
       nexts.push(this.lastGazeAt + face.motion.sleepy_after_min * 60 + 0.01);
     // Only future moments count: a stale one must never turn into polling.
     const future = nexts.filter((x) => x > now + 0.001);
     this.resting = true;
     if (!future.length) return;
+    // Face seconds to real milliseconds (the lab can slow the clock down).
     const wait = Math.max(0.016, Math.min(...future) - now);
     this.timer = setTimeout(() => {
       this.timer = null;
       this.wake();
-    }, wait * 1000);
+    }, (wait * 1000) / faceTimeScale());
   };
 
   private makeFrame(now: number, blink: number, st: number): Frame {
-    const rebound = this.input.reduced ? 0 : reboundCurve(now - this.reboundAt);
+    const rebound = this.input.reduced ? 0 : reboundCurve(now - this.reboundAt) * (this.rig?.reboundGain?.() ?? 1);
     return {
       ...(rebound !== 0 ? { rebound } : {}),
+      ...(this.rig ? { rig: this.rig.frame(now) } : {}),
       pose: { ...this.pose },
       blinkL: blink,
       blinkR: blink,

@@ -28,6 +28,27 @@ const NOTICE_FOR = 6000;
 const OPEN_W = 400;
 /** The face in the open island: big enough for the whole head. */
 const FACE_OPEN = 84;
+/** The shell's gaze reach (src-tauri island/mod.rs GAZE_REACH): the gaze
+ * vector is (pointer - face centre) / GAZE_REACH, unclamped within it. */
+const GAZE_REACH = 600;
+/** "At the island" for the face's happy squint: on the shape, or within
+ * this many px around it and below it. In gaze units 10 px is 0.017 and
+ * 48 px 0.08 (the lab's distance test was a 0.22 circle, 132 px, which
+ * from the left ear reaches well into the menu bar). */
+const NEAR_AROUND = 10;
+const NEAR_BELOW = 48;
+
+/** Is the pointer on the island's shape or just below it? Rebuilt from the
+ * gaze vector and the face centre the shell measures it from. */
+function pointerOnIsland(g: { x: number; y: number }, shape: HTMLElement, face: HTMLElement): boolean {
+  if (Math.hypot(g.x, g.y) >= 0.999) return false; // clamped: farther than the reach
+  const box = shape.getBoundingClientRect();
+  const f = face.getBoundingClientRect();
+  const px = f.x + f.width / 2 + g.x * GAZE_REACH;
+  const py = f.y + f.height / 2 + g.y * GAZE_REACH;
+  return px >= box.left - NEAR_AROUND && px <= box.right + NEAR_AROUND && py >= box.top - NEAR_AROUND && py <= box.bottom + NEAR_BELOW;
+}
+
 /** How long the island takes to open or close: the shape and the face
  * together, on one clock and one curve (`useMotion`). */
 const MOVE_MS = 420;
@@ -213,6 +234,10 @@ function mmss(ms: number): string {
 export function IslandApp() {
   const [view, setView] = useState<IslandView | null>(null);
   const [gaze, setGaze] = useState<{ x: number; y: number } | null>(null);
+  /** The gaze follows the synth's own pointer (it drives the computer). */
+  const [gazeAgent, setGazeAgent] = useState(false);
+  /** The owner's pointer is on the island or just below it. */
+  const [pointerOn, setPointerOn] = useState(false);
   const [level, setLevel] = useState(0);
   const [text, setText] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
@@ -233,7 +258,10 @@ export function IslandApp() {
     refresh();
     const stopIsland = backend.subscribeIsland((signal) => {
       if (signal.type === "view") setView(signal.view);
-      else if (signal.type === "gaze") setGaze({ x: signal.x, y: signal.y });
+      else if (signal.type === "gaze") {
+        setGaze({ x: signal.x, y: signal.y });
+        setGazeAgent(signal.agent);
+      }
       else setLevel(signal.level);
     });
     // Requests and the app's state come on the app's own channel.
@@ -255,6 +283,8 @@ export function IslandApp() {
 
   const state: FaceState = view ? faceStateOf(view, now) : "idle";
   const summaryShown = Boolean(view?.message && (view.message.stage === "done" || view.message.stage === "error") && now - view.message.at_ms < SUMMARY_FOR);
+  /** The owner is busy with the island: the face does not get bored then. */
+  const engaged = Boolean(view && (view.hover || view.text_open || view.hold || view.approval || summaryShown));
   const noticeShown = Boolean(view?.notice && now - view.notice.at_ms < NOTICE_FOR);
   const open = Boolean(view && (view.hover || view.approval || view.text_open || view.hold || summaryShown || noticeShown));
 
@@ -301,6 +331,14 @@ export function IslandApp() {
   const reportRef = useRef(report);
   reportRef.current = report;
   useLayoutEffect(() => reportRef.current());
+
+  // The pointer on the island (the face's happy squint), after every render:
+  // the gaze moved, or the shape grew or shrank under a resting pointer.
+  useLayoutEffect(() => {
+    const shape = shapeRef.current;
+    const faceEl = faceRef.current;
+    setPointerOn(Boolean(gaze && !gazeAgent && shape && faceEl && pointerOnIsland(gaze, shape, faceEl)));
+  });
 
   if (!view || !view.placement) return null;
 
@@ -384,7 +422,16 @@ export function IslandApp() {
         </div>
 
         <div ref={faceRef} className="isl-face" style={{ left: faceLeft, top: faceTop, height: faceSize }}>
-          <Face config={face} state={state} gaze={gaze} level={level} size={faceSize} label={name} />
+          <Face
+            config={face}
+            state={state}
+            gaze={gaze}
+            level={level}
+            size={faceSize}
+            label={name}
+            attention={{ near: pointerOn, engaged, agent: gazeAgent }}
+            paused={view.hidden}
+          />
         </div>
 
         {/* The body shows as far as the shape has grown. */}
