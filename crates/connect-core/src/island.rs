@@ -8,7 +8,12 @@
 //!    touches them and the synth is told only whether the island is on
 //!    (`capabilities.island` in the hello);
 //!  - `owner.message`, the one request that hands the synth a voice note,
-//!    a screenshot or a line of text as the owner's own message;
+//!    a screenshot or a line of text as the owner's own message. A voice
+//!    note goes as audio, or (on-device speech-to-text, tz-local-stt.md)
+//!    as the text the app recognized itself (`voice_transcript`, `stt`
+//!    "device"), only to a synth that announces `island_device_stt`;
+//!  - the owner's choice of speech-to-text and the synth's one-time offer
+//!    of it (`IslandSettings::stt`, `stt_offer`);
 //!  - each synth's face (FaceConfig v1), cached per synth: `face.get` at
 //!    link time, `face.set` from the owner's editor, `island.event
 //!    kind=face` when the synth changed it itself;
@@ -33,6 +38,11 @@ use crate::slot::LinkSlot;
 /// The hello_ack feature of a synth that takes owner.message, face.get,
 /// face.set and calls island.event.
 pub const FEATURE: &str = "island";
+/// The hello_ack feature of a synth that takes a voice message as the
+/// text the app recognized itself (owner.message `voice_transcript`, `stt`
+/// "device", no audio). Without it the app sends the voice as audio, even
+/// with on-device speech-to-text switched on.
+pub const FEATURE_DEVICE_STT: &str = "island_device_stt";
 /// `capabilities.island.version`.
 pub const VERSION: u32 = 1;
 
@@ -47,6 +57,13 @@ pub const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_FACE_BYTES: usize = 4096;
 /// The longest line of text the owner may type.
 pub const MAX_TEXT_CHARS: usize = 4000;
+/// The longest transcript of a voice message recognized on this computer.
+pub const MAX_TRANSCRIPT_CHARS: usize = 8000;
+/// `owner.message` `stt`: the transcript was recognized on this computer.
+pub const STT_DEVICE: &str = "device";
+/// The send error of a transcript to a synth that does not take one (the
+/// link came back with an older synth): the caller sends the audio.
+pub const NO_DEVICE_STT: &str = "no_device_stt";
 
 /// How long owner.message may take to be accepted. Longer than the other
 /// requests: up to 8 MB go up first, over whatever line the owner has.
@@ -230,6 +247,66 @@ pub fn canonical(accelerator: &str) -> String {
     out
 }
 
+/// Who turns the owner's voice into text (tz-local-stt.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SttMode {
+    /// The voice goes to the synth as audio; the synth's speech-to-text
+    /// hears the tone of voice too. The default.
+    #[default]
+    Synth,
+    /// The app recognizes the speech itself while the key is held and
+    /// sends the text: faster, the voice stays on this computer.
+    Device,
+}
+
+/// The synth's offer to recognize speech on this computer, shown once on
+/// the island. Pending on a fresh install and in a settings file written
+/// before the offer existed, so an owner who has the island on already
+/// sees it once after the update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SttOffer {
+    /// Not shown yet.
+    #[default]
+    Pending,
+    /// On the island, not answered yet (shown again after a restart).
+    Shown,
+    Accepted,
+    /// "Not now": never asked again (the switch stays in Settings).
+    Declined,
+}
+
+impl SttOffer {
+    /// The offer still waits for an answer.
+    pub fn open(self) -> bool {
+        matches!(self, SttOffer::Pending | SttOffer::Shown)
+    }
+
+    /// The island showed it.
+    pub fn shown(self) -> SttOffer {
+        match self {
+            SttOffer::Pending => SttOffer::Shown,
+            other => other,
+        }
+    }
+
+    /// The owner answered on the island. An answer to an offer that is no
+    /// longer open changes nothing.
+    pub fn answered(self, accept: bool) -> SttOffer {
+        match (self.open(), accept) {
+            (true, true) => SttOffer::Accepted,
+            (true, false) => SttOffer::Declined,
+            (false, _) => self,
+        }
+    }
+
+    /// The owner chose in Settings: that answers an open offer too.
+    pub fn chosen_in_settings(self, mode: SttMode) -> SttOffer {
+        self.answered(mode == SttMode::Device)
+    }
+}
+
 /// The owner's island. Off on a fresh install and in a settings file
 /// written before the island existed (a test feature for now).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -242,6 +319,12 @@ pub struct IslandSettings {
     pub main_synth: String,
     #[serde(default)]
     pub hotkeys: Hotkeys,
+    /// Speech-to-text for the hold keys. The owner's own, like the keys:
+    /// the synth only sees it in the messages (`stt`).
+    #[serde(default)]
+    pub stt: SttMode,
+    #[serde(default)]
+    pub stt_offer: SttOffer,
 }
 
 impl IslandSettings {
@@ -322,6 +405,10 @@ pub struct OwnerMessage {
     pub text: String,
     pub audio: Option<Audio>,
     pub images: Vec<Image>,
+    /// voice and screen_voice: the text recognized on this computer, sent
+    /// instead of the audio (`stt` "device"). Only to a synth with
+    /// `FEATURE_DEVICE_STT`; never together with `audio`.
+    pub voice_transcript: Option<String>,
 }
 
 /// A fresh client_id: a random UUID (version 4).
@@ -379,10 +466,21 @@ impl OwnerMessage {
         if text.chars().count() > MAX_TEXT_CHARS {
             return Err(SendError::new("too_large", format!("text longer than {MAX_TEXT_CHARS} characters")));
         }
+        let transcript = self.voice_transcript.as_deref().map(str::trim);
+        if transcript.is_some_and(|t| t.chars().count() > MAX_TRANSCRIPT_CHARS) {
+            return Err(SendError::new("too_large", format!("a transcript longer than {MAX_TRANSCRIPT_CHARS} characters")));
+        }
+        let transcript = transcript.filter(|t| !t.is_empty());
         match self.mode {
             Mode::Text if text.is_empty() => return Err(SendError::new("empty", "no text")),
             Mode::Text if self.audio.is_some() => return Err(SendError::new("failed", "a text message carries no voice")),
-            Mode::Voice | Mode::ScreenVoice if self.audio.is_none() => {
+            Mode::Text if self.voice_transcript.is_some() => {
+                return Err(SendError::new("failed", "a text message carries no voice transcript"));
+            }
+            Mode::Voice | Mode::ScreenVoice if self.audio.is_some() && self.voice_transcript.is_some() => {
+                return Err(SendError::new("failed", "a voice message carries the audio or its transcript, not both"));
+            }
+            Mode::Voice | Mode::ScreenVoice if self.audio.is_none() && transcript.is_none() => {
                 return Err(SendError::new("empty", "no voice"));
             }
             _ => {}
@@ -429,6 +527,10 @@ impl OwnerMessage {
                 "b64": base64::engine::general_purpose::STANDARD.encode(&audio.data),
                 "ms": audio.ms,
             });
+        }
+        if let Some(t) = transcript {
+            params["voice_transcript"] = json!(t);
+            params["stt"] = json!(STT_DEVICE);
         }
         if !images.is_empty() {
             params["images"] = Value::Array(images);
@@ -488,6 +590,11 @@ pub fn supports(slot: &LinkSlot) -> bool {
         .is_some_and(|ack| ack.has(FEATURE) && ack.has(crate::requests::FEATURE))
 }
 
+/// Does this link's synth take a voice message as text recognized here?
+pub fn supports_device_stt(slot: &LinkSlot) -> bool {
+    supports(slot) && slot.synth.read().unwrap().as_ref().is_some_and(|ack| ack.has(FEATURE_DEVICE_STT))
+}
+
 /// Send one message to this synth. The answer comes before the synth's
 /// turn (the synth's iron rule), so this waits only for "accepted".
 ///
@@ -507,6 +614,11 @@ pub async fn send(shared: &Arc<Shared>, synth_id: &str, msg: &OwnerMessage) -> R
         }
         if !supports(&slot) {
             return Err(SendError::new("outdated", "the synth does not announce the island"));
+        }
+        // The link came back with an older synth: the transcript means
+        // nothing to it. The caller sends the audio instead.
+        if msg.voice_transcript.is_some() && !supports_device_stt(&slot) {
+            return Err(SendError::new(NO_DEVICE_STT, "the synth does not take a transcript"));
         }
         match slot.requests.call_within("owner.message", params.clone(), SEND_TIMEOUT).await {
             Ok(answer) => return accepted_of(&answer),
@@ -699,6 +811,8 @@ pub struct IslandView {
     pub faces: BTreeMap<String, Value>,
     /// synth_id -> it takes island requests (announced the feature).
     pub supported: BTreeMap<String, bool>,
+    /// synth_id -> it takes a voice message as text recognized here.
+    pub device_stt: BTreeMap<String, bool>,
 }
 
 #[cfg(test)]
