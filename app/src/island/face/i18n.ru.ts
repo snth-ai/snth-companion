@@ -77,6 +77,7 @@ export const faceRu: FaceStrings = {
     line: "Полоски",
     star: "Звезды",
     heart: "Сердца",
+    pill: "Фасолинки",
   },
   pupils: { round: "Круглый", slit: "Щелка", star: "Звезда", heart: "Сердце", ring: "Кольцо" },
   lashes: { none: "Нет", light: "Немного", full: "Пышные" },

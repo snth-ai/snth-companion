@@ -27,7 +27,7 @@ export function randomFace(rand: Rand = Math.random): FaceConfig {
   const hue = rand() * 360;
   const flat = rand() < 0.15;
   const shape = flat
-    ? weighted(rand, [["oval", 3], ["round", 2], ["line", 2]] as [FaceConfig["eyes"]["shape"], number][])
+    ? weighted(rand, [["oval", 3], ["round", 2], ["line", 2], ["pill", 2]] as [FaceConfig["eyes"]["shape"], number][])
     : weighted(rand, [
         ["round", 4],
         ["oval", 3],

@@ -16,6 +16,7 @@
 //   gaze    x,y fixed gaze for every face, e.g. 0.4,0.6 (screenshots)
 //   emote   play this idle emote (with still=1: its middle frame)
 //   level   microphone level for listening (default 0.6)
+//   blink   with still=1: a blink closure 0..1, e.g. 0.6 (screenshots)
 //   reduced 1 = reduced motion
 //   perf=1  counts animation frames into the page title (energy checks)
 //   calm    1 = no glances or habits, 2 = no blinks either (energy checks)
@@ -46,6 +47,7 @@ const paramEmote = IDLE_EMOTES.find((e) => e === params.get("emote")) ?? null;
 const paramState = (FACE_STATES.find((s) => s === params.get("state")) as FaceState | undefined) ?? "idle";
 const paramPreset = params.get("preset") ?? "mia";
 const paramLevel = params.get("level") === null ? 0.6 : Number(params.get("level"));
+const paramBlink = Math.min(1, Math.max(0, Number(params.get("blink")) || 0));
 
 /** ?calm=1 (no glances, no habits) and ?calm=2 (no blinks either): energy checks. */
 function calm(face: FaceConfig): FaceConfig {
@@ -90,6 +92,7 @@ function Cell(props: CellProps) {
           still={props.still}
           reduced={props.reduced}
           emote={props.emote}
+          blink={paramBlink}
           barWidth={1}
         />
       ) : (
@@ -103,6 +106,7 @@ function Cell(props: CellProps) {
             reducedMotion={props.reduced}
             level={props.level}
             emote={props.emote}
+            blink={paramBlink}
             autoSleep={false}
           />
         </div>
