@@ -128,9 +128,11 @@ test("sphere: a turned point moves toward the turn and foreshortens near the lim
   assert.ok(p.x > -30 && p.sx > q.sx);
 });
 
-test("classic stays the default: no style means the shipped sliding eyes", () => {
-  assert.equal(styleOf({ face: presetFace("buddy") }), "classic");
+test("pill eyes default to smooth (C2); every other shape stays classic", () => {
+  assert.equal(styleOf({ face: presetFace("buddy") }), "smooth");
+  assert.equal(styleOf({ face: presetFace("buddy"), motionStyle: "classic" }), "classic", "the one-line rollback");
   assert.equal(styleOf({ face: presetFace("buddy"), motionStyle: "head" }), "head");
+  assert.equal(styleOf({ face: presetFace("mia") }), "classic");
   assert.equal(styleOf({ face: presetFace("mia"), motionStyle: "head" }), "classic", "the rig is for pill eyes only");
 });
 
@@ -244,7 +246,112 @@ test("smooth: live tuning applies, breath 0 lets the loop rest, makeRig picks th
   rig.step(0.01, 0.01, idle({ x: 0, y: 0 }));
   assert.equal(rig.frame(0.01).yaw, 24);
   assert.equal(rig.busy(0.01), false, "settled and no breath: nothing to draw");
+  assert.equal(rig.ambientFps(false), 0);
   rig.setTuning({ breath: 1 });
-  assert.equal(rig.busy(0.02), true, "breathing is drawn every frame");
+  assert.equal(rig.busy(0.02), false, "settled breathing is not busy");
+  assert.equal(rig.ambientFps(false), SMOOTH.breathFps, "it runs at the capped rate");
+  assert.equal(rig.ambientFps(true), 0, "no breathing with reduced motion");
   assert.equal(makeRig("classic", 0, { x: 0, y: 0 }), null);
+});
+
+// ---------- smooth in the island ----------
+
+test("island: 30 Hz pointer samples give a glide without ripple", () => {
+  const rig = new SmoothRig(0, { x: -0.5, y: 0 }, () => 0.9);
+  let t = 0;
+  let want = { x: -0.5, y: 0 };
+  const xs = [];
+  for (let i = 0; i < 240; i++) {
+    t += 1 / 120;
+    // A new sample every 33 ms, the shell's moving poll.
+    if (i % 4 === 0) want = { x: -0.5 + 0.4 * t, y: 0 };
+    xs.push(rig.step(t, 1 / 120, idle(want)).eye.x);
+  }
+  const v = xs.slice(1).map((x, i) => (x - xs[i]) * 120);
+  const steady = v.slice(80);
+  const mean = steady.reduce((a, b) => a + b, 0) / steady.length;
+  const ripple = Math.max(...steady.map((x) => Math.abs(x - mean)));
+  assert.ok(ripple < mean * 0.2, `velocity ripple ${ripple.toFixed(3)} vs speed ${mean.toFixed(3)}`);
+});
+
+test("island: the first sample after a pause is not a flick", () => {
+  const rig = new SmoothRig(0, { x: 0, y: 0 }, () => 0.9);
+  rig.noteCursor({ x: -0.8, y: 0.3 }, 0);
+  // The pointer rested (no samples), then one sample far away.
+  rig.noteCursor({ x: 0.8, y: 0.3 }, 1.5);
+  assert.equal(rig.surpriseLevel(1.7), 0);
+  // A real flick at 30 Hz does startle.
+  let t = 3;
+  for (let i = 0; i < 5; i++) {
+    rig.noteCursor({ x: -0.8 + i * 0.35, y: 0.3 }, t);
+    t += 1 / 30;
+  }
+  assert.ok(rig.surpriseLevel(t + 0.2) > 0.5);
+});
+
+test("island: the synth's own pointer is followed, never startles or squints", () => {
+  const rig = new SmoothRig(0, { x: 0, y: 0 }, () => 0.9);
+  const agent = { agent: true };
+  let t = 0;
+  for (let i = 0; i < 6; i++) {
+    rig.noteCursor({ x: -0.9 + i * 0.35, y: 0.1 }, t, true);
+    t += 1 / 30;
+  }
+  assert.equal(rig.surpriseLevel(t + 0.2), 0, "no startle");
+  const near = { x: 0.03, y: 0.05 };
+  for (let i = 0; i < 240; i++) {
+    t += 1 / 120;
+    rig.step(t, 1 / 120, { want: near, cursor: near, state: "idle", reduced: false, attention: { ...agent, near: true } });
+  }
+  assert.notEqual(rig.frame(t).mode, "near", "no squint");
+  assert.equal(rig.frame(t).saccading, false);
+});
+
+test("island: the island's own shape decides near, not the distance", () => {
+  const rig = new SmoothRig(0, { x: 0, y: 0 }, () => 0.9);
+  const close = { x: 0.05, y: 0.02 };
+  let t = 0;
+  // Close by distance but not on the shape (e.g. the menu bar beside the ear).
+  for (let i = 0; i < 120; i++) {
+    t += 1 / 120;
+    rig.step(t, 1 / 120, { want: close, cursor: close, state: "idle", reduced: false, attention: { near: false } });
+  }
+  assert.equal(rig.frame(t).mode, "track");
+  // Far by distance but on the open island's shape: squints after the dwell.
+  const onShape = { x: 0.4, y: 0.1 };
+  for (let i = 0; i < 120; i++) {
+    t += 1 / 120;
+    rig.step(t, 1 / 120, { want: onShape, cursor: onShape, state: "idle", reduced: false, attention: { near: true } });
+  }
+  assert.equal(rig.frame(t).mode, "near");
+});
+
+test("island: no boredom while the owner is busy with the island", () => {
+  const rig = new SmoothRig(0, { x: 0.6, y: 0.2 }, Math.random);
+  rig.noteCursor({ x: 0.6, y: 0.2 }, 0);
+  let t = 0;
+  for (let i = 0; i < 120 * 10; i++) {
+    t += 1 / 120;
+    rig.step(t, 1 / 120, { want: { x: 0.6, y: 0.2 }, cursor: { x: 0.6, y: 0.2 }, state: "idle", reduced: false, attention: { engaged: true } });
+    assert.notEqual(rig.frame(t).mode, "bored", `bored at ${t.toFixed(2)}`);
+  }
+  // Released: boredom comes back.
+  for (let i = 0; i < 120 * 2; i++) {
+    t += 1 / 120;
+    rig.step(t, 1 / 120, { want: { x: 0.6, y: 0.2 }, cursor: { x: 0.6, y: 0.2 }, state: "idle", reduced: false, attention: { engaged: false } });
+  }
+  assert.equal(rig.frame(t).mode, "bored");
+});
+
+test("island: reduced motion goes straight to the target, no breath, no boredom", () => {
+  const rig = new SmoothRig(0, { x: 0, y: 0 }, () => 0.9);
+  let t = 0;
+  for (let i = 0; i < 120 * 6; i++) {
+    t += 1 / 120;
+    const out = rig.step(t, 1 / 120, { want: { x: 0.7, y: 0.1 }, cursor: { x: 0.7, y: 0.1 }, state: "idle", reduced: true });
+    assert.deepEqual(out.eye, { x: 0.7, y: 0.1 });
+  }
+  assert.equal(rig.frame(t).breathe, 0);
+  assert.equal(rig.frame(t).mode, "track");
+  assert.equal(rig.ambientFps(true), 0);
 });

@@ -14,7 +14,7 @@
 // cross-fade, nothing blinks or wanders; only the microphone meter moves.
 
 // The .ts extension keeps this file runnable as is under `node --test`.
-import { makeRig, type MotionStyle, type Rig, type RigFrame, type SmoothTuning } from "./rig.ts";
+import { DEFAULT_PILL_MOTION, makeRig, type FaceAttention, type MotionStyle, type Rig, type RigFrame, type SmoothTuning } from "./rig.ts";
 import type { FaceConfig, FaceState, IdleEmote } from "./schema";
 
 // ---------- the clock ----------
@@ -793,15 +793,20 @@ export interface SimInput {
   reduced: boolean;
   autoSleep: boolean;
   compact: boolean;
-  /** Pill eyes only: how the gaze moves (rig.ts). Default classic. */
+  /** Pill eyes only: how the gaze moves (rig.ts). Default DEFAULT_PILL_MOTION. */
   motionStyle?: MotionStyle;
   /** Live tuning of the smooth style (the lab's sliders). */
   rigTuning?: Partial<SmoothTuning>;
+  /** What the host knows about the pointer (rig.ts FaceAttention). */
+  attention?: FaceAttention;
+  /** Nothing to draw (the island is tucked away, the page is hidden): the
+   * loop stops completely until this goes false. */
+  paused?: boolean;
 }
 
 /** The motion style in effect: the rig works on pill eyes only. */
 export function styleOf(input: Pick<SimInput, "face" | "motionStyle">): MotionStyle {
-  return input.face.eyes.shape === "pill" ? (input.motionStyle ?? "classic") : "classic";
+  return input.face.eyes.shape === "pill" ? (input.motionStyle ?? DEFAULT_PILL_MOTION) : "classic";
 }
 
 interface Spring {
@@ -956,7 +961,7 @@ export class FaceSim {
       return;
     }
     this.rig = makeRig(style, now, { x: this.pose.gx, y: this.pose.gy }, this.input.rigTuning);
-    this.rig?.noteCursor(this.input.gaze, now);
+    this.rig?.noteCursor(this.input.gaze, now, Boolean(this.input.attention?.agent));
   }
 
   /** The first frame, before any animation. */
@@ -971,6 +976,7 @@ export class FaceSim {
     const now = faceClock();
     if (next.face.motion.blink !== prev.face.motion.blink) this.blinkAt = now + this.blinkGap();
     this.syncRig(now);
+    if (next.paused && !prev.paused) this.halt();
     const g = next.gaze;
     const p = this.prevGaze;
     if (g && (!p || Math.abs(g.x - p.x) > 0.004 || Math.abs(g.y - p.y) > 0.004)) {
@@ -983,7 +989,7 @@ export class FaceSim {
         this.nextWander = now + rand(6, 12);
       }
       this.prevGaze = g;
-      this.rig?.noteCursor(g, now);
+      this.rig?.noteCursor(g, now, Boolean(next.attention?.agent));
       if (wasAsleep) this.startBlinks(now + 0.25, 2);
     }
     this.wake();
@@ -1009,8 +1015,17 @@ export class FaceSim {
     this.timer = null;
   }
 
+  /** Paused: no frame, no timer. The clock restarts on the next wake. */
+  private halt(): void {
+    if (this.raf) cancelAnimationFrame(this.raf);
+    if (this.timer) clearTimeout(this.timer);
+    this.raf = 0;
+    this.timer = null;
+    this.resting = true;
+  }
+
   private wake(): void {
-    if (!this.running || this.raf) return;
+    if (!this.running || this.raf || this.input.paused) return;
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
@@ -1153,7 +1168,7 @@ export class FaceSim {
 
   private tick = (ms: number): void => {
     this.raf = 0;
-    if (!this.running) return;
+    if (!this.running || this.input.paused) return;
     const now = faceClock(ms);
     const dt = clamp(now - this.last, 0, 0.1);
     this.last = now;
@@ -1216,7 +1231,7 @@ export class FaceSim {
     const noBlinks = reduced || this.state === "sleeping" || this.state === "offline";
     let rigEye: Vec | null = null;
     if (this.rig) {
-      const out = this.rig.step(now, dt, { want: { x: target.gx, y: target.gy }, cursor: this.input.gaze, state: this.state, reduced });
+      const out = this.rig.step(now, dt, { want: { x: target.gx, y: target.gy }, cursor: this.input.gaze, state: this.state, reduced, attention: this.input.attention });
       rigEye = out.eye;
       if (out.blink && !noBlinks && this.blinkStart < 0) this.startBlinks(now, 1);
       if (!reduced) applyRig(target, this.rig.frame(now));

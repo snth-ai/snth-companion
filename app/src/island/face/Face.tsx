@@ -14,7 +14,7 @@ import { useEffect, useId, useMemo, useRef, useState, type CSSProperties, type R
 import { darken, drain, lighten, luminance, mix, visibleOnBlack } from "./color";
 import { PILL_EYE, eyeGeom, f, heart, pillPath, softStar, sparkle } from "./geometry";
 import { EMOTE_LENGTH, FaceSim, HERO_TIME, LID_REST, nodCurve, stillFrame, styleOf, type Frame, type Vec } from "./motion";
-import { GLOSS, HEAD, HEAD_STYLES, placePill, type MotionStyle, type PillPlacement, type SmoothTuning } from "./rig";
+import { GLOSS, HEAD, HEAD_STYLES, placePill, type FaceAttention, type MotionStyle, type PillPlacement, type SmoothTuning } from "./rig";
 import { clampFace, type FaceConfig, type FaceState, type IdleEmote } from "./schema";
 
 /** Below this height (px) brows, mouth and accessories are hidden. */
@@ -78,10 +78,16 @@ export interface FaceProps {
   /** With `still`: a blink closure 0..1 to draw (review screenshots). */
   blink?: number;
   /** Pill eyes: how the gaze moves and how the beans are drawn (rig.ts).
-   * Default "classic", the shipped sliding eyes. */
+   * Default DEFAULT_PILL_MOTION (smooth); other eye shapes are always classic. */
   motionStyle?: MotionStyle;
   /** Live tuning of the smooth style (lab sliders); ignored by the others. */
   rigTuning?: Partial<SmoothTuning>;
+  /** What the host knows about the pointer and the person (the island:
+   * pointer on its shape, the owner busy with it, the synth's own pointer). */
+  attention?: FaceAttention;
+  /** Nothing is shown (the island is tucked away): stop animating. The face
+   * also stops by itself while the page is hidden. */
+  paused?: boolean;
   label?: string;
   className?: string;
   style?: CSSProperties;
@@ -100,6 +106,17 @@ function usePrefersReducedMotion(): boolean {
   return value;
 }
 
+function usePageHidden(): boolean {
+  const [hidden, setHidden] = useState(() => typeof document !== "undefined" && document.visibilityState === "hidden");
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const on = () => setHidden(document.visibilityState === "hidden");
+    document.addEventListener("visibilitychange", on);
+    return () => document.removeEventListener("visibilitychange", on);
+  }, []);
+  return hidden;
+}
+
 export function Face(props: FaceProps) {
   const { state = "idle", level = 0, size = 36, still = false, autoSleep = true } = props;
   const face = useMemo(() => clampFace(props.config ?? undefined), [props.config]);
@@ -111,11 +128,17 @@ export function Face(props: FaceProps) {
   const gaze = useMemo(() => (gx === null || gy === null ? null : { x: gx, y: gy }), [gx, gy]);
   const uid = useId().replace(/[^a-zA-Z0-9_-]/g, "");
 
-  const motionStyle = props.motionStyle ?? "classic";
+  const motionStyle = props.motionStyle;
   const rigTuning = props.rigTuning;
+  const pageHidden = usePageHidden();
+  const paused = Boolean(props.paused) || pageHidden;
+  const near = props.attention?.near;
+  const engaged = props.attention?.engaged;
+  const agent = props.attention?.agent;
+  const attention = useMemo(() => ({ near, engaged, agent }), [near, engaged, agent]);
   const input = useMemo(
-    () => ({ face, state, gaze, level, reduced, autoSleep, compact, motionStyle, rigTuning }),
-    [face, state, gaze, level, reduced, autoSleep, compact, motionStyle, rigTuning],
+    () => ({ face, state, gaze, level, reduced, autoSleep, compact, motionStyle, rigTuning, attention, paused }),
+    [face, state, gaze, level, reduced, autoSleep, compact, motionStyle, rigTuning, attention, paused],
   );
   const inputRef = useRef(input);
   inputRef.current = input;
@@ -356,8 +379,22 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
     };
   });
 
-  const place: PillPlacement | null = rigOn
+  const placed: PillPlacement | null = rigOn
     ? placePill(style, { x: gx, y: gy }, fr.rig ? fr.rig.head : { x: gx, y: gy }, { d, hx, hy, mouthX: 0, mouthY: hy * 0.86 }, fr.rig)
+    : null;
+  // The closed island crops close around the eyes and sits against the top
+  // of the screen: half the vertical travel there (continuous with the
+  // detail level, so opening and closing never jumps).
+  const vk = lerp(0.5, 1, det);
+  const place: PillPlacement | null = placed
+    ? {
+        ...placed,
+        eyes: [
+          { ...placed.eyes[0], y: placed.eyes[0].y * vk },
+          { ...placed.eyes[1], y: placed.eyes[1].y * vk },
+        ],
+        mouth: { ...placed.mouth, y: hy * 0.86 + (placed.mouth.y - hy * 0.86) * vk },
+      }
     : null;
 
   const rot = (s: number) => -s * face.eyes.tilt * 16;

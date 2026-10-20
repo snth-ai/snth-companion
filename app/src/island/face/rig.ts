@@ -45,6 +45,11 @@ export interface Vec {
 export type MotionStyle = "classic" | "cozmo" | "gloss" | "head" | "smooth";
 export const MOTION_STYLES: readonly MotionStyle[] = ["classic", "cozmo", "gloss", "head", "smooth"];
 
+/** The motion pill eyes get when the caller does not choose one. The owner
+ * picked smooth (C2) in the face lab; set this back to "classic" to roll
+ * the island back to the sliding eyes. */
+export const DEFAULT_PILL_MOTION: MotionStyle = "smooth";
+
 /** Styles with the head layer (sphere turn, breath, attention). */
 export const HEAD_STYLES: ReadonlySet<MotionStyle> = new Set(["head", "smooth"]);
 
@@ -213,7 +218,7 @@ export interface RigFrame {
  * SmoothRig for smooth). */
 export interface Rig {
   readonly style: MotionStyle;
-  noteCursor(g: Vec | null, now: number): void;
+  noteCursor(g: Vec | null, now: number, agent?: boolean): void;
   step(now: number, dt: number, inp: RigInput): RigOut;
   busy(now: number): boolean;
   wakeTimes(): number[];
@@ -234,6 +239,23 @@ export interface RigInput {
   cursor: Vec | null;
   state: FaceState;
   reduced: boolean;
+  /** What the host knows about the pointer (the island; see FaceAttention). */
+  attention?: FaceAttention;
+}
+
+/** What the host knows about the pointer and the person, beyond the gaze
+ * vector. The island fills it in; elsewhere (editor, demo, lab) it is left
+ * out and the rig judges "near" by distance. */
+export interface FaceAttention {
+  /** The pointer is on the host's own shape (or right below it). When set,
+   * it replaces the distance test for the happy squint. */
+  near?: boolean;
+  /** The person is busy with the host (hover, typing, a hold, a request, an
+   * answer showing): no boredom, no glancing away. */
+  engaged?: boolean;
+  /** The gaze follows the synth's own pointer (it drives the computer):
+   * just follow, no startle, no squint, no boredom. */
+  agent?: boolean;
 }
 
 export interface RigOut {
@@ -728,6 +750,13 @@ export const SMOOTH = {
   rebound: 0.35,
   /** Blinks a little slower than the shared timing, softer. */
   blinkScale: 1.2,
+  /** The pointer arrives in samples (the island shell sends about 30 a
+   * second while it moves); pursuit follows a copy smoothed over about one
+   * sample, so the glide has no 30 Hz ripple. */
+  targetTau: 0.035,
+  /** Settled (only breathing): this many frames a second. The breath moves
+   * under 0.6 px per second at 84 px, so a frame is a 0.03 px step. */
+  breathFps: 20,
 };
 
 /** The numbers a smoothness value stands for. */
@@ -767,6 +796,8 @@ export class SmoothRig implements Rig {
   private eye: Vec;
   private eyeV: Vec = { x: 0, y: 0 };
   private want: Vec;
+  /** The target pursuit follows: `want` smoothed over about one sample. */
+  private aim: Vec;
   private sac: Glide | null = null;
   private sacEnd = -Infinity;
   private lastBlinkAsk = -Infinity;
@@ -792,6 +823,7 @@ export class SmoothRig implements Rig {
     this.rand = rand;
     this.eye = { ...start };
     this.want = { ...start };
+    this.aim = { ...start };
     this.head = { x: start.x * SMOOTH.headFollow, y: start.y * SMOOTH.headFollow };
     this.lastMeaningful = now;
   }
@@ -813,18 +845,31 @@ export class SmoothRig implements Rig {
     return SMOOTH.blinkScale;
   }
 
-  noteCursor(g: Vec | null, now: number): void {
+  noteCursor(g: Vec | null, now: number, agent = false): void {
     if (!g) {
       this.cursorPrev = null;
       return;
     }
     const prev = this.cursorPrev;
     const dt = now - this.cursorPrevAt;
+    // Speed only between samples of one movement: the shell sends nothing
+    // while the pointer rests, so the first sample after a pause (dt over
+    // 0.15 s) starts a new movement instead of counting the gap as a jump.
     if (prev && dt > 0.004 && dt < 0.15) {
       const v = Math.hypot(g.x - prev.x, g.y - prev.y) / dt;
       this.speed += (v - this.speed) * (1 - Math.exp(-dt / SMOOTH.flickTau));
     } else {
       this.speed = 0;
+    }
+    if (agent) {
+      // The synth's own pointer: follow it, nothing to react to.
+      this.speed = 0;
+      this.cursorPrev = { ...g };
+      this.cursorPrevAt = now;
+      this.lastMeaningful = now;
+      this.meaningfulFrom = { ...g };
+      this.bored = null;
+      return;
     }
     this.cursorPrev = { ...g };
     this.cursorPrevAt = now;
@@ -847,7 +892,8 @@ export class SmoothRig implements Rig {
   }
 
   private attend(now: number, inp: RigInput): Vec {
-    if (inp.reduced || inp.state !== "idle") {
+    const att = inp.attention;
+    if (inp.reduced || inp.state !== "idle" || att?.agent) {
       this.mode = inp.state === "idle" ? "track" : "state";
       this.bored = null;
       this.nearSince = null;
@@ -856,14 +902,18 @@ export class SmoothRig implements Rig {
     }
     // Near, with a dwell before it counts and a wider radius to leave, so a
     // pointer passing by does not trigger it and the edge does not flicker.
+    // A host that knows its own shape (the island) says so instead.
     const c = inp.cursor;
     const dist = c ? len(c) : Infinity;
+    const hostNear = att?.near;
+    const isIn = hostNear !== undefined ? hostNear && c !== null : dist < SMOOTH.nearIn;
+    const isOut = hostNear !== undefined ? !hostNear || c === null : dist > SMOOTH.nearOut;
     if (this.nearOn) {
-      if (dist > SMOOTH.nearOut) {
+      if (isOut) {
         this.nearOn = false;
         this.nearSince = null;
       }
-    } else if (dist < SMOOTH.nearIn) {
+    } else if (isIn) {
       if (this.nearSince === null) this.nearSince = now;
       else if (now - this.nearSince >= SMOOTH.nearDwell) this.nearOn = true;
     } else {
@@ -875,7 +925,7 @@ export class SmoothRig implements Rig {
       return { x: inp.want.x, y: clamp(inp.want.y + SMOOTH.nearLookDown, -1, 1) };
     }
     const rest = now - this.lastMeaningful;
-    if (!this.t.bored || rest < this.t.boredAfter) {
+    if (!this.t.bored || rest < this.t.boredAfter || att?.engaged) {
       this.mode = "track";
       this.bored = null;
       return inp.want;
@@ -905,6 +955,7 @@ export class SmoothRig implements Rig {
     this.want = want;
     if (inp.reduced) {
       this.eye = { ...want };
+      this.aim = { ...want };
       this.eyeV = { x: 0, y: 0 };
       this.sac = null;
       this.head = { x: want.x * SMOOTH.headFollow, y: want.y * SMOOTH.headFollow };
@@ -917,9 +968,13 @@ export class SmoothRig implements Rig {
     const steps = Math.max(1, Math.ceil(dt / (1 / 240)));
     const h = dt / steps;
 
+    // The aim: the target smoothed over about one pointer sample.
+    const ak = 1 - Math.exp(-dt / SMOOTH.targetTau);
+    this.aim = { x: this.aim.x + (want.x - this.aim.x) * ak, y: this.aim.y + (want.y - this.aim.y) * ak };
+    const following = inp.state === "driving" || Boolean(inp.attention?.agent);
     if (!this.sac) {
       const dist = Math.hypot(want.x - this.eye.x, want.y - this.eye.y);
-      if (inp.state !== "driving" && dist > this.d.saccadeAt && now - this.sacEnd > SMOOTH.refract) blink = this.startSaccade(now, want);
+      if (!following && dist > this.d.saccadeAt && now - this.sacEnd > SMOOTH.refract) blink = this.startSaccade(now, want);
     }
     if (this.sac) {
       const j = this.sac;
@@ -936,15 +991,19 @@ export class SmoothRig implements Rig {
           this.eye = { ...j.to };
           this.sac = null;
           this.sacEnd = now;
+          // Pursuit picks up from where the jump landed.
+          this.aim = { ...j.to };
         }
       }
       this.eyeV = this.sac && dt > 0 ? { x: (this.eye.x - prev.x) / dt, y: (this.eye.y - prev.y) / dt } : { x: 0, y: 0 };
     } else {
-      // Smooth pursuit: a critically damped glide after the target.
-      const w = inp.state === "driving" ? 30 : this.d.pursuitW;
+      // Smooth pursuit: a critically damped glide after the aim; faster
+      // after the synth's own pointer.
+      const w = following ? 30 : this.d.pursuitW;
+      const aim = this.aim;
       for (let i = 0; i < steps; i++) {
-        this.eyeV.x += (w * w * (want.x - this.eye.x) - 2 * w * this.eyeV.x) * h;
-        this.eyeV.y += (w * w * (want.y - this.eye.y) - 2 * w * this.eyeV.y) * h;
+        this.eyeV.x += (w * w * (aim.x - this.eye.x) - 2 * w * this.eyeV.x) * h;
+        this.eyeV.y += (w * w * (aim.y - this.eye.y) - 2 * w * this.eyeV.y) * h;
         this.eye.x += this.eyeV.x * h;
         this.eye.y += this.eyeV.y * h;
       }
@@ -993,9 +1052,9 @@ export class SmoothRig implements Rig {
   }
 
   busy(now: number): boolean {
-    // Breathing is drawn every frame (no stepping); breath 0 lets it rest.
-    if (this.t.breath > 0) return true;
+    // Breathing alone is not "busy": it runs at breathFps (ambientFps).
     if (this.sac) return true;
+    if (Math.abs(this.aim.x - this.eye.x) > 0.002 || Math.abs(this.aim.y - this.eye.y) > 0.002) return true;
     if (Math.abs(this.want.x - this.eye.x) > 0.002 || Math.abs(this.want.y - this.eye.y) > 0.002) return true;
     if (Math.abs(this.eyeV.x) > 0.01 || Math.abs(this.eyeV.y) > 0.01) return true;
     const f = SMOOTH.headFollow;
@@ -1014,8 +1073,8 @@ export class SmoothRig implements Rig {
     return out;
   }
 
-  ambientFps(): number {
-    return 0;
+  ambientFps(reduced: boolean): number {
+    return this.t.breath > 0 && !reduced ? SMOOTH.breathFps : 0;
   }
 
   frame(now: number): RigFrame {

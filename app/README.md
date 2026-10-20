@@ -87,7 +87,15 @@ perspective + saccades, B = + gloss, C = + head layer and attention, C2 =
 C made fluid, with live sliders; default view 0, C, C2, `?only=all` for
 every column; the style is the `motionStyle` prop of `Face`, C2's live
 values the `rigTuning` prop, logic in `src/island/face/rig.ts`, default
-`classic`). `node scripts/build-face-lab.mjs`
+`classic`). Pill eyes (Buddy) use C2 (`smooth`) everywhere by default since
+0.1.17 (`DEFAULT_PILL_MOTION` in `rig.ts`; set it to `"classic"` to roll
+back); every other eye shape stays classic. The island tells the face where
+the pointer is (on or just below its shape, via `attention.near`), when the
+owner is busy with it (no boredom) and when the gaze is the synth's own
+pointer (no startle or squint), and pauses it while tucked away; the face
+also pauses while the page is hidden. Settled C2 draws about 20 frames a
+second (breathing). The lab is a dev page only, not in `vite build`.
+`node scripts/build-face-lab.mjs`
 writes a self-contained single-file copy to `/tmp/face-lab/index.html`.
 
 URL parameters stage a screen or a state directly:
