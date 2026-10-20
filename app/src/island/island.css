@@ -23,19 +23,25 @@ html.island #root {
   position: relative;
   width: 100%;
   height: 100%;
+  /* Full screen: out and back with the menu bar, which slides about as
+     long (measured 0.2-0.25 s on macOS 26). */
+  transition:
+    opacity 0.2s ease-out,
+    transform 0.2s ease-out;
+}
+.isl-root.hidden {
+  opacity: 0;
+  transform: translateY(var(--hide-y, -40px));
+  pointer-events: none;
 }
 
+/* Its size and corners move on one JS clock with the face (IslandApp,
+   useMotion): no CSS transition here, or the two would drift apart. */
 .isl-shape {
-  --spring: cubic-bezier(0.22, 1.28, 0.36, 1);
   position: absolute;
   top: 0;
   background: #000;
   overflow: visible;
-  transition:
-    width 0.42s var(--spring),
-    height 0.42s var(--spring),
-    left 0.42s var(--spring),
-    border-radius 0.3s ease;
   box-shadow: 0 0 0 0 transparent;
 }
 
@@ -92,7 +98,7 @@ html.island #root {
 }
 
 /* The face: one element for both the closed and the open island; it
-   grows from the left ear into the open island (IslandApp, useOpening). */
+   grows from the left ear into the open island (IslandApp, useMotion). */
 .isl-face {
   position: absolute;
   z-index: 1;
@@ -102,6 +108,9 @@ html.island #root {
   pointer-events: none;
 }
 
+.isl-clip {
+  overflow: hidden;
+}
 .isl-body {
   overflow: hidden;
   padding: 0 16px 14px;
@@ -337,8 +346,12 @@ html.island #root {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .isl-shape {
-    transition-duration: 0.01s;
+  /* Out of full screen's way by fading only. */
+  .isl-root {
+    transition: opacity 0.2s linear;
+  }
+  .isl-root.hidden {
+    transform: none;
   }
   .isl-head,
   .isl-summary,
@@ -396,6 +409,17 @@ html.island #root:has(.isl-stage) {
 }
 .isl-menubar-right {
   margin-left: auto;
+}
+.isl-menubar {
+  transition: transform 0.2s ease-out;
+}
+.isl-menubar.away {
+  transform: translateY(-100%);
+}
+.isl-desktop.full {
+  background:
+    radial-gradient(700px 360px at 50% 60%, #2b3a55 0%, transparent 70%),
+    linear-gradient(180deg, #0b0d12, #151a24);
 }
 .isl-hw-notch {
   position: absolute;

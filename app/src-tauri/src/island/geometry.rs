@@ -98,6 +98,42 @@ pub fn place(screen: &ScreenInfo) -> Placement {
     Placement { window, notch, pill, real_notch: real }
 }
 
+/// What the screen shows, for hiding the island in full screen the way
+/// the menu bar hides.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Cover {
+    /// A full-screen window fills the screen.
+    pub covered: bool,
+    /// The system's menu bar is on the screen (macOS), or coming in.
+    pub bar: bool,
+}
+
+/// Does this window (top-left global points) fill the screen the way a
+/// full-screen window does: the whole width, down to the bottom, from
+/// the top or from just under the notch (on a Mac with one a full-screen
+/// window starts below it unless the app asks otherwise). A window
+/// zoomed in a normal Space stops at the menu bar and the Dock, and the
+/// menu bar is on the screen then anyway.
+pub fn fills_screen(screen: &ScreenInfo, w: Rect) -> bool {
+    const SLACK: f64 = 1.0;
+    let f = screen.frame;
+    let band = screen.bar_h.max(screen.notch.map_or(0.0, |n| n.2));
+    (w.x - f.x).abs() <= SLACK
+        && (w.w - f.w).abs() <= SLACK
+        && ((w.y + w.h) - (f.y + f.h)).abs() <= SLACK
+        && w.y >= f.y - SLACK
+        && w.y <= f.y + band + SLACK
+}
+
+/// Is this the menu bar of this screen: across its top, shown or sliding
+/// in (it starts above the screen's edge and moves down). A screen above
+/// this one has its own bar far higher up.
+pub fn bar_on_screen(screen: &ScreenInfo, w: Rect) -> bool {
+    const SLIDE: f64 = 100.0;
+    let f = screen.frame;
+    w.x < f.x + f.w && w.x + w.w > f.x && w.y < f.y + screen.bar_h.max(MIN_BAR_H) && w.y + w.h > f.y - SLIDE
+}
+
 /// The pointer as the face sees it: a vector from the face's centre to
 /// the pointer, each axis in -1..1 (1 = `reach` points or further away),
 /// y growing downwards.
@@ -173,6 +209,37 @@ mod tests {
         let p = place(&screen);
         assert_eq!(p.window, Rect { x: 0.0, y: 0.0, w: 400.0, h: 250.0 });
         assert!(p.pill.w <= 400.0);
+    }
+
+    #[test]
+    fn a_full_screen_window_fills_the_screen_and_a_zoomed_one_does_not() {
+        // Measured on a 1920 x 1080 screen with a 30 pt menu bar: the
+        // full-screen window is the whole screen.
+        let plain = ScreenInfo { frame: Rect { x: 0.0, y: 0.0, w: 1920.0, h: 1080.0 }, notch: None, bar_h: 30.0 };
+        assert!(fills_screen(&plain, Rect { x: 0.0, y: 0.0, w: 1920.0, h: 1080.0 }));
+        // Zoomed in a normal Space: under the menu bar, above the Dock.
+        assert!(!fills_screen(&plain, Rect { x: 0.0, y: 30.0, w: 1920.0, h: 990.0 }));
+        assert!(!fills_screen(&plain, Rect { x: 42.0, y: 0.0, w: 1878.0, h: 1080.0 }));
+        // With a notch the full-screen window starts below it.
+        let notched = mbp14();
+        assert!(fills_screen(&notched, Rect { x: 0.0, y: 32.0, w: 1512.0, h: 950.0 }));
+        assert!(fills_screen(&notched, Rect { x: 0.0, y: 0.0, w: 1512.0, h: 982.0 }));
+        assert!(!fills_screen(&notched, Rect { x: 0.0, y: 120.0, w: 1512.0, h: 862.0 }));
+        // A screen elsewhere in the desktop.
+        let side = ScreenInfo { frame: Rect { x: -1920.0, y: -300.0, w: 1920.0, h: 1080.0 }, notch: None, bar_h: 24.0 };
+        assert!(fills_screen(&side, Rect { x: -1920.0, y: -300.0, w: 1920.0, h: 1080.0 }));
+        assert!(!fills_screen(&side, Rect { x: 0.0, y: 0.0, w: 1920.0, h: 1080.0 }));
+    }
+
+    #[test]
+    fn the_menu_bar_counts_while_it_slides_in() {
+        let plain = ScreenInfo { frame: Rect { x: 0.0, y: 0.0, w: 1920.0, h: 1080.0 }, notch: None, bar_h: 30.0 };
+        // Measured: shown at 0, sliding in from -50.
+        assert!(bar_on_screen(&plain, Rect { x: 0.0, y: 0.0, w: 1920.0, h: 30.0 }));
+        assert!(bar_on_screen(&plain, Rect { x: 0.0, y: -50.0, w: 1920.0, h: 30.0 }));
+        // The bar of a screen above, or beside.
+        assert!(!bar_on_screen(&plain, Rect { x: 0.0, y: -1080.0, w: 1920.0, h: 30.0 }));
+        assert!(!bar_on_screen(&plain, Rect { x: 1920.0, y: 0.0, w: 1440.0, h: 30.0 }));
     }
 
     #[test]
