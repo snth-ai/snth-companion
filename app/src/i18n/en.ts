@@ -1128,13 +1128,15 @@ export const en = {
     // On-device speech-to-text.
     stt: "Speech recognition",
     sttNote:
-      "Through the synth is more accurate and hears your tone of voice. On this computer is about 5 seconds faster, works offline and keeps your voice here, but the synth gets only your words.",
+      "Through the synth is more accurate and hears your tone of voice. On this computer is about 5 seconds faster, works offline and keeps your voice here, but the synth gets only your words and, if on, a short estimate of your tone.",
     sttSynth: "Through the synth",
     sttSynthDesc: "More accurate, hears your tone of voice",
     sttDevice: "On this computer",
     sttDeviceDesc: "Faster. The island shows your words as you talk",
     sttUnavailable: "Recognition on this computer needs a Mac with Apple silicon. Here your voice goes to the synth.",
     sttSynthOld: (n: string) => `${n} does not take recognized text yet. Until ${n} is updated, your voice goes as audio.`,
+    sttTone: "Detect tone of voice on this computer",
+    sttToneDesc: "Pace, pauses, loudness and pitch against your usual manner, and clear irritation or cheer. The synth gets a short description; your voice stays here.",
     sttModel: "Recognition model",
     sttMissing: (size: string) => `Not downloaded (${size}).`,
     sttMissingOn: (size: string) => `Not downloaded (${size}). Until it is, your voice goes to the synth.`,

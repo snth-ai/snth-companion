@@ -186,6 +186,16 @@ function SttSection(props: { name: string; takesText: boolean }) {
         onChange={(next) => run(() => backend.islandSttSet(next))}
       />
       {mode === "device" && !props.takesText ? <Notice kind="warn">{t.sttSynthOld(props.name)}</Notice> : null}
+      {mode === "device" ? (
+        <div className="group">
+          <SwitchRow
+            title={t.sttTone}
+            desc={t.sttToneDesc}
+            checked={isl.settings.stt_tone}
+            onChange={(next) => run(() => backend.islandSttToneSet(next))}
+          />
+        </div>
+      ) : null}
       {mode === "device" || model.state !== "missing" ? (
         <div className="group">
           <Row title={t.sttModel} desc={<span className={model.state === "failed" ? "error-text" : undefined}>{status}</span>}>

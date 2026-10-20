@@ -49,6 +49,19 @@ pub const VAD: ModelFile = ModelFile {
 /// The small one first: the progress is about the big one anyway.
 pub const FILES: [&ModelFile; 2] = [&VAD, &WHISPER];
 
+/// emotion2vec+ base (emotion2vec/emotion2vec_plus_base, FunASR Model
+/// License 1.1), our ONNX export with int8 matrix products (tone/emotion.rs).
+/// The tone of voice; fetched after the speech model, only while the tone
+/// switch is on, and never needed for the text.
+pub const EMOTION: ModelFile = ModelFile {
+    name: "emotion2vec_plus_base_int8.onnx",
+    url: "https://github.com/snth-ai/snth-companion/releases/download/model-emotion2vec-plus-base-1/emotion2vec_plus_base_int8.onnx",
+    sha256: "fe11b794562ae75cf96d7c268893688f889a15ae9166426fdede16aba139b69c",
+    size: 117_754_668,
+};
+
+pub const TONE_FILES: [&ModelFile; 1] = [&EMOTION];
+
 /// Room kept free on the disk beyond the files themselves.
 const SPARE: u64 = 300 * 1024 * 1024;
 /// A failed download is tried again this many times (resuming).
@@ -58,6 +71,10 @@ const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 
 pub fn total_size() -> u64 {
     FILES.iter().map(|f| f.size).sum()
+}
+
+pub fn tone_size() -> u64 {
+    TONE_FILES.iter().map(|f| f.size).sum()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -145,6 +162,7 @@ enum Fail {
 }
 
 impl Models {
+    /// The speech-to-text model and the voice detector.
     pub fn new(dir: PathBuf) -> Models {
         Models::with_files(dir, &FILES)
     }
@@ -237,7 +255,7 @@ impl Models {
             me.running.store(false, Ordering::Release);
             match result {
                 Ok(()) => {
-                    connect_core::logln!("island: speech-to-text model ready");
+                    connect_core::logln!("island: model ready: {}", me.files.iter().map(|f| f.name).collect::<Vec<_>>().join(", "));
                     me.set(Status::Ready);
                 }
                 Err(Fail::Cancelled) => me.set(Status::Missing),
@@ -255,7 +273,7 @@ impl Models {
     }
 
     fn failed(&self, code: &str, detail: String) {
-        connect_core::logln!("island: speech-to-text model download failed: {code}: {detail}");
+        connect_core::logln!("island: model download failed ({}): {code}: {detail}", self.files.iter().map(|f| f.name).collect::<Vec<_>>().join(", "));
         self.set(Status::Failed { code: code.into(), detail });
     }
 
@@ -423,8 +441,14 @@ mod tests {
 
     #[test]
     fn the_files_are_pinned() {
-        for f in FILES {
-            assert!(f.url.starts_with("https://huggingface.co/"), "{}", f.url);
+        for f in FILES.iter().chain(TONE_FILES.iter()) {
+            // Hugging Face at a revision, or a release asset of ours (a
+            // tag of its own, never re-uploaded).
+            assert!(
+                f.url.starts_with("https://huggingface.co/") || f.url.starts_with("https://github.com/snth-ai/snth-companion/releases/download/model-"),
+                "{}",
+                f.url
+            );
             assert!(f.url.ends_with(f.name));
             assert_eq!(f.sha256.len(), 64);
             assert!(f.sha256.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
@@ -432,6 +456,8 @@ mod tests {
             assert!(!f.url.contains("/resolve/main/"), "{}", f.url);
         }
         assert!((540..600).contains(&(total_size() / 1_000_000)), "about 550 MB");
+        assert!((100..130).contains(&(tone_size() / 1_000_000)), "about 118 MB");
+        assert_eq!(Models::with_files(PathBuf::from("/nonexistent"), &TONE_FILES).size(), tone_size());
     }
 
     #[test]

@@ -292,17 +292,20 @@ fn start(ctx: &Arc<Ctx>, recording: audio::Recording) -> Result<u64, (audio::Rec
     if route == stt::Route::Device {
         ctx.island.stt.warm();
     }
+    // The tone of voice, as for a hold of the key.
+    let toned = super::warm_tone(ctx, route);
     let speech = match route {
         stt::Route::Device => super::start_stt(ctx, &recording),
         stt::Route::Synth(why) => super::Speech::Synth(why),
     };
+    let tone = super::start_tone(ctx, toned, &recording, &speech);
     {
         let mut running = ctx.island.running.lock().unwrap();
         let mut inner = ctx.island.inner.lock().unwrap();
         if matches!(speech, super::Speech::Device(_)) {
             inner.transcript = Some(String::new());
         }
-        *running = Some(super::Hold { recording, picture: None, synth_id, stt: speech, wake: true });
+        *running = Some(super::Hold { recording, picture: None, synth_id, stt: speech, wake: true, tone });
     }
     ctx.island.wake_word.active.store(seq, Ordering::Release);
     super::emit_view(ctx);

@@ -62,6 +62,7 @@
     "allow-island-ask-design",
     "allow-island-mic",
     "allow-island-stt-set",
+    "allow-island-stt-tone-set",
     "allow-island-stt-download",
     "allow-island-stt-cancel",
     "allow-island-stt-delete",

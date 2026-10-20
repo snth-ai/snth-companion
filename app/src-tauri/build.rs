@@ -73,6 +73,7 @@ const COMMANDS: &[&str] = &[
     // on-device speech-to-text: the switch and the model (main window;
     // the island's card may retry the download)
     "island_stt_set",
+    "island_stt_tone_set",
     "island_stt_download",
     "island_stt_cancel",
     "island_stt_delete",

@@ -62,6 +62,7 @@ fn voice(ms: u64, bytes: usize) -> OwnerMessage {
         audio: Some(Audio { mime: "audio/wav".into(), data: vec![1; bytes], ms }),
         images: vec![],
         voice_transcript: None,
+        voice_tone: None,
     }
 }
 
@@ -259,7 +260,7 @@ fn a_message_is_built_within_every_limit() {
     shot.images = vec![shot.images[0].clone(), shot.images[0].clone(), shot.images[0].clone()];
     assert_eq!(shot.params().unwrap_err().code, "too_large");
 
-    let mut text = OwnerMessage { client_id: "c-2".into(), mode: Mode::Text, text: "  find me a flight  ".into(), audio: None, images: vec![], voice_transcript: None };
+    let mut text = OwnerMessage { client_id: "c-2".into(), mode: Mode::Text, text: "  find me a flight  ".into(), audio: None, images: vec![], voice_transcript: None, voice_tone: None };
     assert_eq!(text.params().unwrap()["text"], "find me a flight");
     text.text = "   ".into();
     assert_eq!(text.params().unwrap_err().code, "empty");
@@ -573,4 +574,60 @@ fn the_view_says_who_takes_island_requests() {
     assert_eq!(view.supported.get("mia"), Some(&true));
     assert_eq!(view.supported.get("old"), Some(&false));
     let _: Arc<crate::slot::LinkSlot> = core.island_main().unwrap();
+}
+
+// --- the tone estimated here ---
+
+const WITH_TONE: &[&str] = &["requests", "island", "island_device_stt", "island_device_tone"];
+
+fn toned(text: &str, tone: &str) -> OwnerMessage {
+    OwnerMessage { voice_tone: Some(tone.into()), ..spoken(text) }
+}
+
+#[test]
+fn a_voice_tone_rides_only_with_a_transcript() {
+    let p = toned("найди рейс", "  Темп выше обычного.  ").params().unwrap();
+    assert_eq!(p["voice_tone"], "Темп выше обычного.");
+    assert_eq!(p["stt"], "device");
+    // An empty tone is left out.
+    let p = toned("найди рейс", "   ").params().unwrap();
+    assert!(p.get("voice_tone").is_none());
+    // Never with the audio, never alone.
+    let with_audio = OwnerMessage { voice_tone: Some("громко".into()), ..voice(1000, 10) };
+    assert_eq!(with_audio.params().unwrap_err().code, "failed");
+    // A long one is cut to the protocol's limit, the message still goes.
+    let p = toned("да", &"я".repeat(MAX_TONE_CHARS + 50)).params().unwrap();
+    assert_eq!(p["voice_tone"].as_str().unwrap().chars().count(), MAX_TONE_CHARS);
+}
+
+#[test]
+fn the_tone_switch_is_on_by_default_and_in_an_old_file() {
+    assert!(IslandSettings::default().stt_tone);
+    let old: IslandSettings = serde_json::from_value(json!({"enabled": true, "stt": "device"})).unwrap();
+    assert!(old.stt_tone);
+    let off: IslandSettings = serde_json::from_value(json!({"stt_tone": false})).unwrap();
+    assert!(!off.stt_tone);
+}
+
+#[tokio::test]
+async fn the_tone_goes_only_to_a_synth_that_takes_it() {
+    let (core, mut q) = linked(&[("new", WITH_TONE), ("stt", WITH_STT)]);
+    let shared = core.shared();
+    assert!(supports_device_tone(&shared.slot("new").unwrap()));
+    assert!(!supports_device_tone(&shared.slot("stt").unwrap()));
+    for (i, id) in ["new", "stt"].into_iter().enumerate() {
+        let call = tokio::spawn({
+            let shared = shared.clone();
+            async move { send(&shared, id, &toned("привет", "Голос тише обычного.")).await }
+        });
+        let sent = q[i].recv().await.unwrap();
+        assert_eq!(sent["params"]["voice_transcript"], "привет");
+        if id == "new" {
+            assert_eq!(sent["params"]["voice_tone"], "Голос тише обычного.");
+        } else {
+            assert!(sent["params"].get("voice_tone").is_none(), "a synth without the feature gets no tone");
+        }
+        shared.slot(id).unwrap().requests.resolve(&json!({"type": "response", "id": sent["id"], "result": {"accepted": true, "message_id": "m-1"}}));
+        assert_eq!(call.await.unwrap().unwrap(), "m-1");
+    }
 }

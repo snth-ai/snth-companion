@@ -652,6 +652,38 @@ talks to `<platform>/api/app/v1/*` only. There is no override in the UI.
     Air: 0.3% of one core in a quiet room with the capture, about 2.2% of
     one core on non-stop speech without the name (a decode is about 40 ms
     on two threads), 110 MB peak with whisper tiny loaded.
+  - The tone of voice for a hold sent as text (`src-tauri/src/island/stt/tone/`;
+    the switch "Detect tone of voice on this computer" under speech
+    recognition, `IslandSettings.stt_tone`, on by default). Sent as
+    `owner.message` `voice_tone` (one Russian line, at most 300 characters;
+    the protocol allows 600) with the transcript, only to a synth whose
+    hello_ack has `island_device_tone` (connect-core drops it otherwise).
+    Two layers: `prosody.rs` (speech rate from the transcript's vowels over
+    the speech time, pauses from the loudness detector's spans, level and
+    its spread in dB, pitch by YIN at 8 kHz) compared with the owner's
+    usual manner (`baseline.rs`, a running mean and spread per feature,
+    `<data dir>/island-tone.json`, after 5 holds; before that only wide
+    absolute bands), and `emotion.rs`, emotion2vec+ base (FunASR Model
+    License 1.1: attribution and the model's name kept) as our ONNX export
+    with int8 matrix products, 118 MB, run by ONNX Runtime 1.22 (`ort`
+    2.0.0-rc.10, statically linked, Apple silicon only like whisper-rs; its
+    build script fetches the prebuilt library from cdn.pyke.io once, cached
+    in ~/Library/Caches/ort.pyke.io). The model file is pinned to a release
+    asset of this repository (tag `model-emotion2vec-plus-base-1`) and a
+    sha256, fetched after the whisper model while the switch is on, and
+    deleted with it; a failed fetch is retried after 6 h (or when the owner
+    asks), and until it is here the line has the prosody alone. It loads
+    when a hold starts and unloads after 5 min idle. A thread per hold
+    (`island-tone`) runs the model on 6 s windows while the key is held,
+    and on the window in progress every 2 s; at the release it answers at
+    once with what it has, then again with the rest run. The release waits
+    for the complete answer at most 300 ms (`TONE_WAIT`) after the text is
+    there, else takes the first one; the message is never held longer. On
+    Russian (Dusha) the model is right about 46% of the time on four
+    classes, but a sure "angry" or "happy" (probability 0.8 or more) is
+    right about 75 to 88% of the time; "sad" is wrong 88% of the time, so
+    only irritation and cheer are ever said. One log line per hold: `island:
+    tone: N characters, emotion <top label> <p> (complete), waited N ms`.
 - Webview permissions: `build.rs` lists every app command, which makes Tauri
   enforce `capabilities/*.json` per window. The main window gets the app's
   commands and the event listener; the approval window gets five commands.

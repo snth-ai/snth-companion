@@ -1104,6 +1104,14 @@ pub async fn island_stt_set(ctx: Cx<'_>, mode: String) -> Result<UiState, String
     Ok(build_state(&ctx).await)
 }
 
+/// The tone of voice estimated on this computer (with speech recognized
+/// here): on or off.
+#[tauri::command]
+pub async fn island_stt_tone_set(ctx: Cx<'_>, on: bool) -> Result<UiState, String> {
+    crate::island::stt_tone_set(&ctx, on);
+    Ok(build_state(&ctx).await)
+}
+
 /// Fetch the speech-to-text model (again, after a failure). Err:
 /// "no_space", "unsupported".
 #[tauri::command]
@@ -1117,6 +1125,7 @@ pub async fn island_stt_download(ctx: Cx<'_>) -> Result<UiState, String> {
 #[tauri::command]
 pub async fn island_stt_cancel(ctx: Cx<'_>) -> Result<UiState, String> {
     ctx.island.stt.models.cancel();
+    ctx.island.tone.models.cancel();
     Ok(build_state(&ctx).await)
 }
 

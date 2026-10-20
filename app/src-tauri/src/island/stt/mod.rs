@@ -35,6 +35,7 @@ pub mod filter;
 pub mod model;
 pub mod release;
 pub mod stream;
+pub mod tone;
 pub mod vad;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

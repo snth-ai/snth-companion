@@ -188,6 +188,34 @@ pub struct SttDto {
     pub size: u64,
 }
 
+/// The models' status as Settings shows it: the speech model's, with the
+/// tone's emotion model counted in while the tone switch is on (its
+/// download continues the speech model's progress; a tone model that is
+/// missing or failed leaves the speech model's status alone, since the
+/// text works without it).
+fn stt_dto(ctx: &Ctx) -> SttDto {
+    use crate::island::stt::model::{self, Status};
+    let s = ctx.core.island();
+    let stt = ctx.island.stt.models.status();
+    let stt_size = model::total_size();
+    let tone_on = s.stt_tone && ctx.island.tone.available();
+    if !tone_on {
+        return SttDto { available: crate::island::stt::available(), model: stt, size: stt_size };
+    }
+    let tone = ctx.island.tone.models.status();
+    let tone_size = model::tone_size();
+    let size = stt_size + tone_size;
+    let model = match (stt, tone) {
+        (Status::Downloading { done, .. }, Status::Ready) => Status::Downloading { done: done + tone_size, total: size },
+        (Status::Downloading { done, .. }, _) => Status::Downloading { done, total: size },
+        (Status::Ready, Status::Downloading { done, .. }) => Status::Downloading { done: stt_size + done, total: size },
+        (Status::Ready, Status::Verifying) => Status::Verifying,
+        (other, _) => other,
+    };
+    let size = if ctx.island.tone.models.ready() || matches!(model, Status::Downloading { .. }) { size } else { stt_size };
+    SttDto { available: crate::island::stt::available(), model, size }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AppInfo {
     pub version: String,
@@ -289,11 +317,7 @@ pub async fn build_state(ctx: &Ctx) -> UiState {
             keys_active: ctx.island.keys_active(),
             key_problems: ctx.island.problems(),
             mic: crate::island::audio::permission(),
-            stt: SttDto {
-                available: crate::island::stt::available(),
-                model: ctx.island.stt.models.status(),
-                size: crate::island::stt::model::total_size(),
-            },
+            stt: stt_dto(ctx),
             wake: crate::island::wake::dto(ctx),
         },
         prefs: PrefsDto {
