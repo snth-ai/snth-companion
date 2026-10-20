@@ -1186,6 +1186,7 @@ export const ru: Strings = {
       } as Record<string, string>,
       sttRetry: "Повторить",
       sttHide: "Скрыть",
+      sttLoading: "загружаю распознавание…",
       channel: {
         telegram: "Telegram",
         tguser: "Telegram",
@@ -1204,6 +1205,7 @@ export const ru: Strings = {
         mic_asking: () => "Разрешите микрофон и зажмите клавишу ещё раз.",
         no_microphone: () => "Микрофон не найден.",
         mic_failed: () => "Микрофон не включился.",
+        heard_nothing: () => "Ничего не расслышал, ничего не отправлено.",
         shot_failed: () => "Снимка нет: ушёл только голос.",
         shot_permission: () => "Снимка нет (запись экрана не разрешена): ушёл только голос.",
         too_large: () => "Слишком много за один раз.",

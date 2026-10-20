@@ -168,6 +168,12 @@ impl Models {
         *self.status.lock().unwrap() = s;
     }
 
+    /// The status as a download would leave it (tests of the hold flow).
+    #[cfg(test)]
+    pub fn pretend(&self, s: Status) {
+        self.set(s);
+    }
+
     /// Bytes still to fetch (the parts already on disk count as fetched).
     fn remaining(&self) -> u64 {
         FILES

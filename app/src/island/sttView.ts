@@ -20,6 +20,12 @@ export function aboutMb(bytes: number): number {
   return Math.round(bytes / (1024 * 1024) / 10) * 10;
 }
 
+/** The model is still loading during a hold recognized here: a quiet
+ * "loading" line instead of the words, until the first words come. */
+export function sttLoadingVisible(v: { hold: string | null; stt_loading: boolean; transcript: string | null }): boolean {
+  return Boolean(v.hold && v.stt_loading && !v.transcript?.trim());
+}
+
 /** The words show while the key is held, while the text goes, and a
  * moment after the synth accepted it. */
 export function transcriptVisible(

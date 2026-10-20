@@ -197,6 +197,10 @@ html.island #root {
 .isl-live.sent {
   color: rgba(255, 255, 255, 0.85);
 }
+/* The speech model is still loading during a hold: quieter than words. */
+.isl-live.loading {
+  color: rgba(255, 255, 255, 0.32);
+}
 
 /* The synth's offer of on-device speech-to-text, then the download. */
 .isl-stt {

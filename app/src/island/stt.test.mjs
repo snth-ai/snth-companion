@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { aboutMb, tailOf, transcriptVisible } from "./sttView.ts";
+import { aboutMb, sttLoadingVisible, tailOf, transcriptVisible } from "./sttView.ts";
 
 test("the live transcript keeps its end, from a word", () => {
   assert.equal(tailOf("  Найди мне рейс  "), "Найди мне рейс");
@@ -18,6 +18,15 @@ test("the live transcript keeps its end, from a word", () => {
 
 test("the offer says about 550 MB for the pinned files", () => {
   assert.equal(aboutMb(574_041_195 + 885_098), 550);
+});
+
+test("a quiet loading line while the model loads during a hold, until words come", () => {
+  const base = { hold: "voice", stt_loading: true, transcript: "" };
+  assert.equal(sttLoadingVisible(base), true);
+  assert.equal(sttLoadingVisible({ ...base, transcript: null }), true);
+  assert.equal(sttLoadingVisible({ ...base, transcript: "Найди" }), false, "the words win");
+  assert.equal(sttLoadingVisible({ ...base, stt_loading: false }), false);
+  assert.equal(sttLoadingVisible({ ...base, hold: null }), false, "not after the release");
 });
 
 test("the words show while held, while sent, and briefly after", () => {

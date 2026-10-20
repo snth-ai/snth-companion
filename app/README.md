@@ -595,8 +595,16 @@ talks to `<platform>/api/app/v1/*` only. There is no override in the UI.
     whose hello_ack has `island_device_stt`; a synth without it, a missing
     model, an engine error, text that is only a known whisper invention
     ("Продолжение следует...") or nothing read from audio with speech in it
-    send the audio as before (one log line). A hold where neither detector
-    hears speech sends nothing, like a tap. The synth's offer (an island
+    send the audio as before. The release waits at most 2.5 s
+    (`stt::RELEASE_WAIT`); a model still loading, a failed load, a gone
+    speech thread (started again by the next hold) or a voice detector
+    that could not run also send the audio (`stt/release.rs`, a pure
+    `decide`). Nothing is sent only when Silero went over the whole
+    recording and neither detector heard speech (the island says so); a
+    silent screenshot + voice hold sends the screenshot alone. Every
+    release logs one line: `island: speech-to-text: sent transcript N ms
+    after release`, `sent audio because <reason>`, `dropped: silence
+    (vad)` or `sent the screenshot alone`. The synth's offer (an island
     card, `SttCard`, `stt_offer` pending/shown/accepted/declined, pending
     after the update for owners with the island on) shows only on an idle
     island; accepting it starts the download and shows its progress

@@ -1188,6 +1188,7 @@ export const en = {
       } as Record<string, string>,
       sttRetry: "Try again",
       sttHide: "Hide",
+      sttLoading: "loading speech recognition…",
       channel: {
         telegram: "Telegram",
         tguser: "Telegram",
@@ -1206,6 +1207,7 @@ export const en = {
         mic_asking: () => "Allow the microphone, then hold the key again.",
         no_microphone: () => "No microphone found.",
         mic_failed: () => "The microphone did not start.",
+        heard_nothing: () => "I heard nothing, so nothing was sent.",
         shot_failed: () => "No screenshot: only your voice went.",
         shot_permission: () => "No screenshot (Screen Recording is not allowed): only your voice went.",
         too_large: () => "Too much to send at once.",
