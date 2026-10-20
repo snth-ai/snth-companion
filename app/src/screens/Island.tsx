@@ -1,15 +1,17 @@
 // The Island screen: the synth's face at the top of the screen and the
 // hold keys. Off by default (a test feature). The face is the synth's
 // own: the editor saves it to the synth (face.set), and the synth may
-// change it too, or design one itself when asked.
+// change it too, or design one itself when asked. Speech recognition:
+// through the synth (the default) or on this computer, with the model's
+// download, status and removal.
 
 import { useEffect, useRef, useState } from "react";
 import { backend } from "../backend";
-import type { FaceConfig, HotkeyKind, UiState } from "../backend/types";
+import type { FaceConfig, HotkeyKind, SttMode, UiState } from "../backend/types";
 import { FaceEditor } from "../island/faceApi";
-import { acceleratorFromEvent, shortcutKeys } from "../lib/format";
+import { acceleratorFromEvent, formatBytes, shortcutKeys } from "../lib/format";
 import { linkName, useStore } from "../lib/store";
-import { Keys, Notice, Row, Section, SwitchRow } from "../ui/controls";
+import { ChoiceList, Keys, Notice, Row, Section, SwitchRow } from "../ui/controls";
 import { IconX } from "../ui/icons";
 
 const KINDS: HotkeyKind[] = ["voice", "screen_voice", "text"];
@@ -118,6 +120,108 @@ function HotkeyRow(props: { kind: HotkeyKind; name: string }) {
         </>
       )}
     </div>
+  );
+}
+
+/** Speech recognition: through the synth or on this computer, and the
+ * model the second one needs. */
+function SttSection(props: { name: string; takesText: boolean }) {
+  const { state, s, lang, act } = useStore();
+  const t = s.island;
+  const isl = state.island;
+  const stt = isl.stt;
+  const mode = isl.settings.stt;
+  const model = stt.model;
+  const size = formatBytes(stt.size, s, lang);
+  const [problem, setProblem] = useState<string | null>(null);
+  const run = (work: () => Promise<UiState>) => {
+    setProblem(null);
+    void act(() => work().catch((e) => {
+      // The status says why (no_space); anything else is said here.
+      if (String(e) !== "no_space") setProblem(t.sttFailed.io!("", ""));
+      return null;
+    }));
+  };
+
+  if (!stt.available) {
+    return (
+      <Section title={t.stt}>
+        <Notice kind="info">{t.sttUnavailable}</Notice>
+      </Section>
+    );
+  }
+
+  let status: string;
+  switch (model.state) {
+    case "downloading": {
+      const pct = Math.min(100, Math.floor((model.done * 100) / Math.max(1, model.total)));
+      status = t.sttDownloading(pct, formatBytes(model.done, s, lang), formatBytes(model.total, s, lang));
+      break;
+    }
+    case "verifying":
+      status = t.sttVerifying;
+      break;
+    case "ready":
+      status = t.sttReady(size);
+      break;
+    case "failed": {
+      const [need, free] = model.detail.split(" ").map((n) => formatBytes(Number(n) || 0, s, lang));
+      status = (t.sttFailed[model.code] ?? t.sttFailed.io!)(need ?? "", free ?? "");
+      break;
+    }
+    default:
+      status = mode === "device" ? t.sttMissingOn(size) : t.sttMissing(size);
+  }
+
+  return (
+    <Section title={t.stt} note={t.sttNote}>
+      <ChoiceList<SttMode>
+        label={t.stt}
+        value={mode}
+        options={[
+          { value: "synth", title: t.sttSynth, desc: t.sttSynthDesc },
+          { value: "device", title: t.sttDevice, desc: t.sttDeviceDesc },
+        ]}
+        onChange={(next) => run(() => backend.islandSttSet(next))}
+      />
+      {mode === "device" && !props.takesText ? <Notice kind="warn">{t.sttSynthOld(props.name)}</Notice> : null}
+      {mode === "device" || model.state !== "missing" ? (
+        <div className="group">
+          <Row title={t.sttModel} desc={<span className={model.state === "failed" ? "error-text" : undefined}>{status}</span>}>
+            {model.state === "downloading" ? (
+              <button type="button" className="btn small" onClick={() => run(() => backend.islandSttCancel())}>
+                {t.sttCancel}
+              </button>
+            ) : null}
+            {model.state === "missing" ? (
+              <button type="button" className="btn small" onClick={() => run(() => backend.islandSttDownload())}>
+                {t.sttDownload}
+              </button>
+            ) : null}
+            {model.state === "failed" ? (
+              <button type="button" className="btn small" onClick={() => run(() => backend.islandSttDownload())}>
+                {t.sttRetry}
+              </button>
+            ) : null}
+            {model.state === "ready" ? (
+              <button type="button" className="btn small quiet" onClick={() => run(() => backend.islandSttDelete())}>
+                {t.sttDelete}
+              </button>
+            ) : null}
+          </Row>
+          {model.state === "downloading" ? (
+            <div className="stt-progress" aria-hidden="true">
+              <i style={{ width: `${Math.min(100, (model.done * 100) / Math.max(1, model.total))}%` }} />
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {problem ? (
+        <div className="error-text" role="alert">
+          {problem}
+        </div>
+      ) : null}
+    </Section>
   );
 }
 
@@ -292,6 +396,8 @@ export function Island() {
                   </Row>
                 </div>
               </Section>
+
+              <SttSection name={name} takesText={mainId ? isl.device_stt[mainId] === true : false} />
 
               {mainId ? <FaceSection key={mainId} synthId={mainId} name={name} supported={supported} online={online} /> : null}
             </>

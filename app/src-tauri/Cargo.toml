@@ -46,6 +46,11 @@ base64.workspace = true
 # protocol's 2560 px and send it as JPEG. Already in the build (Tauri's
 # icons); only the JPEG codec is new.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# The island's speech-to-text model (island/stt/model.rs): download with
+# resume, check against the pinned sha256. Both in the build already
+# (connect-core).
+ureq.workspace = true
+sha2.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 # access(2): can the app replace itself where it runs (updates.rs)?
@@ -76,3 +81,11 @@ block2 = "0.6"
 # NSWindow calls. In the build already (Tauri's window layer), with these
 # features on.
 objc2-foundation = "0.3"
+
+# The island's on-device speech-to-text (island/stt/engine.rs): whisper.cpp
+# with Metal, built from source by cmake. Apple silicon only: the Windows
+# and Linux builds (and the Intel half of a universal build) keep sending
+# the voice to the synth. 0.15 is the line with whisper.cpp 1.7.6 (Silero
+# VAD) that still builds on Rust 1.85; 0.16 needs 1.88.
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+whisper-rs = { version = "=0.15.1", features = ["metal"] }

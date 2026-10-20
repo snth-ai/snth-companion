@@ -41,6 +41,8 @@ pub enum MicPermission {
 pub struct Captured {
     pub wav: Vec<u8>,
     pub ms: u64,
+    /// The samples in the WAV (16 kHz mono), for on-device speech-to-text.
+    pub pcm: Vec<i16>,
 }
 
 /// One WAV file: RIFF header + 16-bit little-endian PCM, mono.
@@ -156,6 +158,21 @@ mod capture {
     pub struct Recording {
         stop: Option<mpsc::Sender<()>>,
         done: mpsc::Receiver<Result<Vec<i16>, String>>,
+        shared: Arc<Mutex<Shared>>,
+    }
+
+    /// A look at a running recording's samples (on-device speech-to-text
+    /// reads them while the key is held).
+    pub struct Tap {
+        shared: Arc<Mutex<Shared>>,
+    }
+
+    impl Tap {
+        /// The samples from index `from` on (16 kHz mono). Empty once the
+        /// recording was finished.
+        pub fn read_from(&self, from: usize) -> Vec<i16> {
+            self.shared.lock().map(|s| s.samples.get(from..).map(<[i16]>::to_vec).unwrap_or_default()).unwrap_or_default()
+        }
     }
 
     struct Shared {
@@ -219,6 +236,15 @@ mod capture {
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
         let (done_tx, done_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
+        // Made here (at 16 kHz until the device's rate is known), so the
+        // recording can hand out a tap on it.
+        let shared = Arc::new(Mutex::new(Shared {
+            samples: Vec::with_capacity(RATE as usize * 10),
+            resampler: Resampler::new(RATE),
+            block: Vec::new(),
+            last_level: Instant::now(),
+        }));
+        let tapped = shared.clone();
         std::thread::Builder::new()
             .name("island-mic".into())
             .spawn(move || {
@@ -236,12 +262,9 @@ mod capture {
                 };
                 let format = supported.sample_format();
                 let config: cpal::StreamConfig = supported.into();
-                let shared = Arc::new(Mutex::new(Shared {
-                    samples: Vec::with_capacity(RATE as usize * 10),
-                    resampler: Resampler::new(config.sample_rate),
-                    block: Vec::new(),
-                    last_level: Instant::now(),
-                }));
+                if let Ok(mut sh) = shared.lock() {
+                    sh.resampler = Resampler::new(config.sample_rate);
+                }
                 let (fail_tx, fail_rx) = mpsc::channel::<String>();
                 let built = match format {
                     SampleFormat::F32 => build::<f32>(&device, config, shared.clone(), on_level.clone(), fail_tx),
@@ -272,13 +295,17 @@ mod capture {
             })
             .map_err(|e| format!("mic_failed: {e}"))?;
         match ready_rx.recv_timeout(std::time::Duration::from_secs(5)) {
-            Ok(Ok(())) => Ok(Recording { stop: Some(stop_tx), done: done_rx }),
+            Ok(Ok(())) => Ok(Recording { stop: Some(stop_tx), done: done_rx, shared: tapped }),
             Ok(Err(e)) => Err(e),
             Err(_) => Err("mic_failed: the microphone did not start in time".into()),
         }
     }
 
     impl Recording {
+        pub fn tap(&self) -> Tap {
+            Tap { shared: self.shared.clone() }
+        }
+
         /// Stop and take the voice (blocking for as long as the device
         /// needs to stop: call it off the async runtime's threads).
         pub fn finish(mut self) -> Result<Captured, String> {
@@ -290,7 +317,7 @@ mod capture {
                 .recv_timeout(std::time::Duration::from_secs(5))
                 .map_err(|_| "mic_failed: the recording did not end".to_string())??;
             let ms = samples.len() as u64 * 1000 / u64::from(RATE);
-            Ok(Captured { wav: wav(&samples, RATE), ms })
+            Ok(Captured { wav: wav(&samples, RATE), ms, pcm: samples })
         }
     }
 
@@ -311,11 +338,23 @@ mod capture {
 
     pub struct Recording;
 
+    pub struct Tap;
+
+    impl Tap {
+        pub fn read_from(&self, _from: usize) -> Vec<i16> {
+            Vec::new()
+        }
+    }
+
     pub fn start(_on_level: Arc<dyn Fn(f32) + Send + Sync>) -> Result<Recording, String> {
         Err("unsupported".into())
     }
 
     impl Recording {
+        pub fn tap(&self) -> Tap {
+            Tap
+        }
+
         pub fn finish(self) -> Result<Captured, String> {
             Err("unsupported".into())
         }

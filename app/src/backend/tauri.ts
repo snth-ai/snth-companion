@@ -73,6 +73,10 @@ export const tauriBackend: Backend = {
   faceSet: (synthId, face, patch) => invoke("face_set", { synthId, face, patch }),
   islandAskDesign: (synthId) => invoke("island_ask_design", { synthId }),
   islandMic: () => invoke("island_mic"),
+  islandSttSet: (mode) => invoke("island_stt_set", { mode }),
+  islandSttDownload: () => invoke("island_stt_download"),
+  islandSttCancel: () => invoke("island_stt_cancel"),
+  islandSttDelete: () => invoke("island_stt_delete"),
 
   islandView: () => invoke("island_view"),
   islandLayout: (hit, faceX, faceY) => invoke("island_layout", { hit, faceX, faceY }),
@@ -81,6 +85,8 @@ export const tauriBackend: Backend = {
   islandSelectSynth: (synthId) => invoke("island_select_synth", { synthId }),
   islandStop: () => invoke("island_stop"),
   islandOpenApp: () => invoke("island_open_app"),
+  islandSttOffer: (accept) => invoke("island_stt_offer", { accept }),
+  islandSttCardHide: () => invoke("island_stt_card_hide"),
   subscribeIsland(listener) {
     let stopped = false;
     const offs: Array<() => void> = [];

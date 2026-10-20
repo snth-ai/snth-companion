@@ -70,6 +70,12 @@ const COMMANDS: &[&str] = &[
     "face_refresh",
     "face_set",
     "island_ask_design",
+    // on-device speech-to-text: the switch and the model (main window;
+    // the island's card may retry the download)
+    "island_stt_set",
+    "island_stt_download",
+    "island_stt_cancel",
+    "island_stt_delete",
     // the island window
     "island_view",
     "island_layout",
@@ -79,12 +85,41 @@ const COMMANDS: &[&str] = &[
     "island_stop",
     "island_open_app",
     "island_mic",
+    "island_stt_offer",
+    "island_stt_card_hide",
 ];
 
 fn main() {
+    link_compiler_rt();
     tauri_build::try_build(
         tauri_build::Attributes::new()
             .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS)),
     )
     .expect("tauri build script failed");
+}
+
+/// whisper.cpp's Metal code (island speech-to-text, Apple silicon only)
+/// asks `@available(macOS ...)`, which clang compiles to a call into its
+/// runtime library (`__isPlatformVersionAtLeast`). The release build
+/// targets macOS 12 (tauri sets MACOSX_DEPLOYMENT_TARGET from
+/// minimumSystemVersion), where those checks are real, and rustc does not
+/// link clang's runtime: link it from the toolchain that compiled the code.
+fn link_compiler_rt() {
+    let target = std::env::var("TARGET").unwrap_or_default();
+    if target != "aarch64-apple-darwin" {
+        return;
+    }
+    let out = std::process::Command::new("xcrun").args(["clang", "-print-file-name=libclang_rt.osx.a"]).output();
+    let Ok(out) = out else {
+        println!("cargo:warning=xcrun clang not found: libclang_rt.osx.a is not linked");
+        return;
+    };
+    let path = std::path::PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    match path.parent().filter(|_| path.is_file()) {
+        Some(dir) => {
+            println!("cargo:rustc-link-search=native={}", dir.display());
+            println!("cargo:rustc-link-lib=static=clang_rt.osx");
+        }
+        None => println!("cargo:warning=libclang_rt.osx.a not found: {}", path.display()),
+    }
 }

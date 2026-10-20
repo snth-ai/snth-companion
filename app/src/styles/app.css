@@ -1937,3 +1937,22 @@ details.more .more-body {
   flex-wrap: wrap;
   margin-top: 12px;
 }
+/* The speech model's download on the Island screen. */
+.stt-progress {
+  height: 4px;
+  margin: 0 16px 12px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+.stt-progress i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.25s linear;
+}
+.section .group + .notice,
+.section .notice + .group {
+  margin-top: 10px;
+}

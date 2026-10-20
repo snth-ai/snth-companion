@@ -1091,6 +1091,56 @@ pub async fn island_hotkey_reset(ctx: Cx<'_>, which: String) -> Result<UiState, 
     Ok(build_state(&ctx).await)
 }
 
+/// On-device speech-to-text: "synth" or "device". Err: "unsupported",
+/// "bad_mode".
+#[tauri::command]
+pub async fn island_stt_set(ctx: Cx<'_>, mode: String) -> Result<UiState, String> {
+    let mode = match mode.as_str() {
+        "synth" => connect_core::island::SttMode::Synth,
+        "device" => connect_core::island::SttMode::Device,
+        _ => return Err("bad_mode".into()),
+    };
+    crate::island::stt_set(&ctx, mode)?;
+    Ok(build_state(&ctx).await)
+}
+
+/// Fetch the speech-to-text model (again, after a failure). Err:
+/// "no_space", "unsupported".
+#[tauri::command]
+pub async fn island_stt_download(ctx: Cx<'_>) -> Result<UiState, String> {
+    let result = crate::island::stt_download(&ctx);
+    let state = build_state(&ctx).await;
+    result.map(|_| state)
+}
+
+/// Stop the model's download (it resumes from there next time).
+#[tauri::command]
+pub async fn island_stt_cancel(ctx: Cx<'_>) -> Result<UiState, String> {
+    ctx.island.stt.models.cancel();
+    Ok(build_state(&ctx).await)
+}
+
+/// Delete the model; the speech goes to the synth again.
+#[tauri::command]
+pub async fn island_stt_delete(ctx: Cx<'_>) -> Result<UiState, String> {
+    let ctx2 = ctx.inner().clone();
+    tokio::task::spawn_blocking(move || crate::island::stt_delete(&ctx2)).await.map_err(|e| e.to_string())??;
+    Ok(build_state(&ctx).await)
+}
+
+/// The island window: the synth's offer of on-device speech-to-text was
+/// answered ("Turn on" / "Not now").
+#[tauri::command]
+pub fn island_stt_offer(ctx: Cx<'_>, accept: bool) -> Result<(), String> {
+    crate::island::stt_offer_answer(&ctx, accept)
+}
+
+/// The island window: hide the model's download card.
+#[tauri::command]
+pub fn island_stt_card_hide(ctx: Cx<'_>) {
+    crate::island::stt_card_hide(&ctx);
+}
+
 /// Read a synth's face again (the editor opens).
 #[tauri::command]
 pub async fn face_refresh(ctx: Cx<'_>, synth_id: String) -> Result<UiState, String> {

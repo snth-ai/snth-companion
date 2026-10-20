@@ -61,8 +61,16 @@ fn voice(ms: u64, bytes: usize) -> OwnerMessage {
         text: String::new(),
         audio: Some(Audio { mime: "audio/wav".into(), data: vec![1; bytes], ms }),
         images: vec![],
+        voice_transcript: None,
     }
 }
+
+/// A voice message as text recognized on this computer.
+fn spoken(text: &str) -> OwnerMessage {
+    OwnerMessage { audio: None, voice_transcript: Some(text.into()), ..voice(0, 0) }
+}
+
+const WITH_STT: &[&str] = &["requests", "island", "island_device_stt"];
 
 // --- settings ---
 
@@ -96,6 +104,57 @@ fn the_island_is_off_with_this_systems_keys_on_a_fresh_install_and_in_an_old_fil
     assert_eq!(p.island.hotkeys.screen_voice, Hotkeys::default().screen_voice);
     assert_eq!(p.island.hotkeys.text, "", "the same combination twice: the second is switched off");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn speech_goes_to_the_synth_and_the_offer_waits_on_a_fresh_install_and_in_an_old_file() {
+    let fresh = settings::Persisted::fresh("d".into());
+    assert_eq!(fresh.island.stt, SttMode::Synth, "device speech-to-text is off by default");
+    assert_eq!(fresh.island.stt_offer, SttOffer::Pending);
+
+    // A file of 0.1.18: the island on, nothing about speech-to-text. The
+    // offer is pending, so it shows once after the update.
+    let old = json!({"rev": 3, "settings": crate::settings::Settings::default(), "device_id": "d",
+        "island": {"enabled": true, "main_synth": "mia"}});
+    let dir = std::env::temp_dir().join(format!("connect-island-stt-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+    std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+    let p = settings::load(&path, || "x".into()).unwrap();
+    assert!(p.island.enabled);
+    assert_eq!(p.island.stt, SttMode::Synth);
+    assert_eq!(p.island.stt_offer, SttOffer::Pending);
+
+    // Written and read back.
+    let mut p = p;
+    p.island.stt = SttMode::Device;
+    p.island.stt_offer = SttOffer::Accepted;
+    settings::save(&path, &p).unwrap();
+    let raw: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(raw["island"]["stt"], "device");
+    assert_eq!(raw["island"]["stt_offer"], "accepted");
+    let back = settings::load(&path, || "x".into()).unwrap();
+    assert_eq!((back.island.stt, back.island.stt_offer), (SttMode::Device, SttOffer::Accepted));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_offer_is_answered_once() {
+    use SttOffer::*;
+    assert!(Pending.open() && Shown.open() && !Accepted.open() && !Declined.open());
+    assert_eq!(Pending.shown(), Shown);
+    assert_eq!(Shown.shown(), Shown);
+    assert_eq!(Declined.shown(), Declined, "showing never reopens an answered offer");
+    assert_eq!(Shown.answered(true), Accepted);
+    assert_eq!(Shown.answered(false), Declined);
+    assert_eq!(Pending.answered(false), Declined);
+    // "Not now" never asks again: a late click changes nothing.
+    assert_eq!(Declined.answered(true), Declined);
+    assert_eq!(Accepted.answered(false), Accepted);
+    // A choice in Settings answers an open offer.
+    assert_eq!(Shown.chosen_in_settings(SttMode::Device), Accepted);
+    assert_eq!(Pending.chosen_in_settings(SttMode::Synth), Declined);
+    assert_eq!(Declined.chosen_in_settings(SttMode::Device), Declined);
 }
 
 #[test]
@@ -182,7 +241,7 @@ fn a_message_is_built_within_every_limit() {
     shot.images = vec![shot.images[0].clone(), shot.images[0].clone(), shot.images[0].clone()];
     assert_eq!(shot.params().unwrap_err().code, "too_large");
 
-    let mut text = OwnerMessage { client_id: "c-2".into(), mode: Mode::Text, text: "  find me a flight  ".into(), audio: None, images: vec![] };
+    let mut text = OwnerMessage { client_id: "c-2".into(), mode: Mode::Text, text: "  find me a flight  ".into(), audio: None, images: vec![], voice_transcript: None };
     assert_eq!(text.params().unwrap()["text"], "find me a flight");
     text.text = "   ".into();
     assert_eq!(text.params().unwrap_err().code, "empty");
@@ -191,6 +250,64 @@ fn a_message_is_built_within_every_limit() {
     let mut wrong = voice(1000, 10);
     wrong.images = vec![Image { mime: "image/png".into(), data: vec![1], long_edge: 10 }];
     assert!(wrong.params().is_err());
+}
+
+#[test]
+fn a_voice_message_carries_the_audio_or_the_text_recognized_here() {
+    let p = spoken("  Найди мне рейс в пятницу  ").params().unwrap();
+    assert_eq!(p["mode"], "voice");
+    assert_eq!(p["voice_transcript"], "Найди мне рейс в пятницу");
+    assert_eq!(p["stt"], "device");
+    assert!(p.get("audio").is_none(), "no audio with a transcript");
+
+    // The audio path is as before: no transcript, no stt.
+    let p = voice(2000, 10).params().unwrap();
+    assert!(p.get("voice_transcript").is_none() && p.get("stt").is_none());
+
+    // A screenshot rides with the transcript as with the audio.
+    let mut shot = spoken("что это за ошибка");
+    shot.mode = Mode::ScreenVoice;
+    shot.images = vec![Image { mime: "image/jpeg".into(), data: vec![9; 50], long_edge: 1200 }];
+    let p = shot.params().unwrap();
+    assert_eq!(p["mode"], "screen_voice");
+    assert_eq!(p["images"].as_array().unwrap().len(), 1);
+    assert_eq!(p["stt"], "device");
+
+    assert_eq!(spoken("   ").params().unwrap_err().code, "empty");
+    assert_eq!(spoken(&"а".repeat(MAX_TRANSCRIPT_CHARS)).params().unwrap()["voice_transcript"].as_str().unwrap().chars().count(), MAX_TRANSCRIPT_CHARS);
+    assert_eq!(spoken(&"а".repeat(MAX_TRANSCRIPT_CHARS + 1)).params().unwrap_err().code, "too_large");
+    let both = OwnerMessage { voice_transcript: Some("hi".into()), ..voice(1000, 10) };
+    assert_eq!(both.params().unwrap_err().code, "failed", "never both");
+    let text = OwnerMessage { mode: Mode::Text, text: "hi".into(), ..spoken("hi") };
+    assert_eq!(text.params().unwrap_err().code, "failed", "a text message has no transcript");
+}
+
+#[tokio::test]
+async fn a_transcript_goes_only_to_a_synth_that_takes_it() {
+    let (core, mut q) = linked(&[("new", WITH_STT), ("old", BOTH)]);
+    let shared = core.shared();
+    assert!(supports_device_stt(&shared.slot("new").unwrap()));
+    assert!(!supports_device_stt(&shared.slot("old").unwrap()));
+
+    // An older synth: nothing goes, and the code tells the app to send
+    // the audio instead.
+    let e = send(&shared, "old", &spoken("привет")).await.unwrap_err();
+    assert_eq!(e.code, NO_DEVICE_STT);
+    assert!(q[1].try_recv().is_err());
+
+    let call = tokio::spawn({
+        let shared = shared.clone();
+        async move { send(&shared, "new", &spoken("привет")).await }
+    });
+    let sent = q[0].recv().await.unwrap();
+    assert_eq!(sent["params"]["voice_transcript"], "привет");
+    assert_eq!(sent["params"]["stt"], "device");
+    shared.slot("new").unwrap().requests.resolve(&json!({"type": "response", "id": sent["id"], "result": {"accepted": true, "message_id": "m-9"}}));
+    assert_eq!(call.await.unwrap().unwrap(), "m-9");
+
+    let view = core.island_view();
+    assert_eq!(view.device_stt.get("new"), Some(&true));
+    assert_eq!(view.device_stt.get("old"), Some(&false));
 }
 
 #[tokio::test]

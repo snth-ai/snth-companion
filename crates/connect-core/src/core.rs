@@ -1494,6 +1494,7 @@ impl Core {
             main_synth: settings.main_synth_of(&links).map(|l| l.synth_id.clone()),
             faces: self.shared.persisted.read().unwrap().faces.clone(),
             supported: links.iter().map(|l| (l.synth_id.clone(), crate::island::supports(l))).collect(),
+            device_stt: links.iter().map(|l| (l.synth_id.clone(), crate::island::supports_device_stt(l))).collect(),
             settings,
         }
     }

@@ -32,12 +32,19 @@
 //! (`shot.rs`); the release sends `owner.message` (connect-core
 //! island.rs) and the synth's island.event moves the face through
 //! accepted, thinking, working and done (with the summary).
+//!
+//! With on-device speech-to-text on (`stt/`, off by default) a hold is
+//! also recognized while it runs: the island shows the words as they
+//! come, and the release sends the text instead of the audio when the
+//! synth takes it. The synth's one-time offer to switch it on is a card
+//! on the island (`SttCard`), shown only while the island is idle.
 
 pub mod audio;
 pub mod geometry;
 pub mod hold;
 pub mod panel;
 pub mod shot;
+pub mod stt;
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -45,7 +52,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use connect_core::island::{self as core_island, Audio, HotkeyKind, Hotkeys, IslandEvent, Mode, OwnerMessage};
+use connect_core::island::{self as core_island, Audio, HotkeyKind, Hotkeys, IslandEvent, Mode, OwnerMessage, SttMode};
 use connect_core::{CoreEvent, LinkState};
 use serde::Serialize;
 use serde_json::Value;
@@ -80,6 +87,8 @@ const NOTICE_FOR: Duration = Duration::from_secs(6);
 const SUMMARY_FOR: Duration = Duration::from_secs(6);
 /// The tick of "accepted" is seen for this long after a send.
 const ACCEPTED_FOR: Duration = Duration::from_millis(1500);
+/// "The model is ready" stays on the island this long.
+const STT_READY_FOR: Duration = Duration::from_secs(6);
 /// How often the poller looks whether a full-screen app covers the
 /// screen. Faster while it does and the pointer is near the top, where
 /// the menu bar comes in, so the island comes in with it.
@@ -129,6 +138,25 @@ pub struct Notice {
     pub at_ms: u64,
 }
 
+/// The speech-to-text card on the island: the synth's offer, then (when
+/// the owner accepted it there) the model's download.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SttCard {
+    Offer {
+        /// The download, in bytes (the text says "about 550 MB").
+        size: u64,
+    },
+    Download {
+        percent: u32,
+    },
+    Verifying,
+    Ready,
+    Failed {
+        code: String,
+    },
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SynthChoice {
     pub id: String,
@@ -170,6 +198,10 @@ pub struct View {
     pub hidden: bool,
     pub hotkeys: Hotkeys,
     pub mic: audio::MicPermission,
+    /// On-device speech-to-text: the words of the hold so far, then the
+    /// text that was sent. Null with the speech going to the synth.
+    pub transcript: Option<String>,
+    pub stt_card: Option<SttCard>,
 }
 
 #[derive(Default)]
@@ -201,6 +233,12 @@ struct Inner {
     /// told last.
     tucked: bool,
     hidden: bool,
+    /// The words of the current (or last) hold, recognized here.
+    transcript: Option<String>,
+    /// The owner accepted the offer on the island: the island shows the
+    /// download until it is done (or the owner hides it).
+    stt_follow: bool,
+    stt_ready_at: Option<Instant>,
 }
 
 /// Something the owner started or must see is on the island: it stays
@@ -218,6 +256,8 @@ struct Hold {
     recording: audio::Recording,
     picture: Option<tauri::async_runtime::JoinHandle<Result<core_island::Image, String>>>,
     synth_id: String,
+    /// Recognized here while it runs (on-device speech-to-text).
+    stt: Option<stt::Session>,
 }
 
 pub struct Island {
@@ -233,10 +273,12 @@ pub struct Island {
     problems: Mutex<HashMap<HotkeyKind, String>>,
     /// The microphone question was asked during this run.
     mic_asked: AtomicBool,
+    /// On-device speech-to-text: the model files and the speech thread.
+    pub stt: stt::Stt,
 }
 
-impl Default for Island {
-    fn default() -> Self {
+impl Island {
+    pub fn new(data_dir: &std::path::Path) -> Self {
         Island {
             inner: Mutex::new(Inner::default()),
             hold: Mutex::new(hold::Hold::default()),
@@ -246,6 +288,7 @@ impl Default for Island {
             registered: Mutex::new(Vec::new()),
             problems: Mutex::new(HashMap::new()),
             mic_asked: AtomicBool::new(false),
+            stt: stt::Stt::new(data_dir),
         }
     }
 }
@@ -307,7 +350,29 @@ pub fn view(ctx: &Ctx) -> View {
     let hold = island.hold.lock().unwrap().holding();
     let approval = ctx.approvals.list().into_iter().next();
     let hidden = inner.tucked && !busy(&inner, hold.is_some(), approval.is_some());
-    View {
+    // The speech-to-text card only on an idle island: never mid-hold,
+    // mid-answer, over a request or a notice.
+    let answering = inner.message.as_ref().is_some_and(|(m, at)| match m.stage.as_str() {
+        "accepted" | "working" => true,
+        _ => at.elapsed() < SUMMARY_FOR,
+    });
+    let idle = hold.is_none()
+        && !inner.text_open
+        && !inner.sending
+        && approval.is_none()
+        && !answering
+        && !hidden
+        && inner.notice.as_ref().is_none_or(|(_, at)| at.elapsed() >= NOTICE_FOR);
+    let takes_text = main.as_ref().is_some_and(|m| m.state() == LinkState::Linked && core_island::supports_device_stt(m));
+    let offer = stt::offer_due(&settings, stt::available(), takes_text, idle);
+    let stt_card = if offer {
+        Some(SttCard::Offer { size: stt::model::total_size() })
+    } else if inner.stt_follow && idle {
+        follow_card(&mut inner, &island.stt.models.status())
+    } else {
+        None
+    };
+    let view = View {
         os: std::env::consts::OS,
         lang: match ctx.lang() {
             crate::i18n::Lang::Ru => "ru",
@@ -332,6 +397,40 @@ pub fn view(ctx: &Ctx) -> View {
         hidden,
         hotkeys: settings.hotkeys,
         mic: audio::permission(),
+        transcript: inner.transcript.clone(),
+        stt_card,
+    };
+    drop(inner);
+    // The owner has seen the offer: a restart shows it again until it is
+    // answered, an update never makes it new again.
+    if offer && settings.stt_offer == core_island::SttOffer::Pending {
+        ctx.core.set_island(|i| i.stt_offer = i.stt_offer.shown());
+    }
+    view
+}
+
+/// The download's card after the owner accepted the offer on the island.
+fn follow_card(inner: &mut Inner, status: &stt::model::Status) -> Option<SttCard> {
+    use stt::model::Status;
+    match status {
+        Status::Downloading { done, total } => Some(SttCard::Download { percent: (done * 100 / (*total).max(1)).min(100) as u32 }),
+        Status::Verifying => Some(SttCard::Verifying),
+        Status::Ready => {
+            let at = *inner.stt_ready_at.get_or_insert_with(Instant::now);
+            if at.elapsed() < STT_READY_FOR {
+                Some(SttCard::Ready)
+            } else {
+                inner.stt_follow = false;
+                inner.stt_ready_at = None;
+                None
+            }
+        }
+        Status::Failed { code, .. } => Some(SttCard::Failed { code: code.clone() }),
+        Status::Missing => {
+            // Cancelled or deleted in Settings.
+            inner.stt_follow = false;
+            None
+        }
     }
 }
 
@@ -588,6 +687,7 @@ fn act(ctx: &Arc<Ctx>, action: hold::Action) {
     match action {
         hold::Action::Discard => {
             // A slip: the recording (and the picture) go nowhere.
+            ctx.island.inner.lock().unwrap().transcript = None;
             let dropped = ctx.island.running.lock().unwrap().take();
             if let Some(h) = dropped {
                 if let Some(p) = h.picture {
@@ -638,7 +738,17 @@ fn start_hold(ctx: &Arc<Ctx>, kind: HotkeyKind, synth_id: String) {
         }
         _ => {}
     }
-    ctx.island.inner.lock().unwrap().hold_since_ms = now_ms();
+    {
+        let mut inner = ctx.island.inner.lock().unwrap();
+        inner.hold_since_ms = now_ms();
+        inner.transcript = None;
+    }
+    // On-device speech-to-text: is it for this hold? The model starts
+    // loading now, while the microphone starts.
+    let route = stt_route(ctx);
+    if route == stt::Route::Device {
+        ctx.island.stt.warm();
+    }
     // The picture first, at the press, with the island out of it.
     let picture = (kind == HotkeyKind::ScreenVoice).then(|| {
         let ctx = ctx.clone();
@@ -663,7 +773,11 @@ fn start_hold(ctx: &Arc<Ctx>, kind: HotkeyKind, synth_id: String) {
                     }
                     return;
                 }
-                *ctx2.island.running.lock().unwrap() = Some(Hold { recording, picture, synth_id });
+                let stt = (route == stt::Route::Device).then(|| start_stt(&ctx2, &recording)).flatten();
+                if stt.is_some() {
+                    ctx2.island.inner.lock().unwrap().transcript = Some(String::new());
+                }
+                *ctx2.island.running.lock().unwrap() = Some(Hold { recording, picture, synth_id, stt });
                 emit_view(&ctx2);
                 // The two-minute limit.
                 let ctx3 = ctx2.clone();
@@ -700,6 +814,44 @@ fn start_hold(ctx: &Arc<Ctx>, kind: HotkeyKind, synth_id: String) {
     emit_view(ctx);
 }
 
+/// Who recognizes the next hold's speech, by the switch, the model and
+/// what the main synth takes.
+fn stt_route(ctx: &Arc<Ctx>) -> stt::Route {
+    let mode = ctx.core.island().stt;
+    let takes_text = ctx.core.island_main().is_some_and(|m| core_island::supports_device_stt(&m));
+    let route = stt::route(mode, stt::available(), ctx.island.stt.models.ready(), takes_text);
+    if let stt::Route::Synth(why) = route {
+        if mode == SttMode::Device {
+            connect_core::logln!("island: speech-to-text on the synth for this hold: {why}");
+        }
+    }
+    route
+}
+
+/// Start recognizing a hold that records now; its words go to the island
+/// as they come.
+fn start_stt(ctx: &Arc<Ctx>, recording: &audio::Recording) -> Option<stt::Session> {
+    let tap = recording.tap();
+    let live_ctx = ctx.clone();
+    let session = ctx.island.stt.hold(
+        Box::new(move |from| tap.read_from(from)),
+        Box::new(move |text| {
+            let ctx = live_ctx.clone();
+            // Only while the key is still held: a late step must not
+            // overwrite the final text.
+            if ctx.island.hold.lock().unwrap().holding().is_none() {
+                return;
+            }
+            ctx.island.inner.lock().unwrap().transcript = Some(text);
+            tauri::async_runtime::spawn(async move { emit_view(&ctx) });
+        }),
+    );
+    if session.is_none() {
+        connect_core::logln!("island: speech-to-text could not start for this hold; the voice goes as audio");
+    }
+    session
+}
+
 async fn take_picture(ctx: &Arc<Ctx>) -> Result<core_island::Image, String> {
     let display = panel::display_under_cursor();
     let invisible = |on: bool| {
@@ -722,19 +874,48 @@ async fn take_picture(ctx: &Arc<Ctx>) -> Result<core_island::Image, String> {
 }
 
 async fn finish(ctx: &Arc<Ctx>, kind: HotkeyKind, h: Hold) {
-    let Hold { recording, picture, synth_id } = h;
+    let Hold { recording, picture, synth_id, stt } = h;
     let captured = tokio::task::spawn_blocking(move || recording.finish()).await.map_err(|e| e.to_string()).and_then(|r| r);
-    let captured = match captured {
+    let mut captured = match captured {
         Ok(c) => c,
         Err(e) => {
             if let Some(p) = picture {
                 p.abort();
             }
+            ctx.island.inner.lock().unwrap().transcript = None;
             ctx.island.notice("mic_failed", e);
             emit_view(ctx);
             return;
         }
     };
+    // The words, recognized here. Anything but text sends the audio, as
+    // before; a hold in which nothing was said sends nothing.
+    let mut transcript = None;
+    if let Some(session) = stt {
+        let pcm = std::mem::take(&mut captured.pcm);
+        let started = Instant::now();
+        let outcome = tokio::task::spawn_blocking(move || session.finish(pcm)).await.map_err(|e| e.to_string()).and_then(|r| r);
+        let waited = started.elapsed().as_millis();
+        match outcome {
+            Ok(stt::Outcome::Text(text)) => {
+                connect_core::logln!("island: speech-to-text ready {waited} ms after the release ({} characters)", text.chars().count());
+                transcript = Some(text);
+            }
+            Ok(stt::Outcome::Silent) => {
+                connect_core::logln!("island: speech-to-text heard nothing in {} ms of audio; nothing sent", captured.ms);
+                if let Some(p) = picture {
+                    p.abort();
+                }
+                ctx.island.inner.lock().unwrap().transcript = None;
+                emit_view(ctx);
+                return;
+            }
+            Ok(stt::Outcome::Unreadable) => connect_core::logln!("island: speech-to-text read nothing from the speech; sending the voice"),
+            Err(e) => connect_core::logln!("island: speech-to-text failed ({e}); sending the voice"),
+        }
+        ctx.island.inner.lock().unwrap().transcript = transcript.clone();
+        emit_view(ctx);
+    }
     let mut images = Vec::new();
     if let Some(p) = picture {
         match p.await {
@@ -748,18 +929,25 @@ async fn finish(ctx: &Arc<Ctx>, kind: HotkeyKind, h: Hold) {
         }
     }
     let mode = if kind == HotkeyKind::ScreenVoice && !images.is_empty() { Mode::ScreenVoice } else { Mode::Voice };
-    let msg = OwnerMessage {
-        client_id: core_island::new_client_id(),
-        mode,
-        text: String::new(),
-        audio: Some(Audio { mime: "audio/wav".into(), data: captured.wav, ms: captured.ms }),
-        images,
+    let audio = Audio { mime: "audio/wav".into(), data: captured.wav, ms: captured.ms };
+    let (audio, fallback) = match transcript {
+        Some(_) => (None, Some(audio)),
+        None => (Some(audio), None),
     };
-    send(ctx, &synth_id, msg).await;
+    let msg = OwnerMessage { client_id: core_island::new_client_id(), mode, text: String::new(), audio, images, voice_transcript: transcript };
+    send_with(ctx, &synth_id, msg, fallback).await;
 }
 
 /// Send one message and follow it.
 pub async fn send(ctx: &Arc<Ctx>, synth_id: &str, msg: OwnerMessage) {
+    send_with(ctx, synth_id, msg, None).await
+}
+
+/// Send one message and follow it. With a transcript, `fallback` is the
+/// voice it came from: when the synth turns out not to take a transcript
+/// (the link came back with an older synth) the voice goes instead, with
+/// the same client_id.
+async fn send_with(ctx: &Arc<Ctx>, synth_id: &str, mut msg: OwnerMessage, fallback: Option<Audio>) {
     {
         let mut inner = ctx.island.inner.lock().unwrap();
         if inner.sending {
@@ -771,7 +959,17 @@ pub async fn send(ctx: &Arc<Ctx>, synth_id: &str, msg: OwnerMessage) {
         inner.sending = true;
     }
     emit_view(ctx);
-    let result = ctx.core.owner_message(synth_id, &msg).await;
+    let mut result = ctx.core.owner_message(synth_id, &msg).await;
+    if let (Err(e), Some(audio)) = (&result, fallback) {
+        if e.code == core_island::NO_DEVICE_STT {
+            connect_core::logln!("island: the synth does not take a transcript; sending the voice");
+            msg.voice_transcript = None;
+            msg.audio = Some(audio);
+            ctx.island.inner.lock().unwrap().transcript = None;
+            emit_view(ctx);
+            result = ctx.core.owner_message(synth_id, &msg).await;
+        }
+    }
     {
         let mut inner = ctx.island.inner.lock().unwrap();
         inner.sending = false;
@@ -843,7 +1041,8 @@ pub async fn submit_text(ctx: &Arc<Ctx>, text: String) -> Result<(), String> {
         emit_view(ctx);
         code
     })?;
-    let msg = OwnerMessage { client_id: core_island::new_client_id(), mode: Mode::Text, text, audio: None, images: vec![] };
+    ctx.island.inner.lock().unwrap().transcript = None;
+    let msg = OwnerMessage { client_id: core_island::new_client_id(), mode: Mode::Text, text, audio: None, images: vec![], voice_transcript: None };
     send(ctx, &synth_id, msg).await;
     Ok(())
 }
@@ -855,8 +1054,98 @@ pub async fn ask_design(ctx: &Arc<Ctx>, synth_id: &str) -> Result<(), String> {
         crate::i18n::Lang::Ru => "Придумай себе лицо для острова SNTH Connect на моём компьютере (инструмент connect_face): глаза, рот, цвета, аксессуар, как двигаешься. Такое, какое тебе по душе, и расскажи, что получилось и почему так.",
         _ => "Design your own face for the SNTH Connect island on my computer (your connect_face tool): eyes, mouth, colours, an accessory, how you move. Make it feel like you, and tell me what you chose and why.",
     };
-    let msg = OwnerMessage { client_id: core_island::new_client_id(), mode: Mode::Text, text: text.into(), audio: None, images: vec![] };
+    let msg = OwnerMessage { client_id: core_island::new_client_id(), mode: Mode::Text, text: text.into(), audio: None, images: vec![], voice_transcript: None };
     ctx.core.owner_message(synth_id, &msg).await.map(|_| ()).map_err(|e| e.code)
+}
+
+// --- on-device speech-to-text: the switch, the model, the offer ---
+
+/// The model's status changed: the island and the main window hear of it.
+fn stt_changed(ctx: &Arc<Ctx>) -> Arc<dyn Fn() + Send + Sync> {
+    let ctx = ctx.clone();
+    Arc::new(move || {
+        let ctx = ctx.clone();
+        tauri::async_runtime::spawn(async move {
+            emit_view(&ctx);
+            crate::state::emit_state(&ctx);
+            // "Ready" leaves the island by itself.
+            if ctx.island.stt.models.ready() && ctx.island.inner.lock().unwrap().stt_follow {
+                tokio::time::sleep(STT_READY_FOR + Duration::from_millis(200)).await;
+                emit_view(&ctx);
+            }
+        });
+    })
+}
+
+/// Fetch the model (the owner asked: the switch, the offer, "download").
+/// Err("no_space") when the disk is short; the status says it too.
+pub fn stt_download(ctx: &Arc<Ctx>) -> Result<(), String> {
+    if !stt::available() {
+        return Err("unsupported".into());
+    }
+    ctx.island.stt.models.download(stt_changed(ctx))
+}
+
+/// The switch in Settings. On: the model is fetched if it is not here.
+pub fn stt_set(ctx: &Arc<Ctx>, mode: SttMode) -> Result<(), String> {
+    if mode == SttMode::Device && !stt::available() {
+        return Err("unsupported".into());
+    }
+    ctx.core.set_island(|i| {
+        i.stt = mode;
+        i.stt_offer = i.stt_offer.chosen_in_settings(mode);
+    });
+    if mode == SttMode::Device {
+        // A full disk shows in the model's status; the switch stays on and
+        // the voice goes as audio until the model is here.
+        let _ = stt_download(ctx);
+        ctx.island.stt.warm();
+    }
+    emit_view(ctx);
+    Ok(())
+}
+
+/// The owner answered the synth's offer on the island.
+pub fn stt_offer_answer(ctx: &Arc<Ctx>, accept: bool) -> Result<(), String> {
+    if accept && !stt::available() {
+        return Err("unsupported".into());
+    }
+    let before = ctx.core.island().stt_offer;
+    if !before.open() {
+        return Ok(());
+    }
+    ctx.core.set_island(|i| {
+        i.stt_offer = i.stt_offer.answered(accept);
+        if accept {
+            i.stt = SttMode::Device;
+        }
+    });
+    connect_core::logln!("island: the speech-to-text offer was {}", if accept { "accepted" } else { "declined" });
+    if accept {
+        {
+            let mut inner = ctx.island.inner.lock().unwrap();
+            inner.stt_follow = !ctx.island.stt.models.ready();
+            inner.stt_ready_at = None;
+        }
+        let _ = stt_download(ctx);
+    }
+    emit_view(ctx);
+    Ok(())
+}
+
+/// "Hide" on the download's card: it goes on, in Settings.
+pub fn stt_card_hide(ctx: &Arc<Ctx>) {
+    ctx.island.inner.lock().unwrap().stt_follow = false;
+    emit_view(ctx);
+}
+
+/// "Delete the model": the files go, and the speech goes to the synth.
+pub fn stt_delete(ctx: &Arc<Ctx>) -> Result<(), String> {
+    let result = ctx.island.stt.models.delete();
+    ctx.core.set_island(|i| i.stt = SttMode::Synth);
+    ctx.island.inner.lock().unwrap().stt_follow = false;
+    emit_view(ctx);
+    result
 }
 
 // --- the webview's side ---

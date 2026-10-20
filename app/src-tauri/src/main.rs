@@ -151,7 +151,7 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
         vault: logins::VaultCache::default(),
         safari: safari::Safari::detect(|exe| logins::stays_put(exe, false)),
         stop_shortcut: Mutex::new(None),
-        island: island::Island::default(),
+        island: island::Island::new(&data_dir),
     });
     app.manage(ctx.clone());
 
@@ -459,6 +459,12 @@ fn main() {
             commands::island_set,
             commands::island_hotkey_set,
             commands::island_hotkey_reset,
+            commands::island_stt_set,
+            commands::island_stt_download,
+            commands::island_stt_cancel,
+            commands::island_stt_delete,
+            commands::island_stt_offer,
+            commands::island_stt_card_hide,
             commands::face_refresh,
             commands::face_set,
             commands::island_ask_design,

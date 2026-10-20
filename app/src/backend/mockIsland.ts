@@ -2,15 +2,25 @@
 // island window's view, staged from the URL and played by the review
 // controls.
 //
-//   index.html?screen=island&island=off|on|outdated|taken|micdenied|two|nolink
+//   index.html?screen=island&island=off|on|outdated|taken|micdenied|two|nolink|
+//        stt|sttdl|sttspace|sttold|sttintel
 //        (the Island screen. off = the default, a fresh install; on = on,
 //         Mia's face set; outdated = Mia's synth is older than the island;
 //         taken = another app holds the voice key; micdenied = the
 //         microphone was refused; two = Mia and Maya, Maya listens to the
-//         keys; nolink = on, but Mia is offline, so the keys are released)
+//         keys; nolink = on, but Mia is offline, so the keys are released.
+//         Speech recognition: stt = on this computer, the model here;
+//         sttdl = its download at 34%; sttspace = the disk was too full;
+//         sttold = on, but Mia does not take text yet; sttintel = a Mac
+//         without Apple silicon, where it is not available)
 //   island.html?island=idle|hover|listening|screen|sending|accepted|thinking|
 //        working|driving|done|error|approval|text|offline|outdated|
-//        micdenied|asking|paused|two|shot
+//        micdenied|asking|paused|two|shot|live|livesent|offer|offerdl|
+//        offerready|offerfail
+//        (live = a hold with its words recognized on this computer;
+//         livesent = the text going after the release; offer = Mia's offer
+//         of on-device speech-to-text; offerdl, offerready, offerfail = the
+//         model's download after "Turn on", done, failed)
 //        (the island window on a desktop; &notch=0 draws a Mac without a
 //         notch, &os=windows a Windows screen. The pointer over the desktop
 //         is the gaze; the strip under it plays a hold, a line of text, a
@@ -36,8 +46,14 @@ import type {
   IslandState,
   IslandView,
   LinkBrief,
+  SttCard,
+  SttMode,
+  SttModelStatus,
   UiState,
 } from "./types";
+
+/** The two model files, as the app pins them (stt/model.rs). */
+export const STT_SIZE = 574_041_195 + 885_098;
 
 const params = new URLSearchParams(window.location.search);
 
@@ -80,12 +96,25 @@ export function stagedIslandState(os: string, links: LinkBrief[]): IslandState {
   const supported: Record<string, boolean> = {};
   for (const l of links) supported[l.synth_id] = !(scenario === "outdated" && l.synth_id === "mia");
   const mainId = main || links[0]?.synth_id || null;
+  const stt = scenario.startsWith("stt") && scenario !== "sttintel";
+  const deviceStt: Record<string, boolean> = {};
+  for (const l of links) deviceStt[l.synth_id] = scenario !== "sttold";
+  const model: SttModelStatus =
+    scenario === "stt" || scenario === "sttold"
+      ? { state: "ready" }
+      : scenario === "sttdl"
+        ? { state: "downloading", done: Math.round(STT_SIZE * 0.34), total: STT_SIZE }
+        : scenario === "sttspace"
+          ? { state: "failed", code: "no_space", detail: `${STT_SIZE + 300 * 1024 * 1024} ${412 * 1024 * 1024}` }
+          : { state: "missing" };
   return {
     available: os !== "linux",
-    settings: { enabled, main_synth: main, hotkeys: defaultHotkeys(os) },
+    settings: { enabled, main_synth: main, hotkeys: defaultHotkeys(os), stt: stt ? "device" : "synth", stt_offer: stt ? "accepted" : "pending" },
     main_synth: mainId,
     faces: scenario === "off" ? {} : { mia: MIA_FACE },
     supported,
+    device_stt: deviceStt,
+    stt: { available: os === "macos" && scenario !== "sttintel", model, size: STT_SIZE },
     defaults: defaultHotkeys(os),
     keys_active: enabled && scenario !== "nolink" && links.length > 0,
     key_problems: scenario === "taken" ? { voice: "taken" } : {},
@@ -145,6 +174,60 @@ export class MockIslandScreen {
   }
 
   faceRefresh(): Promise<UiState> {
+    return this.changed();
+  }
+
+  // --- speech recognition ---
+
+  private sttTimer = 0;
+
+  sttSet(mode: SttMode): Promise<UiState> {
+    const isl = this.state().island;
+    if (mode === "device" && !isl.stt.available) return Promise.reject("unsupported");
+    isl.settings.stt = mode;
+    if (isl.settings.stt_offer === "pending" || isl.settings.stt_offer === "shown") isl.settings.stt_offer = mode === "device" ? "accepted" : "declined";
+    if (mode === "device") return this.sttDownload().catch(() => this.changed());
+    return this.changed();
+  }
+
+  /** A pretend download: about 6 s to the end, then the check. */
+  sttDownload(): Promise<UiState> {
+    const isl = this.state().island;
+    if (isl.stt.model.state === "ready" || isl.stt.model.state === "downloading") return this.changed();
+    if (params.get("sttnospace") === "1") {
+      isl.stt.model = { state: "failed", code: "no_space", detail: `${STT_SIZE + 300 * 1024 * 1024} ${412 * 1024 * 1024}` };
+      void this.changed();
+      return Promise.reject("no_space");
+    }
+    isl.stt.model = { state: "downloading", done: 0, total: STT_SIZE };
+    window.clearInterval(this.sttTimer);
+    this.sttTimer = window.setInterval(() => {
+      const m = isl.stt.model;
+      if (m.state !== "downloading") return window.clearInterval(this.sttTimer);
+      const done = Math.min(m.total, m.done + STT_SIZE / 25);
+      if (done >= m.total) {
+        window.clearInterval(this.sttTimer);
+        isl.stt.model = { state: "verifying" };
+        window.setTimeout(() => {
+          isl.stt.model = { state: "ready" };
+          void this.changed();
+        }, 800);
+      } else isl.stt.model = { state: "downloading", done, total: m.total };
+      void this.changed();
+    }, 250);
+    return this.changed();
+  }
+
+  sttCancel(): Promise<UiState> {
+    window.clearInterval(this.sttTimer);
+    this.state().island.stt.model = { state: "missing" };
+    return this.changed();
+  }
+
+  sttDelete(): Promise<UiState> {
+    const isl = this.state().island;
+    isl.stt.model = { state: "missing" };
+    isl.settings.stt = "synth";
     return this.changed();
   }
 
@@ -228,7 +311,13 @@ export class MockIslandWindow {
       hidden: false,
       hotkeys: defaultHotkeys(os),
       mic: scenario === "micdenied" ? "denied" : scenario === "asking" ? "not_asked" : "granted",
+      transcript: null,
+      stt_card: null,
     };
+    const ru = lang === "ru";
+    const spoken = ru
+      ? "Найди мне рейс в Лиссабон на пятницу, утром, и проверь, есть ли багаж в цене"
+      : "Find me a flight to Lisbon on Friday morning and check whether a bag is included";
     const msg = (stage: "accepted" | "working" | "done" | "error", summary = "") =>
       ({ synth_id: "mia", message_id: "m-1", stage, at_ms: stage === "accepted" && scenario === "thinking" ? now - 5000 : now, summary, channel: "telegram" }) as const;
     switch (scenario) {
@@ -260,6 +349,26 @@ export class MockIslandWindow {
         break;
       case "shot":
         this.view.notice = notice("shot_permission");
+        break;
+      case "live":
+        this.view.hold = "voice";
+        this.view.transcript = spoken.split(" ").slice(0, 9).join(" ");
+        break;
+      case "livesent":
+        this.view.sending = true;
+        this.view.transcript = spoken + ".";
+        break;
+      case "offer":
+        this.view.stt_card = { kind: "offer", size: STT_SIZE };
+        break;
+      case "offerdl":
+        this.view.stt_card = { kind: "download", percent: 34 };
+        break;
+      case "offerready":
+        this.view.stt_card = { kind: "ready" };
+        break;
+      case "offerfail":
+        this.view.stt_card = { kind: "failed", code: "no_space" };
         break;
     }
     // Stills stay still: no notice expires while a reviewer looks.
@@ -382,6 +491,82 @@ export class MockIslandWindow {
       this.send({ type: "level", level: 0 });
       this.playAnswer();
     });
+  }
+
+  /** A hold with on-device speech-to-text: the words come as the owner
+   * talks, the text goes on release. */
+  playLiveHold() {
+    const ru = this.view.lang === "ru";
+    const words = (
+      ru
+        ? "Найди мне рейс в Лиссабон на пятницу, утром, и проверь, есть ли багаж в цене."
+        : "Find me a flight to Lisbon on Friday morning and check whether a bag is included."
+    ).split(" ");
+    this.view.hold = "voice";
+    this.view.hold_since_ms = Date.now();
+    this.view.message = null;
+    this.view.notice = null;
+    this.view.stt_card = null;
+    this.view.transcript = "";
+    this.changed();
+    for (let i = 0; i < 80; i++) this.later(i * 50, () => this.send({ type: "level", level: Math.abs(Math.sin(i / 3)) * 0.8 + Math.random() * 0.2 }));
+    // A step about every 0.6 s, a few words each.
+    const steps = Math.ceil(words.length / 2);
+    for (let k = 1; k <= steps; k++) {
+      this.later(k * 600, () => {
+        this.view.transcript = words.slice(0, k * 2).join(" ");
+        this.changed();
+      });
+    }
+    this.later(steps * 600 + 400, () => {
+      this.view.hold = null;
+      this.view.transcript = words.join(" ");
+      this.send({ type: "level", level: 0 });
+      this.playAnswer();
+    });
+  }
+
+  /** The synth's offer of on-device speech-to-text, on an idle island. */
+  playOffer() {
+    this.view.message = null;
+    this.view.notice = null;
+    this.view.stt_card = { kind: "offer", size: STT_SIZE };
+    this.changed();
+  }
+
+  /** "Turn on" / "Not now" on the offer: on, the download's card. */
+  sttOffer(accept: boolean) {
+    if (!accept) {
+      this.view.stt_card = null;
+      this.changed();
+      return Promise.resolve();
+    }
+    let pct = 0;
+    const tick = () => {
+      pct = Math.min(100, pct + 7);
+      this.view.stt_card = pct < 100 ? ({ kind: "download", percent: pct } as SttCard) : { kind: "verifying" };
+      this.changed();
+      if (pct < 100) this.later(250, tick);
+      else
+        this.later(700, () => {
+          this.view.stt_card = { kind: "ready" };
+          this.changed();
+          this.later(6000, () => {
+            this.view.stt_card = null;
+            this.changed();
+          });
+        });
+    };
+    tick();
+    return Promise.resolve();
+  }
+
+  sttCardHide() {
+    this.timers.forEach((t) => window.clearTimeout(t));
+    this.timers = [];
+    this.view.stt_card = null;
+    this.changed();
+    return Promise.resolve();
   }
 
   playText() {

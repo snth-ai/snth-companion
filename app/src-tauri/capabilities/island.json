@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "island-window",
-  "description": "What the island may do: read its own view and the app's state, report its layout, send the owner's line of text, answer a waiting request (as the approval window does), switch the main synth, stop (pause), open the app, and ask about the microphone. Nothing else.",
+  "description": "What the island may do: read its own view and the app's state, report its layout, send the owner's line of text, answer a waiting request (as the approval window does), switch the main synth, stop (pause), open the app, ask about the microphone, and answer the synth's speech-to-text offer (with its download's card: hide, retry). Nothing else.",
   "windows": ["island"],
   "permissions": [
     "core:event:allow-listen",
@@ -15,6 +15,9 @@
     "allow-island-stop",
     "allow-island-open-app",
     "allow-island-mic",
+    "allow-island-stt-offer",
+    "allow-island-stt-card-hide",
+    "allow-island-stt-download",
     "allow-approvals-pending",
     "allow-approval-answer"
   ]
