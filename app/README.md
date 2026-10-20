@@ -81,6 +81,13 @@ editor) has its own page: `http://127.0.0.1:1420/src/island/face/demo.html`
 (`?view=grid|presets|states|editor`, more in `src/island/face/FaceDemo.tsx`);
 its schema tests run with `node --test src/island/face/*.test.mjs`.
 
+The face lab compares motion styles for pill eyes (Buddy) side by side:
+`http://127.0.0.1:1420/src/island/face/lab.html` (0 = shipped, A = Cozmo
+perspective + saccades, B = + gloss, C = + head layer and attention; the
+style is the `motionStyle` prop of `Face`, logic in
+`src/island/face/rig.ts`, default `classic`). `node scripts/build-face-lab.mjs`
+writes a self-contained single-file copy to `/tmp/face-lab/index.html`.
+
 URL parameters stage a screen or a state directly:
 
 | Parameter | Values |

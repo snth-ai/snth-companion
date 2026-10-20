@@ -13,7 +13,8 @@
 import { useEffect, useId, useMemo, useRef, useState, type CSSProperties, type ReactElement } from "react";
 import { darken, drain, lighten, luminance, mix, visibleOnBlack } from "./color";
 import { PILL_EYE, eyeGeom, f, heart, pillPath, softStar, sparkle } from "./geometry";
-import { EMOTE_LENGTH, FaceSim, HERO_TIME, LID_REST, nodCurve, stillFrame, type Frame, type Vec } from "./motion";
+import { EMOTE_LENGTH, FaceSim, HERO_TIME, LID_REST, nodCurve, stillFrame, styleOf, type Frame, type Vec } from "./motion";
+import { GLOSS, HEAD, placePill, type MotionStyle, type PillPlacement } from "./rig";
 import { clampFace, type FaceConfig, type FaceState, type IdleEmote } from "./schema";
 
 /** Below this height (px) brows, mouth and accessories are hidden. */
@@ -76,6 +77,9 @@ export interface FaceProps {
   emote?: { kind: IdleEmote; nonce: number } | null;
   /** With `still`: a blink closure 0..1 to draw (review screenshots). */
   blink?: number;
+  /** Pill eyes: how the gaze moves and how the beans are drawn (rig.ts).
+   * Default "classic", the shipped sliding eyes. */
+  motionStyle?: MotionStyle;
   label?: string;
   className?: string;
   style?: CSSProperties;
@@ -105,7 +109,11 @@ export function Face(props: FaceProps) {
   const gaze = useMemo(() => (gx === null || gy === null ? null : { x: gx, y: gy }), [gx, gy]);
   const uid = useId().replace(/[^a-zA-Z0-9_-]/g, "");
 
-  const input = useMemo(() => ({ face, state, gaze, level, reduced, autoSleep, compact }), [face, state, gaze, level, reduced, autoSleep, compact]);
+  const motionStyle = props.motionStyle ?? "classic";
+  const input = useMemo(
+    () => ({ face, state, gaze, level, reduced, autoSleep, compact, motionStyle }),
+    [face, state, gaze, level, reduced, autoSleep, compact, motionStyle],
+  );
   const inputRef = useRef(input);
   inputRef.current = input;
   const simRef = useRef<FaceSim | null>(null);
@@ -144,7 +152,8 @@ export function Face(props: FaceProps) {
   const frame = stillShot ?? live!;
 
   const view = faceView(size);
-  const draw = (fr: Frame, id: string) => drawFace(face, fr, { size, view, reduced, uid: id });
+  const style = styleOf({ face, motionStyle });
+  const draw = (fr: Frame, id: string) => drawFace(face, fr, { size, view, reduced, uid: id, style });
   return (
     <svg
       className={props.className}
@@ -191,6 +200,8 @@ interface DrawOpts {
   view: FaceView;
   reduced: boolean;
   uid: string;
+  /** Pill eyes: the motion style (classic for every other shape). */
+  style?: MotionStyle;
 }
 
 function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
@@ -237,19 +248,27 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
 
   const gx = clamp(P.gx, -1.2, 1.2);
   const gy = clamp(P.gy, -1.2, 1.2);
+  /** Pill eyes with a motion style: the rig places each bean and the mouth
+   * (perspective, head turn) instead of sliding them (see rig.ts). */
+  const style: MotionStyle = pill ? (o.style ?? "classic") : "classic";
+  const rigOn = style !== "classic";
+  const gloss = style === "gloss" || style === "head";
   // Whole-eye shift with the gaze; flat eyes keep a steady outline and move
   // a light core inside instead. Pill eyes have nothing inside to move, so
   // the whole eye travels much further.
-  const shiftX = gx * (pill ? hx * 0.62 : R * (flat ? 0.05 : 0.08));
-  const shiftY = gy * (pill ? hy * 0.36 : R * (flat ? 0.04 : 0.06));
+  const shiftX = rigOn ? 0 : gx * (pill ? hx * 0.62 : R * (flat ? 0.05 : 0.08));
+  const shiftY = rigOn ? 0 : gy * (pill ? hy * 0.36 : R * (flat ? 0.04 : 0.06));
   /** Pill eyes: head-turn roll with the horizontal gaze (degrees), and the
    * springy settle after a blink. */
-  const roll = pill ? gx * 5 : 0;
+  const roll = pill && !rigOn ? gx * 5 : 0;
   const rebound = pill && !reduced ? (fr.rebound ?? 0) : 0;
 
   const headK = det < 0.5 ? 0.5 : 1;
   const nod = fr.state === "accepted" && !reduced ? nodCurve(vst) * (det < 0.5 ? 2 : 3) * px : 0;
-  const head = `translate(${f(P.hx * headK)} ${f(P.hy * headK + nod)}) rotate(${f(P.hr * (det < 0.5 ? 0.45 : 1))} 0 ${f(R)})`;
+  // Head style: a slow breath, a tiny scale and drift around the eye line.
+  const breath = style === "head" && fr.rig && !reduced ? fr.rig.breathe : 0;
+  const breathe = breath ? ` translate(0 ${f(hy + HEAD.breathDrift * breath)}) scale(${f(1 + HEAD.breathScale * breath)}) translate(0 ${f(-hy)})` : "";
+  const head = `translate(${f(P.hx * headK)} ${f(P.hy * headK + nod)}) rotate(${f(P.hr * (det < 0.5 ? 0.45 : 1))} 0 ${f(R)})${breathe}`;
   // Antenna and halo trail the head on a loose spring.
   const wobX = clamp((P.ax - P.hx) * 1.4 - P.hr * 0.25, -R, R);
   const wobY = clamp((P.ay - P.hy) * 1.2, -R, R);
@@ -328,6 +347,10 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
       hw,
     };
   });
+
+  const place: PillPlacement | null = rigOn
+    ? placePill(style, { x: gx, y: gy }, fr.rig ? fr.rig.head : { x: gx, y: gy }, { d, hx, hy, mouthX: 0, mouthY: hy * 0.86 })
+    : null;
 
   const rot = (s: number) => -s * face.eyes.tilt * 16;
   const local = (s: number) => `rotate(${f(rot(s))}) scale(${s} 1)`;
@@ -541,36 +564,59 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
       const happy = lc > 0 ? smooth(lc) * smooth((e.l - 0.3) / 0.3) : 0;
       const h = lerp(Math.max(bar, open), bar * 1.35, happy);
       const cy = lerp(open >= bar ? (top + bot) / 2 : bot - bar / 2, -hy * 0.18, happy);
-      const far = Math.max(0, s * gx) * 0.08;
-      const H = h * Math.max(0.3, 1 + P.stretch + vert - rebound * 0.1);
-      const W = 2 * hx * (1 + 0.1 * closed + 0.14 * happy - 0.35 * P.stretch + rebound * 0.05 - far);
+      const pl = place ? place.eyes[left ? 0 : 1] : null;
+      const far = pl ? 0 : Math.max(0, s * gx) * 0.08;
+      const H = h * Math.max(0.3, 1 + P.stretch + (pl ? 0 : vert) - rebound * 0.1) * (pl ? pl.sy : 1);
+      const W = 2 * hx * (1 + 0.1 * closed + 0.14 * happy - 0.35 * P.stretch + rebound * 0.05 - far) * (pl ? pl.sx : 1);
       const curve = clamp(P.closedCurve, -1, 1) * closed;
       // Only a capsule bends; a taller bean first flattens into one.
       const bend = lerp(curve, 1, happy) * smooth((2 * rr - H) / (rr * 0.8));
       const ang = roll - s * (face.eyes.tilt * 16 + (left ? P.tL : P.tR) * 14) + e.blink * 4 * (gx < -0.05 ? -1 : 1);
-      const ex = s * d + shiftX;
-      const ey = shiftY + e.lift + s * gx * hy * 0.2 + rebound * hy * 0.16;
+      const ex = pl ? pl.x : s * d + shiftX;
+      const ey = pl ? pl.y + e.lift + rebound * hy * 0.16 : shiftY + e.lift + s * gx * hy * 0.2 + rebound * hy * 0.16;
+      const ecy = pl ? cy * pl.sy : cy;
       const hk = clamp(P.heart, 0, 1.4);
       const bean = 1 - 0.65 * Math.min(1, hk);
       let body: ReactElement;
-      if (Math.abs(bend) > 0.01 && H < 2 * rr) {
+      const bent = Math.abs(bend) > 0.01 && H < 2 * rr;
+      if (bent) {
         const half = Math.max(0, W / 2 - H / 2);
         const depth = bend * W * 0.3;
-        const y1 = cy + depth / 2;
+        const y1 = ecy + depth / 2;
         body = <path d={`M${f(-half)},${f(y1)}Q0,${f(y1 - 2 * depth)} ${f(half)},${f(y1)}`} fill="none" stroke={sclera} strokeWidth={f(H)} strokeLinecap="round" />;
       } else {
-        body = <path d={pillPath(W, H, rr, cy)} fill={sclera} />;
+        body = <path d={pillPath(W, H, rr, ecy)} fill={gloss ? url(left ? "gloss-l" : "gloss-r") : sclera} />;
       }
       const shineAmt = luminance(sclera) < 0.8 ? face.eyes.shine * (1 - closed) : 0;
+      // Gloss: a specular highlight lit from the top left. It stays with the
+      // light while the face turns, so it slides across the bean against the
+      // turn. In bean-local units, where x is mirrored for the left eye.
+      const spec = gloss && place && !bent ? (1 - closed) * (1 - happy) : 0;
+      // Kept inside the bean (it would poke past the rounded corners).
+      const specX = s * clamp(GLOSS.x + (place?.hl.x ?? 0), -0.27, 0.22) * W;
+      const specY = ecy + clamp(GLOSS.y + (place?.hl.y ?? 0), -0.32, -0.12) * H;
+      const specK = tiny ? 0.8 : 1;
       return (
         <g key={s} opacity={1 - off} transform={`translate(${f(ex)} ${f(ey)}) rotate(${f(ang)}) scale(${f(s * e.sc)} ${f(e.sc)})`}>
-          {glow > 0.01 ? <ellipse cy={f(cy)} rx={f(W * 0.78)} ry={f(H * 0.74)} fill={url("glow")} opacity={glow * (1 - 0.6 * closed)} /> : null}
-          <g opacity={hk > 0.02 ? 1 - Math.min(1, hk) * 0.85 : 1} transform={bean < 1 ? `translate(0 ${f(cy)}) scale(${f(bean)}) translate(0 ${f(-cy)})` : undefined}>
+          {glow > 0.01 ? <ellipse cy={f(ecy)} rx={f(W * 0.78)} ry={f(H * 0.74)} fill={url("glow")} opacity={glow * (1 - 0.6 * closed)} /> : null}
+          {gloss && !tiny ? <ellipse cy={f(ecy)} rx={f(W * 0.95)} ry={f(H * 0.78)} fill={url("amb")} /> : null}
+          <g opacity={hk > 0.02 ? 1 - Math.min(1, hk) * 0.85 : 1} transform={bean < 1 ? `translate(0 ${f(ecy)}) scale(${f(bean)}) translate(0 ${f(-ecy)})` : undefined}>
             {body}
-            {shineAmt > 0.02 ? <ellipse cx={f(-W * 0.18)} cy={f(cy - H * 0.27)} rx={f(W * 0.14)} ry={f(H * 0.09)} fill={lighten(sclera, 0.75)} opacity={shineAmt * 0.8} /> : null}
+            {spec > 0.02 ? (
+              <ellipse
+                cx={f(specX)}
+                cy={f(specY)}
+                rx={f(W * 0.17 * specK)}
+                ry={f(Math.min(H * 0.1, W * 0.2) * specK)}
+                fill={url("spec")}
+                opacity={spec}
+                transform={`rotate(${f(s * -24)} ${f(specX)} ${f(specY)})`}
+              />
+            ) : null}
+            {shineAmt > 0.02 ? <ellipse cx={f(-W * 0.18)} cy={f(ecy - H * 0.27)} rx={f(W * 0.14)} ry={f(H * 0.09)} fill={lighten(sclera, 0.75)} opacity={shineAmt * 0.8} /> : null}
           </g>
-          {hk > 0.02 ? <path d={heart(0, cy, Math.max(hx, hy) * 0.78 * hk)} fill={pink} /> : null}
-          {pillLashes(W, H, cy, closed)}
+          {hk > 0.02 ? <path d={heart(0, ecy, Math.max(hx, hy) * 0.78 * hk)} fill={pink} /> : null}
+          {pillLashes(W, H, ecy, closed)}
         </g>
       );
     });
@@ -680,12 +726,19 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
   const mouthOp = pill ? Math.max(det, 1 - off) : det;
   const mouthRoll = roll * 0.8;
   const mouthDrop = pill ? ((fr.blinkL + fr.blinkR) / 2) * hy * 0.14 + rebound * hy * 0.1 : 0;
-  const mouthAt = pill
-    ? { x: P.mouthX * R * 0.3 + shiftX * 0.55, y: hy * 0.86 + shiftY * 0.5 + mouthDrop }
-    : { x: P.mouthX * R * 0.3, y: mouthY };
+  const mouthAt = place
+    ? { x: place.mouth.x + P.mouthX * R * 0.3, y: place.mouth.y + mouthDrop }
+    : pill
+      ? { x: P.mouthX * R * 0.3 + shiftX * 0.55, y: hy * 0.86 + shiftY * 0.5 + mouthDrop }
+      : { x: P.mouthX * R * 0.3, y: mouthY };
 
   const mouth = () => {
     const m = mouthShape();
+    if (m && place) {
+      // Foreshortened with the turn, around its own anchor.
+      const { x, y } = mouthAt;
+      return <g transform={`translate(${f(x)} ${f(y)}) scale(${f(place.mouth.sx)} ${f(place.mouth.sy)}) translate(${f(-x)} ${f(-y)})`}>{m}</g>;
+    }
     return m && mouthRoll ? <g transform={`rotate(${f(mouthRoll)} ${f(mouthAt.x)} ${f(mouthAt.y)})`}>{m}</g> : m;
   };
 
@@ -1117,6 +1170,7 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
         <filter id={id("blur")} x="-50%" y="-50%" width="200%" height="200%">
           <feGaussianBlur stdDeviation={f(R * 0.2)} />
         </filter>
+        {gloss && place ? glossDefs(id, sclera, place, tiny) : null}
         <linearGradient id={id("lens")} x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor={lensTop} />
           <stop offset="55%" stopColor={darken(accC, 0.5)} />
@@ -1137,6 +1191,54 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
       {symbol()}
       {zees()}
       {sparkles()}
+    </>
+  );
+}
+
+/** Gloss (styles gloss and head): the shading of each bean, the specular
+ * highlight and a faint ambient glow. The body gradient is centred toward
+ * the light at the top left and slides against the turn with the highlight,
+ * so the rim on the far side of the turn is the darkest. Bounding-box units,
+ * so it follows the bean as it squashes; the left bean is drawn mirrored, so
+ * it gets the mirrored gradient. On the closed island (tiny) the shading is
+ * flatter, so the beans stay crisp at 34 px. */
+function glossDefs(id: (n: string) => string, sclera: string, place: PillPlacement, tiny: boolean): ReactElement {
+  const hl = place.hl;
+  const cx = 0.5 + (GLOSS.x + hl.x) * 0.7;
+  const cy = 0.5 + (GLOSS.y + hl.y) * 0.6;
+  // A cool shade for the turned-away side, like porcelain under a white
+  // light: lit top, a darker terminator near the far rim, then a thin
+  // brighter bounce right at the edge.
+  const shade = "#7E889C";
+  const k = tiny ? 0.55 : 1;
+  const stops: [number, string][] = [
+    [0, lighten(sclera, 0.5)],
+    [0.42, mix(sclera, shade, 0.06 * k)],
+    [0.74, mix(sclera, shade, 0.22 * k)],
+    [0.9, mix(sclera, shade, 0.38 * k)],
+    [1, mix(sclera, shade, 0.26 * k)],
+  ];
+  const body = (name: string, x: number) => (
+    <radialGradient id={id(name)} cx={f(x)} cy={f(cy)} r="0.9" fx={f(x)} fy={f(cy)}>
+      {stops.map(([o, c]) => (
+        <stop key={o} offset={o} stopColor={c} />
+      ))}
+    </radialGradient>
+  );
+  return (
+    <>
+      {body("gloss-r", cx)}
+      {body("gloss-l", 1 - cx)}
+      <radialGradient id={id("spec")}>
+        <stop offset="0%" stopColor="#FFFFFF" stopOpacity={1} />
+        <stop offset="62%" stopColor="#FFFFFF" stopOpacity={0.95} />
+        <stop offset="100%" stopColor="#FFFFFF" stopOpacity={0} />
+      </radialGradient>
+      <radialGradient id={id("amb")}>
+        <stop offset="0%" stopColor={sclera} stopOpacity={0.07} />
+        <stop offset="70%" stopColor={sclera} stopOpacity={0.025} />
+        <stop offset="100%" stopColor={sclera} stopOpacity={0} />
+      </radialGradient>
     </>
   );
 }
