@@ -48,6 +48,10 @@ pub const FEATURE: &str = "island";
 /// "device", no audio). Without it the app sends the voice as audio, even
 /// with on-device speech-to-text switched on.
 pub const FEATURE_DEVICE_STT: &str = "island_device_stt";
+/// The hello_ack feature of a synth that takes, with such a transcript,
+/// the tone of the voice estimated on this computer (owner.message
+/// `voice_tone`). Without it the tone is left out.
+pub const FEATURE_DEVICE_TONE: &str = "island_device_tone";
 /// `capabilities.island.version`.
 pub const VERSION: u32 = 1;
 
@@ -64,6 +68,8 @@ pub const MAX_FACE_BYTES: usize = 4096;
 pub const MAX_TEXT_CHARS: usize = 4000;
 /// The longest transcript of a voice message recognized on this computer.
 pub const MAX_TRANSCRIPT_CHARS: usize = 8000;
+/// The longest voice tone (the protocol's limit; the app writes far less).
+pub const MAX_TONE_CHARS: usize = 600;
 /// `owner.message` `stt`: the transcript was recognized on this computer.
 pub const STT_DEVICE: &str = "device";
 /// The send error of a transcript to a synth that does not take one (the
@@ -314,7 +320,7 @@ impl SttOffer {
 
 /// The owner's island. Off on a fresh install and in a settings file
 /// written before the island existed (a test feature for now).
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IslandSettings {
     #[serde(default)]
     pub enabled: bool,
@@ -338,6 +344,30 @@ pub struct IslandSettings {
     /// the name alone.
     #[serde(default)]
     pub wake_phrase: String,
+    /// With speech recognized here: estimate the tone of the voice here
+    /// too (owner.message `voice_tone`). On by default, and in a settings
+    /// file written before the switch existed.
+    #[serde(default = "yes")]
+    pub stt_tone: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for IslandSettings {
+    fn default() -> Self {
+        IslandSettings {
+            enabled: false,
+            main_synth: String::new(),
+            hotkeys: Hotkeys::default(),
+            stt: SttMode::default(),
+            stt_offer: SttOffer::default(),
+            wake: false,
+            wake_phrase: String::new(),
+            stt_tone: true,
+        }
+    }
 }
 
 /// The longest extra wake phrase, in characters.
@@ -427,6 +457,10 @@ pub struct OwnerMessage {
     /// instead of the audio (`stt` "device"). Only to a synth with
     /// `FEATURE_DEVICE_STT`; never together with `audio`.
     pub voice_transcript: Option<String>,
+    /// With `voice_transcript` only: the tone of the voice estimated on
+    /// this computer. Sent only to a synth with `FEATURE_DEVICE_TONE`
+    /// (`send` leaves it out otherwise); cut to `MAX_TONE_CHARS`.
+    pub voice_tone: Option<String>,
 }
 
 /// A fresh client_id: a random UUID (version 4).
@@ -556,6 +590,12 @@ impl OwnerMessage {
             params["voice_transcript"] = json!(t);
             params["stt"] = json!(STT_DEVICE);
         }
+        if let Some(tone) = self.voice_tone.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            if transcript.is_none() {
+                return Err(SendError::new("failed", "a voice tone goes only with a transcript"));
+            }
+            params["voice_tone"] = json!(tone.chars().take(MAX_TONE_CHARS).collect::<String>());
+        }
         if !images.is_empty() {
             params["images"] = Value::Array(images);
         }
@@ -619,6 +659,11 @@ pub fn supports_device_stt(slot: &LinkSlot) -> bool {
     supports(slot) && slot.synth.read().unwrap().as_ref().is_some_and(|ack| ack.has(FEATURE_DEVICE_STT))
 }
 
+/// Does this link's synth take the tone estimated here with a transcript?
+pub fn supports_device_tone(slot: &LinkSlot) -> bool {
+    supports_device_stt(slot) && slot.synth.read().unwrap().as_ref().is_some_and(|ack| ack.has(FEATURE_DEVICE_TONE))
+}
+
 /// Send one message to this synth. The answer comes before the synth's
 /// turn (the synth's iron rule), so this waits only for "accepted".
 ///
@@ -644,7 +689,15 @@ pub async fn send(shared: &Arc<Shared>, synth_id: &str, msg: &OwnerMessage) -> R
         if msg.voice_transcript.is_some() && !supports_device_stt(&slot) {
             return Err(SendError::new(NO_DEVICE_STT, "the synth does not take a transcript"));
         }
-        match slot.requests.call_within("owner.message", params.clone(), SEND_TIMEOUT).await {
+        // The tone only to a synth that takes it (the link may have come
+        // back with another version since the last try).
+        let mut params = params.clone();
+        if !supports_device_tone(&slot) {
+            if let Some(p) = params.as_object_mut() {
+                p.remove("voice_tone");
+            }
+        }
+        match slot.requests.call_within("owner.message", params, SEND_TIMEOUT).await {
             Ok(answer) => return accepted_of(&answer),
             Err(e) if !retried && e.contains("dropped") => {
                 retried = true;

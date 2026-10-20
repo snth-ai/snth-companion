@@ -277,6 +277,8 @@ struct Hold {
     stt: Speech,
     /// Started by the synth's name, not a key (`wake/`).
     wake: bool,
+    /// The tone of voice, listened to while the speech is recognized here.
+    tone: Option<stt::tone::ToneSession>,
 }
 
 /// Who recognizes a hold's speech.
@@ -304,6 +306,9 @@ pub struct Island {
     pub stt: stt::Stt,
     /// Wake by name: its models and its listening thread.
     pub wake_word: wake::Wake,
+    /// The tone of voice estimated here (stt/tone): its model, the owner's
+    /// usual manner.
+    pub tone: stt::tone::Tone,
 }
 
 impl Island {
@@ -319,6 +324,7 @@ impl Island {
             mic_asked: AtomicBool::new(false),
             stt: stt::Stt::new(data_dir),
             wake_word: wake::Wake::new(data_dir),
+            tone: stt::tone::Tone::new(data_dir),
         }
     }
 }
@@ -806,6 +812,7 @@ fn start_hold(ctx: &Arc<Ctx>, kind: HotkeyKind, synth_id: String) {
     if route == stt::Route::Device {
         ctx.island.stt.warm();
     }
+    let toned = warm_tone(ctx, route);
     // The picture first, at the press, with the island out of it.
     let picture = (kind == HotkeyKind::ScreenVoice).then(|| {
         let ctx = ctx.clone();
@@ -826,7 +833,8 @@ fn start_hold(ctx: &Arc<Ctx>, kind: HotkeyKind, synth_id: String) {
                     stt::Route::Device => start_stt(&ctx2, &recording),
                     stt::Route::Synth(why) => Speech::Synth(why),
                 };
-                let h = Hold { recording, picture, synth_id, stt, wake: false };
+                let tone = start_tone(&ctx2, toned, &recording, &stt);
+                let h = Hold { recording, picture, synth_id, stt, wake: false, tone };
                 // Under `running`'s lock, so a release either finds this
                 // hold there or has left its end in `early` already.
                 let early = {
@@ -907,6 +915,34 @@ fn stt_route(ctx: &Arc<Ctx>) -> stt::Route {
     stt::route(mode, stt::available(), ctx.island.stt.models.ready(), takes_text)
 }
 
+/// The tone side of a hold that records now, when its speech is
+/// recognized here and the tone is wanted (`toned`, decided at the press,
+/// when the model was warmed).
+fn start_tone(ctx: &Arc<Ctx>, toned: bool, recording: &audio::Recording, speech: &Speech) -> Option<stt::tone::ToneSession> {
+    if !toned || !matches!(speech, Speech::Device(_)) {
+        return None;
+    }
+    let tap = recording.tap();
+    ctx.island.tone.hold(Box::new(move |from| tap.read_from(from)))
+}
+
+/// Warm the tone's model for a hold starting now (and fetch it when it is
+/// missing). True when the tone is estimated for this hold.
+fn warm_tone(ctx: &Arc<Ctx>, route: stt::Route) -> bool {
+    let toned = route == stt::Route::Device && tone_wanted(ctx);
+    if toned {
+        ctx.island.tone.warm();
+        tone_download(ctx, false);
+    }
+    toned
+}
+
+/// The tone of voice is estimated for the next hold: the owner's switch
+/// is on and the main synth takes it (`island_device_tone`).
+fn tone_wanted(ctx: &Arc<Ctx>) -> bool {
+    ctx.core.island().stt_tone && ctx.core.island_main().is_some_and(|m| core_island::supports_device_tone(&m))
+}
+
 /// Start recognizing a hold that records now; its words go to the island
 /// as they come.
 fn start_stt(ctx: &Arc<Ctx>, recording: &audio::Recording) -> Speech {
@@ -957,7 +993,7 @@ async fn take_picture(ctx: &Arc<Ctx>) -> Result<core_island::Image, String> {
 /// the voice detector heard no speech in the whole recording
 /// (`stt::release`). One log line says which and why.
 async fn finish(ctx: &Arc<Ctx>, kind: HotkeyKind, h: Hold) {
-    let Hold { recording, picture, synth_id, stt, wake } = h;
+    let Hold { recording, picture, synth_id, stt, wake, tone } = h;
     let released = Instant::now();
     // From the release until the message is on its way the island says
     // "sending", whatever happens below (a panic included).
@@ -984,6 +1020,11 @@ async fn finish(ctx: &Arc<Ctx>, kind: HotkeyKind, h: Hold) {
             emit_view(ctx);
             return;
         }
+    };
+    // The tone first, so it runs while the last words are decoded.
+    let tone = match (&stt, tone) {
+        (Speech::Device(_), Some(t)) => Some(t.finish(captured.pcm.clone())),
+        _ => None,
     };
     // The words, recognized here (bounded by stt::RELEASE_WAIT).
     let answer = match stt {
@@ -1045,20 +1086,29 @@ async fn finish(ctx: &Arc<Ctx>, kind: HotkeyKind, h: Hold) {
                     return;
                 }
             };
-            connect_core::logln!("island: speech-to-text: sent transcript {waited} ms after release ({} characters, {secs:.1} s of audio)", text.chars().count());
-            let msg = OwnerMessage { client_id: core_island::new_client_id(), mode, text: String::new(), audio: None, images, voice_transcript: Some(text.clone()) };
+            let voice_tone = match tone {
+                Some(answer) => describe_tone(ctx, answer, &text).await,
+                None => None,
+            };
+            let waited = released.elapsed().as_millis();
+            connect_core::logln!(
+                "island: speech-to-text: sent transcript {waited} ms after release ({} characters, {secs:.1} s of audio{})",
+                text.chars().count(),
+                if voice_tone.is_some() { ", with the tone" } else { "" }
+            );
+            let msg = OwnerMessage { client_id: core_island::new_client_id(), mode, text: String::new(), audio: None, images, voice_transcript: Some(text.clone()), voice_tone };
             ctx.island.inner.lock().unwrap().transcript = Some(text);
             (msg, Some(audio))
         }
         stt::Release::Audio(why) => {
             connect_core::logln!("island: speech-to-text: sent audio because {why} ({secs:.1} s of audio, {waited} ms after release)");
             ctx.island.inner.lock().unwrap().transcript = None;
-            (OwnerMessage { client_id: core_island::new_client_id(), mode, text: String::new(), audio: Some(audio), images, voice_transcript: None }, None)
+            (OwnerMessage { client_id: core_island::new_client_id(), mode, text: String::new(), audio: Some(audio), images, voice_transcript: None, voice_tone: None }, None)
         }
         stt::Release::PictureOnly => {
             connect_core::logln!("island: speech-to-text: sent the screenshot alone: silence (vad) ({secs:.1} s of audio)");
             ctx.island.inner.lock().unwrap().transcript = None;
-            (OwnerMessage { client_id: core_island::new_client_id(), mode: Mode::ScreenVoice, text: String::new(), audio: None, images, voice_transcript: None }, None)
+            (OwnerMessage { client_id: core_island::new_client_id(), mode: Mode::ScreenVoice, text: String::new(), audio: None, images, voice_transcript: None, voice_tone: None }, None)
         }
         stt::Release::Silent => {
             connect_core::logln!("island: speech-to-text: dropped: silence (vad) ({secs:.1} s of audio)");
@@ -1076,6 +1126,38 @@ async fn finish(ctx: &Arc<Ctx>, kind: HotkeyKind, h: Hold) {
     // `send_with` says "sending" from here on.
     drop(recognizing);
     send_with(ctx, &synth_id, msg, fallback).await;
+}
+
+/// The tone line for a hold sent as text: the best answer of the tone
+/// thread within `TONE_WAIT` of the text (none: the message goes without
+/// it), described against the owner's usual manner. One log line, without
+/// the words.
+async fn describe_tone(ctx: &Arc<Ctx>, answer: std::sync::mpsc::Receiver<stt::tone::Acoustic>, text: &str) -> Option<String> {
+    let ctx = ctx.clone();
+    let text = text.to_string();
+    let described = tokio::task::spawn_blocking(move || {
+        let t = Instant::now();
+        let got = stt::tone::wait_for(&answer, stt::tone::TONE_WAIT);
+        let waited = t.elapsed().as_millis();
+        match got {
+            Some(a) => {
+                let line = ctx.island.tone.describe(&a, &text);
+                connect_core::logln!(
+                    "island: tone: {} characters, emotion {} ({}), waited {waited} ms",
+                    line.chars().count(),
+                    a.emotion.map(|e| { let (l, p) = e.top(); format!("{l} {p:.2}") }).unwrap_or_else(|| "none".into()),
+                    if a.complete { "complete" } else { "from the runs while held" }
+                );
+                Some(line).filter(|l| !l.is_empty())
+            }
+            None => {
+                connect_core::logln!("island: tone: not ready within {waited} ms; sent without it");
+                None
+            }
+        }
+    })
+    .await;
+    described.ok().flatten()
 }
 
 /// Send one message and follow it.
@@ -1104,6 +1186,7 @@ async fn send_with(ctx: &Arc<Ctx>, synth_id: &str, mut msg: OwnerMessage, fallba
         if e.code == core_island::NO_DEVICE_STT {
             connect_core::logln!("island: the synth does not take a transcript; sending the voice");
             msg.voice_transcript = None;
+            msg.voice_tone = None;
             msg.audio = Some(audio);
             ctx.island.inner.lock().unwrap().transcript = None;
             emit_view(ctx);
@@ -1182,7 +1265,7 @@ pub async fn submit_text(ctx: &Arc<Ctx>, text: String) -> Result<(), String> {
         code
     })?;
     ctx.island.inner.lock().unwrap().transcript = None;
-    let msg = OwnerMessage { client_id: core_island::new_client_id(), mode: Mode::Text, text, audio: None, images: vec![], voice_transcript: None };
+    let msg = OwnerMessage { client_id: core_island::new_client_id(), mode: Mode::Text, text, audio: None, images: vec![], voice_transcript: None, voice_tone: None };
     send(ctx, &synth_id, msg).await;
     Ok(())
 }
@@ -1194,7 +1277,7 @@ pub async fn ask_design(ctx: &Arc<Ctx>, synth_id: &str) -> Result<(), String> {
         crate::i18n::Lang::Ru => "Придумай себе лицо для острова SNTH Connect на моём компьютере (инструмент connect_face): глаза, рот, цвета, аксессуар, как двигаешься. Такое, какое тебе по душе, и расскажи, что получилось и почему так.",
         _ => "Design your own face for the SNTH Connect island on my computer (your connect_face tool): eyes, mouth, colours, an accessory, how you move. Make it feel like you, and tell me what you chose and why.",
     };
-    let msg = OwnerMessage { client_id: core_island::new_client_id(), mode: Mode::Text, text: text.into(), audio: None, images: vec![], voice_transcript: None };
+    let msg = OwnerMessage { client_id: core_island::new_client_id(), mode: Mode::Text, text: text.into(), audio: None, images: vec![], voice_transcript: None, voice_tone: None };
     ctx.core.owner_message(synth_id, &msg).await.map(|_| ()).map_err(|e| e.code)
 }
 
@@ -1208,6 +1291,10 @@ fn stt_changed(ctx: &Arc<Ctx>) -> Arc<dyn Fn() + Send + Sync> {
         tauri::async_runtime::spawn(async move {
             emit_view(&ctx);
             crate::state::emit_state(&ctx);
+            // The speech model is here: the tone's model follows it.
+            if ctx.island.stt.models.ready() {
+                tone_download(&ctx, false);
+            }
             // "Ready" leaves the island by itself.
             if ctx.island.stt.models.ready() && ctx.island.inner.lock().unwrap().stt_follow {
                 tokio::time::sleep(STT_READY_FOR + Duration::from_millis(200)).await;
@@ -1223,7 +1310,40 @@ pub fn stt_download(ctx: &Arc<Ctx>) -> Result<(), String> {
     if !stt::available() {
         return Err("unsupported".into());
     }
-    ctx.island.stt.models.download(stt_changed(ctx))
+    let r = ctx.island.stt.models.download(stt_changed(ctx));
+    tone_download(ctx, true);
+    r
+}
+
+/// Fetch the tone's emotion model when the switch is on, speech is
+/// recognized here and its model is here already (the big one first).
+/// `asked`: the owner asked now, so a recent failure is tried again.
+fn tone_download(ctx: &Arc<Ctx>, asked: bool) {
+    let s = ctx.core.island();
+    if !s.stt_tone || s.stt != SttMode::Device || !ctx.island.stt.models.ready() {
+        return;
+    }
+    let ctx2 = ctx.clone();
+    ctx.island.tone.download(
+        asked,
+        Arc::new(move || {
+            ctx2.island.tone.note_status();
+            let ctx = ctx2.clone();
+            tauri::async_runtime::spawn(async move { crate::state::emit_state(&ctx) });
+        }),
+    );
+}
+
+/// The tone switch in Settings. On: its model is fetched if it is not
+/// here (once the speech model is).
+pub fn stt_tone_set(ctx: &Arc<Ctx>, on: bool) {
+    ctx.core.set_island(|i| i.stt_tone = on);
+    if on {
+        tone_download(ctx, true);
+    } else {
+        ctx.island.tone.models.cancel();
+        ctx.island.tone.unload();
+    }
 }
 
 /// The switch in Settings. On: the model is fetched if it is not here.
@@ -1281,7 +1401,9 @@ pub fn stt_card_hide(ctx: &Arc<Ctx>) {
 
 /// "Delete the model": the files go, and the speech goes to the synth.
 pub fn stt_delete(ctx: &Arc<Ctx>) -> Result<(), String> {
-    let result = ctx.island.stt.models.delete();
+    ctx.island.tone.unload();
+    let tone = ctx.island.tone.models.delete();
+    let result = ctx.island.stt.models.delete().and(tone);
     ctx.core.set_island(|i| i.stt = SttMode::Synth);
     ctx.island.inner.lock().unwrap().stt_follow = false;
     emit_view(ctx);

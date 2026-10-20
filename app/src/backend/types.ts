@@ -412,6 +412,9 @@ export interface IslandSettings {
   wake: boolean;
   /** The owner's extra wake phrase; "" = the name alone. */
   wake_phrase: string;
+  /** With speech recognized here: estimate the tone of voice here too
+   * (on by default). */
+  stt_tone: boolean;
 }
 
 /** Why wake by name does not listen at all yet. */
@@ -843,6 +846,9 @@ export interface Backend {
   /** On-device speech-to-text on or off. Err: unsupported. On fetches the
    * model when it is not here. */
   islandSttSet(mode: SttMode): Promise<UiState>;
+  /** The tone of voice estimated on this computer, on or off. On fetches
+   * its model (after the speech model) when it is not here. */
+  islandSttToneSet(on: boolean): Promise<UiState>;
   /** Fetch the model (again). Err: no_space, unsupported. */
   islandSttDownload(): Promise<UiState>;
   islandSttCancel(): Promise<UiState>;

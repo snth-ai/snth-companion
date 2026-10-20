@@ -467,6 +467,7 @@ fn main() {
             commands::island_hotkey_set,
             commands::island_hotkey_reset,
             commands::island_stt_set,
+            commands::island_stt_tone_set,
             commands::island_stt_download,
             commands::island_stt_cancel,
             commands::island_stt_delete,

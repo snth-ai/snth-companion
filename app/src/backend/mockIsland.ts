@@ -152,6 +152,7 @@ export function stagedIslandState(os: string, links: LinkBrief[]): IslandState {
       stt_offer: stt ? "accepted" : "pending",
       wake: wakeOn,
       wake_phrase: "",
+      stt_tone: true,
     },
     main_synth: mainId,
     faces: scenario === "off" ? {} : { mia: MIA_FACE },
@@ -239,6 +240,11 @@ export class MockIslandScreen {
     isl.settings.stt = mode;
     if (isl.settings.stt_offer === "pending" || isl.settings.stt_offer === "shown") isl.settings.stt_offer = mode === "device" ? "accepted" : "declined";
     if (mode === "device") return this.sttDownload().catch(() => this.changed());
+    return this.changed();
+  }
+
+  sttToneSet(on: boolean): Promise<UiState> {
+    this.state().island.settings.stt_tone = on;
     return this.changed();
   }
 

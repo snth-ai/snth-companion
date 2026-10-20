@@ -2037,6 +2037,10 @@ class MockBackend implements Backend {
     return this.islandScreen.sttSet(mode);
   }
 
+  islandSttToneSet(on: boolean) {
+    return this.islandScreen.sttToneSet(on);
+  }
+
   islandSttDownload() {
     return this.islandScreen.sttDownload();
   }

@@ -89,3 +89,8 @@ objc2-foundation = "0.3"
 # VAD) that still builds on Rust 1.85; 0.16 needs 1.88.
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 whisper-rs = { version = "=0.15.1", features = ["metal"] }
+# The island's tone of voice (island/stt/tone/emotion.rs): emotion2vec+
+# base as ONNX, on the CPU. Statically linked ONNX Runtime 1.22 (the
+# prebuilt library ort's build script fetches). rc.10 is the last line that
+# builds on Rust 1.85; later ones need 1.88.
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "download-binaries"] }

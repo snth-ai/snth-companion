@@ -74,6 +74,7 @@ export const tauriBackend: Backend = {
   islandAskDesign: (synthId) => invoke("island_ask_design", { synthId }),
   islandMic: () => invoke("island_mic"),
   islandSttSet: (mode) => invoke("island_stt_set", { mode }),
+  islandSttToneSet: (on) => invoke("island_stt_tone_set", { on }),
   islandSttDownload: () => invoke("island_stt_download"),
   islandSttCancel: () => invoke("island_stt_cancel"),
   islandSttDelete: () => invoke("island_stt_delete"),
