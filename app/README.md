@@ -98,6 +98,17 @@ second (breathing). The lab is a dev page only, not in `vite build`.
 `node scripts/build-face-lab.mjs`
 writes a self-contained single-file copy to `/tmp/face-lab/index.html`.
 
+Under the columns the lab has "Наряди Дружка" (`DressLab.tsx`): Buddy in
+C2 at 84 and 34 px with pickers for accessory, eye colour, shine, glow,
+mouth, brows, lashes and blush, all eleven accessories live at once, and a
+button that copies the look as a FaceConfig. `?dress=shots` (with
+`cols=states` or `rows=colours|mouths|brows|lashes`) and `?dress=sweep`
+show only its review matrices. On pill faces brows, cheeks and every
+accessory go through the same turn as the beans (`pillWarp` in `rig.ts`,
+drawn in `pillWear.tsx`), any eye colour gets a gloss shaded for it
+(`glossStops` in `Face.tsx`), and the editor offers eye colour first, with
+quick picks. Other eye shapes draw exactly as before.
+
 URL parameters stage a screen or a state directly:
 
 | Parameter | Values |

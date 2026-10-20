@@ -14,7 +14,8 @@ import { useEffect, useId, useMemo, useRef, useState, type CSSProperties, type R
 import { darken, drain, lighten, luminance, mix, visibleOnBlack } from "./color";
 import { PILL_EYE, eyeGeom, f, heart, pillPath, softStar, sparkle } from "./geometry";
 import { EMOTE_LENGTH, FaceSim, HERO_TIME, LID_REST, nodCurve, stillFrame, styleOf, type Frame, type Vec } from "./motion";
-import { GLOSS, HEAD, HEAD_STYLES, placePill, type FaceAttention, type MotionStyle, type PillPlacement, type SmoothTuning } from "./rig";
+import { GLOSS, HEAD, HEAD_STYLES, pillWarp, placePill, type FaceAttention, type FaceWarp, type MotionStyle, type PillPlacement, type SmoothTuning } from "./rig";
+import { pillWear, type Wear } from "./pillWear";
 import { clampFace, type FaceConfig, type FaceState, type IdleEmote } from "./schema";
 
 /** Below this height (px) brows, mouth and accessories are hidden. */
@@ -265,7 +266,13 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
   const irisC = tone(face.eyes.iris.color);
   const pupilC = tone(face.eyes.pupil.color);
   const cheekC = tone(face.cheeks.color);
-  const glowC = flat || pill ? sclera : accent;
+  // Pill eyes may be any colour. The bean keeps a near-black colour nearly
+  // as it is (a lighter rim keeps it on the black island, see beanRim); its
+  // glow, closed bar and ambient light are lifted until they read on black.
+  // All of these leave white and light colours unchanged.
+  const beanC = pill ? tone(visibleOnBlack(face.eyes.sclera, 0.02)) : sclera;
+  const glowC = pill ? tone(visibleOnBlack(face.eyes.sclera, 0.2)) : flat ? sclera : accent;
+  const barC = pill ? tone(visibleOnBlack(face.eyes.sclera, 0.1)) : sclera;
   const lidVisible = luminance(lidC) > 0.025;
   const thick = det < 0.5 ? 1.3 : 1;
 
@@ -379,9 +386,9 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
     };
   });
 
-  const placed: PillPlacement | null = rigOn
-    ? placePill(style, { x: gx, y: gy }, fr.rig ? fr.rig.head : { x: gx, y: gy }, { d, hx, hy, mouthX: 0, mouthY: hy * 0.86 }, fr.rig)
-    : null;
+  const pillGeom = { d, hx, hy, mouthX: 0, mouthY: hy * 0.86 };
+  const rigHead = fr.rig ? fr.rig.head : { x: gx, y: gy };
+  const placed: PillPlacement | null = rigOn ? placePill(style, { x: gx, y: gy }, rigHead, pillGeom, fr.rig) : null;
   // The closed island crops close around the eyes and sits against the top
   // of the screen: half the vertical travel there (continuous with the
   // detail level, so opening and closing never jumps).
@@ -396,6 +403,21 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
         mouth: { ...placed.mouth, y: hy * 0.86 + (placed.mouth.y - hy * 0.86) * vk },
       }
     : null;
+  /** Pill faces: where the turned face draws any point of its plane, for
+   * brows, cheeks and accessories (pillWear.tsx). The same mapping and the
+   * same vertical damping as the beans; the sliding (classic) pill style
+   * just shifts with the beans. */
+  const warp: FaceWarp | null = !pill
+    ? null
+    : rigOn
+      ? (() => {
+          const w = pillWarp(style, { x: gx, y: gy }, rigHead, pillGeom, fr.rig);
+          return (x: number, y: number) => {
+            const p = w(x, y);
+            return { ...p, y: y + (p.y - y) * vk };
+          };
+        })()
+      : (x: number, y: number) => ({ x: x + shiftX, y: y + shiftY, sx: 1, sy: 1 });
 
   const rot = (s: number) => -s * face.eyes.tilt * 16;
   const local = (s: number) => `rotate(${f(rot(s))}) scale(${s} 1)`;
@@ -593,6 +615,9 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
    * bends (+ happy arch, - relaxed curve) and a smile under the eyes (high
    * l with lowCurve up) turns into a happy arch too. tL / tR turn each eye
    * (+ inner side lower), `stretch` makes both taller or flatter. */
+  /** Dark beans (luminance under 0.1) get a rim light so they stay on the
+   * black island; none for lighter colours. */
+  const rimAmt = pill ? smooth((0.1 - luminance(beanC)) / 0.09) : 0;
   const pillEyes = () => {
     const rr = hx * PILL_EYE.r;
     const bar = Math.max(hy * 0.24, 2.4 * px);
@@ -631,11 +656,21 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
         const half = Math.max(0, W / 2 - H / 2);
         const depth = bend * W * 0.3;
         const y1 = ecy + depth / 2;
-        body = <path d={`M${f(-half)},${f(y1)}Q0,${f(y1 - 2 * depth)} ${f(half)},${f(y1)}`} fill="none" stroke={sclera} strokeWidth={f(H)} strokeLinecap="round" />;
+        body = <path d={`M${f(-half)},${f(y1)}Q0,${f(y1 - 2 * depth)} ${f(half)},${f(y1)}`} fill="none" stroke={barC} strokeWidth={f(H)} strokeLinecap="round" />;
       } else {
-        body = <path d={pillPath(W, H, rr, ecy)} fill={gloss ? url(left ? "gloss-l" : "gloss-r") : sclera} />;
+        const d0 = pillPath(W, H, rr, ecy);
+        body = (
+          <>
+            <path d={d0} fill={gloss ? url(left ? "gloss-l" : "gloss-r") : beanC} />
+            {gloss && rimAmt > 0.01 ? (
+              <path d={d0} fill="none" stroke={url(left ? "rim-l" : "rim-r")} strokeWidth={f(Math.max(0.9 * px, W * 0.045))} opacity={rimAmt * (1 - closed * 0.5)} />
+            ) : null}
+          </>
+        );
       }
-      const shineAmt = luminance(sclera) < 0.8 ? face.eyes.shine * (1 - closed) : 0;
+      // Gloss draws shine as a stronger specular highlight (below); the flat
+      // pill style keeps its own soft spot.
+      const shineAmt = !gloss && luminance(sclera) < 0.8 ? face.eyes.shine * (1 - closed) : 0;
       // Gloss: a specular highlight lit from the top left. It stays with the
       // light while the face turns, so it slides across the bean against the
       // turn. In bean-local units, where x is mirrored for the left eye.
@@ -643,7 +678,14 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
       // Kept inside the bean (it would poke past the rounded corners).
       const specX = s * clamp(GLOSS.x + (place?.hl.x ?? 0), -0.27, 0.22) * W;
       const specY = ecy + clamp(GLOSS.y + (place?.hl.y ?? 0), -0.32, -0.12) * H;
-      const specK = tiny ? 0.8 : 1;
+      // Shine: a bigger, crisper highlight and, from about a quarter up, a
+      // small second catch-light low on the far side (shine 0 is the tuned
+      // C2 look).
+      const shine = clamp(face.eyes.shine, 0, 1);
+      const specK = (tiny ? 0.8 : 1) * (1 + 0.35 * shine);
+      const catchAmt = spec * smooth((shine - 0.2) / 0.4) * (tiny ? 0 : 1);
+      const catchX = s * clamp(0.2 + (place?.hl.x ?? 0) * 0.5, 0.05, 0.28) * W;
+      const catchY = ecy + clamp(0.24 + (place?.hl.y ?? 0) * 0.5, 0.12, 0.32) * H;
       return (
         <g key={s} opacity={1 - off} transform={`translate(${f(ex)} ${f(ey)}) rotate(${f(ang)}) scale(${(rigOn ? fs : f)(s * e.sc)} ${(rigOn ? fs : f)(e.sc)})`}>
           {glow > 0.01 ? <ellipse cy={f(ecy)} rx={f(W * 0.78)} ry={f(H * 0.74)} fill={url("glow")} opacity={glow * (1 - 0.6 * closed)} /> : null}
@@ -657,10 +699,11 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
                 rx={f(W * 0.17 * specK)}
                 ry={f(Math.min(H * 0.1, W * 0.2) * specK)}
                 fill={url("spec")}
-                opacity={spec}
+                opacity={Math.min(1, spec * (1 + 0.3 * shine))}
                 transform={`rotate(${f(s * -24)} ${f(specX)} ${f(specY)})`}
               />
             ) : null}
+            {catchAmt > 0.02 ? <circle cx={f(catchX)} cy={f(catchY)} r={f(Math.min(W, H) * 0.075)} fill="#FFFFFF" opacity={catchAmt * 0.75} /> : null}
             {shineAmt > 0.02 ? <ellipse cx={f(-W * 0.18)} cy={f(ecy - H * 0.27)} rx={f(W * 0.14)} ry={f(H * 0.09)} fill={lighten(sclera, 0.75)} opacity={shineAmt * 0.8} /> : null}
           </g>
           {hk > 0.02 ? <path d={heart(0, ecy, Math.max(hx, hy) * 0.78 * hk)} fill={pink} /> : null}
@@ -801,15 +844,18 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
     const inside = darken(mouthC, 0.72);
 
     if (style === "dot") {
-      const r = R * 0.11 * (1 + op * 1.7);
+      // Pill faces: sized to the beans, and never under about 1.5 px across.
+      const r = (pill ? Math.max(hy * 0.12, 0.75 * px) : R * 0.11) * (1 + op * 1.7);
       if (op < 0.1) return <circle cx={f(x0)} cy={f(y0)} r={f(r)} fill={mouthC} opacity={mouthOp} />;
       return <ellipse cx={f(x0)} cy={f(y0 + r * 0.2)} rx={f(r * 0.85)} ry={f(r * 1.1)} fill={inside} stroke={mouthC} strokeWidth={f(lw * 0.9)} opacity={mouthOp} />;
     }
 
     // A cat mouth stays a cat mouth while content; unhappy, it flattens.
     if (style === "cat" && sm >= -0.05) {
-      const w = R * 0.42;
-      const depth = R * (0.17 + Math.max(0, sm) * 0.08);
+      // Pill faces: as wide as their smile, so it reads beside the tall beans.
+      const ck = pill ? (hy * 0.62) / (R * 0.42) : 1;
+      const w = R * 0.42 * ck;
+      const depth = R * (0.17 + Math.max(0, sm) * 0.08) * ck;
       const y = y0 - R * 0.06;
       const lip = `M${f(x0 - w)},${f(y - depth * 0.35)}Q${f(x0 - w / 2)},${f(y + depth * 1.2)} ${f(x0)},${f(y)}Q${f(x0 + w / 2)},${f(y + depth * 1.2)} ${f(x0 + w)},${f(y - depth * 0.35)}`;
       return (
@@ -1086,8 +1132,12 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
   const symbolIn = reduced ? 1 : smooth(fr.st / 0.15);
 
   const symbol = (): ReactElement | null => {
+    // A dressed pill face may have a headphone cup, a lens or an arm where
+    // the symbol goes (the symbols stay beside the eye, the face turns
+    // under them): a thin black edge keeps the symbol readable on top.
+    const knock = pill && face.accessory !== "none";
     const at = (inner: ReactElement, dx = 0, dy = 0) => (
-      <g transform={`translate(${f(symbolX + dx)} ${f(dy)}) scale(${f(px * symbolK)})`} opacity={symbolIn}>
+      <g transform={`translate(${f(symbolX + dx)} ${f(dy)}) scale(${f(px * symbolK)})`} opacity={symbolIn} filter={knock ? url("knock") : undefined}>
         {inner}
       </g>
     );
@@ -1185,6 +1235,38 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
   };
 
   const lensTop = darken(accC, 0.85);
+  const wear: Wear | null = warp
+    ? pillWear({
+        face,
+        fr,
+        det,
+        tiny,
+        px,
+        reduced,
+        R,
+        hx,
+        hy,
+        d,
+        thick,
+        warp,
+        viewTop: view.y,
+        viewBottom: view.y + view.h,
+        headK,
+        eyes: [
+          { s: -1, sc: P.sL, lift: P.eyL * R },
+          { s: 1, sc: P.sR, lift: P.eyR * R },
+        ],
+        ink,
+        accC,
+        cheekC,
+        blush,
+        off,
+        hl: place?.hl ?? { x: 0, y: 0 },
+        wob: { x: wobX, y: wobY },
+        url,
+        id,
+      })
+    : null;
   return (
     <>
       <defs>
@@ -1218,7 +1300,24 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
         <filter id={id("blur")} x="-50%" y="-50%" width="200%" height="200%">
           <feGaussianBlur stdDeviation={f(R * 0.2)} />
         </filter>
-        {gloss && place ? glossDefs(id, sclera, place, tiny) : null}
+        {gloss && place ? glossDefs(id, beanC, glowC, place, tiny, rimAmt > 0.01) : null}
+        {pill && face.accessory !== "none" ? (
+          <filter id={id("knock")} x="-50%" y="-50%" width="200%" height="200%">
+            <feMorphology in="SourceAlpha" operator="dilate" radius="1.3" result="edge" />
+            <feFlood floodColor="#000000" />
+            <feComposite in2="edge" operator="in" />
+            <feMerge>
+              <feMergeNode />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
+        ) : null}
+        {pill && face.accessory === "sunglasses" ? (
+          <linearGradient id={id("plens")} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={darken(accC, 0.9)} />
+            <stop offset="100%" stopColor={darken(accC, 0.62)} />
+          </linearGradient>
+        ) : null}
         <linearGradient id={id("lens")} x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor={lensTop} />
           <stop offset="55%" stopColor={darken(accC, 0.5)} />
@@ -1226,21 +1325,70 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
         </linearGradient>
       </defs>
       <g transform={head}>
-        {headphones("band")}
-        {top()}
-        {cheeks()}
+        {wear ? (
+          wear.back
+        ) : (
+          <>
+            {headphones("band")}
+            {top()}
+            {cheeks()}
+          </>
+        )}
         {pill ? pillEyes() : eyeData.map(eye)}
         {capsules()}
-        {brows()}
+        {wear ? wear.brows : brows()}
         {mouth()}
-        {glasses()}
-        {headphones("cups")}
+        {wear ? (
+          wear.front
+        ) : (
+          <>
+            {glasses()}
+            {headphones("cups")}
+          </>
+        )}
       </g>
       {symbol()}
       {zees()}
       {sparkles()}
     </>
   );
+}
+
+/** HSV saturation 0..1 of a colour. */
+function saturation(hex: string): number {
+  const n = parseInt(hex.slice(1, 7), 16);
+  const r = (n >> 16) & 255;
+  const g = (n >> 8) & 255;
+  const b = n & 255;
+  const mx = Math.max(r, g, b);
+  return mx === 0 ? 0 : (mx - Math.min(r, g, b)) / mx;
+}
+
+/** The body shading of a glossy bean of colour `c`, lit from the top left:
+ * a lighter lit side, a darker terminator near the far rim, then a thin
+ * brighter bounce right at the edge. Offsets of a radial gradient.
+ *
+ * White and other light, unsaturated colours are shaded toward a cool
+ * grey, like porcelain under a white light (the look C2 was tuned on; it is
+ * reproduced exactly). The more saturated the colour, the more the shade is
+ * a deeper tone of its own hue, so a pink stays pink instead of turning
+ * muddy. Dark colours (luminance under about 0.35, fully under 0.05) cannot
+ * get much darker on a black island, so the lit side brightens less, the
+ * terminator darkens less and the bounce at the edge turns into a lighter
+ * rim of the same hue. On the closed island (tiny) all of it is flatter. */
+export function glossStops(c: string, tiny: boolean): [number, string][] {
+  const k = tiny ? 0.55 : 1;
+  const dk = smooth((0.35 - luminance(c)) / 0.3);
+  const shade = mix(mix("#7E889C", darken(c, 0.5), saturation(c)), darken(c, 0.6), dk);
+  const toward = (t: number) => mix(c, shade, t * k * (1 - 0.55 * dk));
+  const edge = toward(0.26);
+  return [
+    [0, lighten(c, lerp(0.5, 0.3, dk))],
+    [0.42, toward(0.06)],
+    [0.74, toward(0.22)],
+    [0.9, toward(0.38)],
+    [1, dk > 0 ? mix(edge, lighten(c, 0.4), dk * 0.7) : edge],
+  ];
 }
 
 /** Gloss (styles gloss and head): the shading of each bean, the specular
@@ -1250,22 +1398,20 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
  * so it follows the bean as it squashes; the left bean is drawn mirrored, so
  * it gets the mirrored gradient. On the closed island (tiny) the shading is
  * flatter, so the beans stay crisp at 34 px. */
-function glossDefs(id: (n: string) => string, sclera: string, place: PillPlacement, tiny: boolean): ReactElement {
+function glossDefs(id: (n: string) => string, sclera: string, glowC: string, place: PillPlacement, tiny: boolean, rimOn: boolean): ReactElement {
   const hl = place.hl;
   const cx = 0.5 + (GLOSS.x + hl.x) * 0.7;
   const cy = 0.5 + (GLOSS.y + hl.y) * 0.6;
-  // A cool shade for the turned-away side, like porcelain under a white
-  // light: lit top, a darker terminator near the far rim, then a thin
-  // brighter bounce right at the edge.
-  const shade = "#7E889C";
-  const k = tiny ? 0.55 : 1;
-  const stops: [number, string][] = [
-    [0, lighten(sclera, 0.5)],
-    [0.42, mix(sclera, shade, 0.06 * k)],
-    [0.74, mix(sclera, shade, 0.22 * k)],
-    [0.9, mix(sclera, shade, 0.38 * k)],
-    [1, mix(sclera, shade, 0.26 * k)],
-  ];
+  const stops = glossStops(sclera, tiny);
+  // The rim light on dark beans: faint on the lit top-left, full on the far
+  // bottom-right edge (mirrored for the left bean, which is drawn flipped).
+  const rimC = lighten(sclera, 0.45);
+  const rim = (name: string, x1: number) => (
+    <linearGradient id={id(name)} x1={x1} y1="0" x2={1 - x1} y2="1">
+      <stop offset="0%" stopColor={rimC} stopOpacity={0.3} />
+      <stop offset="100%" stopColor={rimC} stopOpacity={1} />
+    </linearGradient>
+  );
   const body = (name: string, x: number) => (
     <radialGradient id={id(name)} cx={f(x)} cy={f(cy)} r="0.9" fx={f(x)} fy={f(cy)}>
       {stops.map(([o, c]) => (
@@ -1277,15 +1423,17 @@ function glossDefs(id: (n: string) => string, sclera: string, place: PillPlaceme
     <>
       {body("gloss-r", cx)}
       {body("gloss-l", 1 - cx)}
+      {rimOn ? rim("rim-r", 0) : null}
+      {rimOn ? rim("rim-l", 1) : null}
       <radialGradient id={id("spec")}>
         <stop offset="0%" stopColor="#FFFFFF" stopOpacity={1} />
         <stop offset="62%" stopColor="#FFFFFF" stopOpacity={0.95} />
         <stop offset="100%" stopColor="#FFFFFF" stopOpacity={0} />
       </radialGradient>
       <radialGradient id={id("amb")}>
-        <stop offset="0%" stopColor={sclera} stopOpacity={0.07} />
-        <stop offset="70%" stopColor={sclera} stopOpacity={0.025} />
-        <stop offset="100%" stopColor={sclera} stopOpacity={0} />
+        <stop offset="0%" stopColor={glowC} stopOpacity={0.07} />
+        <stop offset="70%" stopColor={glowC} stopOpacity={0.025} />
+        <stop offset="100%" stopColor={glowC} stopOpacity={0} />
       </radialGradient>
     </>
   );

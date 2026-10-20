@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { styleOf } from "./motion.ts";
-import { GazeRig, MICRO, SACCADE, onSphere, placePill, saccadeCurve } from "./rig.ts";
+import { GazeRig, MICRO, SACCADE, onSphere, pillWarp, placePill, saccadeCurve } from "./rig.ts";
 import { presetFace } from "./schema.ts";
 
 const geom = { d: 37.8, hx: 13.3, hy: 23.1, mouthX: 0, mouthY: 19.9 };
@@ -354,4 +354,47 @@ test("island: reduced motion goes straight to the target, no breath, no boredom"
   assert.equal(rig.frame(t).breathe, 0);
   assert.equal(rig.frame(t).mode, "track");
   assert.equal(rig.ambientFps(true), 0);
+});
+
+test("pillWarp carries the eye centres exactly where placePill puts the beans", () => {
+  const rig = new SmoothRig(0, { x: 0, y: 0 }, () => 0.5).frame(0);
+  const cases = [
+    { x: 0, y: 0 },
+    { x: -0.9, y: 0.1 },
+    { x: 0.7, y: -0.6 },
+    { x: 0.2, y: 0.8 },
+  ];
+  for (const style of ["cozmo", "gloss", "head", "smooth"]) {
+    for (const eye of cases) {
+      const head = { x: eye.x * 0.6, y: eye.y * 0.6 };
+      const want = placePill(style, eye, head, geom, rig);
+      const w = pillWarp(style, eye, head, geom, rig);
+      for (const [k, s] of [
+        [0, -1],
+        [1, 1],
+      ]) {
+        const got = w(s * geom.d, 0);
+        for (const c of ["x", "y", "sx", "sy"]) assert.ok(Math.abs(got[c] - want.eyes[k][c]) < 1e-9, `${style} ${c}`);
+      }
+    }
+  }
+});
+
+test("pillWarp turns the whole face plane one way", () => {
+  const rig = new SmoothRig(0, { x: 0, y: 0 }, () => 0.5).frame(0);
+  const w = pillWarp("smooth", { x: 0.8, y: 0 }, { x: 0.6, y: 0 }, geom, rig);
+  const rest = pillWarp("smooth", { x: 0, y: 0 }, { x: 0, y: 0 }, geom, rig);
+  // A point above the eyes, between them and beside them all move toward the gaze side.
+  for (const [x, y] of [
+    [0, -45],
+    [0, 20],
+    [60, 0],
+    [-60, 0],
+  ]) {
+    assert.ok(w(x, y).x > rest(x, y).x, `${x},${y} moves right`);
+  }
+  // At rest the centre stays put (elsewhere the sphere's perspective
+  // shrinks the plane a little, the same for the beans).
+  const p = rest(0, 0);
+  assert.ok(Math.abs(p.x) < 1e-9 && Math.abs(p.y) < 1e-9 && Math.abs(p.sx - 1) < 1e-9 && Math.abs(p.sy - 1) < 1e-9);
 });

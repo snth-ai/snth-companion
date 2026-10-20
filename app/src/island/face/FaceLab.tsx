@@ -13,6 +13,11 @@
 // slow=1 (0.25x clock), preset=<name> (default buddy), reach=<px> (default 600),
 // only=<tags> (columns to show, e.g. only=0ABCC2 or only=all; default 0,C,C2).
 // Keys: 1-4 states, S slow motion, R reset.
+//
+// Under the columns, "Наряди Дружка" (DressLab.tsx): Buddy in C2 with
+// pickers for accessories, eye colour and the rest, all accessories live,
+// and a button that copies the look as a FaceConfig. ?dress=shots and
+// ?dress=sweep show only its review matrices (see DressLab.tsx).
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { Face } from "./Face";
@@ -20,6 +25,8 @@ import { setFaceTimeScale, type Vec } from "./motion";
 import { SMOOTH, SMOOTH_DEFAULTS, smoothDerived, type MotionStyle, type SmoothTuning } from "./rig";
 import { presetFace, type FaceState } from "./schema";
 import { useFakeVoice, useGazeToward, useWindowPointer, type PointerPos } from "./useGaze";
+import { DressLab, DressShots } from "./DressLab";
+import { copyText } from "./labCopy";
 
 const params = new URLSearchParams(window.location.search);
 
@@ -145,34 +152,6 @@ function Slider(p: SliderProps) {
   );
 }
 
-/** Copies text: the async clipboard where allowed, else the old
- * select-and-copy (plain http on the LAN is not a secure context). */
-async function copyText(text: string): Promise<boolean> {
-  try {
-    if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-    // Fall through to the old way.
-  }
-  const ta = document.createElement("textarea");
-  ta.value = text;
-  ta.setAttribute("readonly", "");
-  ta.style.position = "fixed";
-  ta.style.opacity = "0";
-  document.body.appendChild(ta);
-  ta.select();
-  let ok = false;
-  try {
-    ok = document.execCommand("copy");
-  } catch {
-    ok = false;
-  }
-  ta.remove();
-  return ok;
-}
-
 function TuningPanel(props: { tuning: SmoothTuning; onChange: (t: SmoothTuning) => void }) {
   const t = props.tuning;
   const set = (patch: Partial<SmoothTuning>) => props.onChange({ ...t, ...patch });
@@ -256,7 +235,14 @@ function TuningPanel(props: { tuning: SmoothTuning; onChange: (t: SmoothTuning) 
   );
 }
 
+/** ?dress=shots or ?dress=sweep: only a review matrix of the dressing room. */
+const dressMode = params.get("dress");
+
 export function FaceLab(): ReactElement {
+  return dressMode === "shots" || dressMode === "sweep" ? <DressShots mode={dressMode} /> : <LabMain />;
+}
+
+function LabMain(): ReactElement {
   const pointer = useWindowPointer();
   const [state, setState] = useState<FaceState>(initialState);
   const [slow, setSlow] = useState(initialSlow);
@@ -323,6 +309,7 @@ export function FaceLab(): ReactElement {
           ),
         )}
       </div>
+      <DressLab pointer={pointer} />
       <aside className="lab-notes">
         <h3>Что попробовать в C и C2</h3>
         <ul>

@@ -680,6 +680,64 @@ export function placePill(style: MotionStyle, eye: Vec, head: Vec, g: PillGeom, 
   };
 }
 
+/** Maps a point of the face plane at rest (face units, the same space the
+ * eyes are laid out in) to where the turned face draws it, with the local
+ * width and height scale there. */
+export type FaceWarp = (x: number, y: number) => Place;
+
+/** The warp the eyes get, for every other feature of a pill face: brows,
+ * cheeks, lashes and accessories ride with it, so they turn, foreshorten and
+ * shift with the beans in the same frame. It is placePill generalised from
+ * the two eye centres to any point: the Cozmo shift and the gap squeeze move
+ * x and y, the near and far eye's scale is blended across the face by x
+ * (held at the eye's own value beyond it), and the head styles then turn the
+ * point on the same sphere. At (-d, 0) and (d, 0) it gives exactly the eyes
+ * placePill gives. */
+export function pillWarp(style: MotionStyle, eye: Vec, head: Vec, g: PillGeom, rig?: RigFrame): FaceWarp {
+  let u: number;
+  let v: number;
+  let sphere: { R: number; yaw: number; pitch: number } | null = null;
+  if (!HEAD_STYLES.has(style)) {
+    u = eye.x;
+    v = eye.y;
+  } else {
+    const S = SPHERE;
+    let yawDeg = S.yaw;
+    let pitchDeg = S.pitch;
+    if (style === "smooth") {
+      const k = rig?.cozmoGain ?? SMOOTH.cozmoGain;
+      u = eye.x * k;
+      v = eye.y * k;
+      yawDeg = rig?.yaw ?? SMOOTH_DEFAULTS.turn;
+      pitchDeg = rig?.pitch ?? SMOOTH_DEFAULTS.turn * SMOOTH.pitchOfTurn;
+    } else {
+      const rel = { x: eye.x - head.x, y: eye.y - head.y };
+      u = rel.x * S.relGain + head.x * S.headGain;
+      v = rel.y * S.relGain + head.y * S.headGain;
+    }
+    sphere = {
+      R: S.radius * g.d,
+      yaw: (clamp(head.x, -1.2, 1.2) * yawDeg * Math.PI) / 180,
+      pitch: (clamp(head.y, -1.2, 1.2) * pitchDeg * Math.PI) / 180,
+    };
+  }
+  const base = cozmo(u, v, g);
+  const [L, Rt] = base.eyes;
+  const cx = (L.x + Rt.x) / 2;
+  const cy = L.y;
+  const q = (Rt.x - L.x) / (2 * g.d);
+  return (x: number, y: number): Place => {
+    const t = clamp((x / g.d + 1) / 2, 0, 1);
+    const px = cx + x * q;
+    const py = y + cy;
+    const sx = lerp(L.sx, Rt.sx, t);
+    const sy = lerp(L.sy, Rt.sy, t);
+    if (!sphere) return { x: px, y: py, sx, sy };
+    const s = onSphere(px, py, sphere.R, sphere.yaw, sphere.pitch, SPHERE.camera);
+    return { x: s.x, y: s.y, sx: sx * s.sx, sy: sy * s.sy };
+  };
+}
+
 // ---------- smooth: the fluid head style (C2) ----------
 
 /** The live-tunable part of the smooth style (the lab's sliders). */
