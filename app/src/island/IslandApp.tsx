@@ -28,9 +28,9 @@ const NOTICE_FOR = 6000;
 const OPEN_W = 400;
 /** The face in the open island: big enough for the whole head. */
 const FACE_OPEN = 84;
-/** How long the face takes to grow or shrink (the shape's own spring is
- * about as long). */
-const FACE_MS = 420;
+/** How long the island takes to open or close: the shape and the face
+ * together, on one clock and one curve (`useMotion`). */
+const MOVE_MS = 420;
 
 /** What the face shows, from what the island knows. */
 export function faceStateOf(v: IslandView, now: number): FaceState {
@@ -95,33 +95,114 @@ function Glyph(props: { state: FaceState; sending: boolean }) {
   }
 }
 
-/** 0 (closed) .. 1 (open), eased, on animation frames while it moves. */
-function useOpening(open: boolean): number {
-  const [t, setT] = useState(open ? 1 : 0);
-  const from = useRef(t);
-  useEffect(() => {
-    const target = open ? 1 : 0;
-    const reduce = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (reduce) {
-      from.current = target;
-      setT(target);
-      return;
+/** A CSS cubic-bezier timing function, in JS: progress 0..1 in, eased
+ * value out (past 1 where the curve overshoots). */
+function cubicBezier(x1: number, y1: number, x2: number, y2: number): (k: number) => number {
+  const cx = 3 * x1;
+  const bx = 3 * (x2 - x1) - cx;
+  const ax = 1 - cx - bx;
+  const cy = 3 * y1;
+  const by = 3 * (y2 - y1) - cy;
+  const ay = 1 - cy - by;
+  const x = (t: number) => ((ax * t + bx) * t + cx) * t;
+  const dx = (t: number) => (3 * ax * t + 2 * bx) * t + cx;
+  const y = (t: number) => ((ay * t + by) * t + cy) * t;
+  return (k: number) => {
+    if (k <= 0) return 0;
+    if (k >= 1) return 1;
+    // The curve's t for this progress: Newton, then halving if it stalls.
+    let t = k;
+    for (let i = 0; i < 8; i++) {
+      const err = x(t) - k;
+      if (Math.abs(err) < 1e-6) return y(t);
+      const d = dx(t);
+      if (Math.abs(d) < 1e-6) break;
+      t -= err / d;
     }
-    const start = performance.now();
-    const begin = from.current;
-    let frame = 0;
-    const step = (now: number) => {
-      const k = Math.min(1, (now - start) / FACE_MS);
-      const eased = 1 - Math.pow(1 - k, 3);
-      const v = begin + (target - begin) * eased;
-      from.current = v;
-      setT(v);
-      if (k < 1) frame = requestAnimationFrame(step);
-    };
-    frame = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(frame);
-  }, [open]);
-  return t;
+    let lo = 0;
+    let hi = 1;
+    t = k;
+    for (let i = 0; i < 30; i++) {
+      const v = x(t);
+      if (Math.abs(v - k) < 1e-6) break;
+      if (v < k) lo = t;
+      else hi = t;
+      t = (lo + hi) / 2;
+    }
+    return y(t);
+  };
+}
+
+/** The island's spring: it overshoots a little and settles (what the
+ * shape's CSS transition used to be). */
+const SPRING = cubicBezier(0.22, 1.28, 0.36, 1);
+
+/** One value on its way from `from` to `to`, started at `start`
+ * (performance.now()). */
+interface Tween {
+  from: number;
+  to: number;
+  start: number;
+  ms: number;
+}
+
+const still = (v: number): Tween => ({ from: v, to: v, start: 0, ms: 0 });
+const moving = (tw: Tween, now: number) => tw.ms > 0 && now < tw.start + tw.ms;
+function valueAt(tw: Tween, now: number): number {
+  if (!moving(tw, now)) return tw.to;
+  return tw.from + (tw.to - tw.from) * SPRING(Math.max(0, (now - tw.start) / tw.ms));
+}
+
+function reducedMotion(): boolean {
+  return typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+/** The island's motion on one clock: `open` 0 (closed) .. 1 (open), a
+ * little past either end in the spring's overshoot, and the body's height
+ * as the shape shows it. Every size on the island (the shape's width,
+ * height and corners, the face's size and place) is read from these in
+ * the same frame, so the face never runs ahead of the shape or lags it.
+ * `moving` is false once everything has arrived. */
+function useMotion(open: boolean, bodyH: number): { open: number; body: number; moving: boolean } {
+  const target = open ? 1 : 0;
+  const tw = useRef<{ open: Tween; body: Tween } | null>(null);
+  if (tw.current === null) tw.current = { open: still(target), body: still(bodyH) };
+  const [now, setNow] = useState(() => performance.now());
+
+  // New targets, before the frame is drawn: from wherever the island is.
+  useLayoutEffect(() => {
+    const c = tw.current!;
+    const t = performance.now();
+    const reduce = reducedMotion();
+    let changed = false;
+    if (c.open.to !== target) {
+      const from = valueAt(c.open, t);
+      // Turned back mid-way (the pointer left while it opened): the way
+      // back takes as much of the time as there is way to go.
+      c.open = reduce ? still(target) : { from, to: target, start: t, ms: MOVE_MS * Math.min(1, Math.max(0.4, Math.abs(target - from))) };
+      changed = true;
+    }
+    // The body counts only while open. Opening, the shape heads for the
+    // body as it is (measured before the first frame); open, the body's
+    // own changes (a summary arrives) slide on the same curve; closing,
+    // the shape shrinks from the body it had.
+    if (open && c.body.to !== bodyH) {
+      const settledOpen = c.open.to === 1 && !moving(c.open, t);
+      c.body = reduce || !settledOpen ? still(bodyH) : { from: valueAt(c.body, t), to: bodyH, start: t, ms: MOVE_MS };
+      changed = true;
+    }
+    if (changed) setNow(t);
+  }, [target, open, bodyH]);
+
+  const c = tw.current;
+  const busy = moving(c.open, now) || moving(c.body, now);
+  // A frame after a frame while anything moves.
+  useEffect(() => {
+    if (!busy) return;
+    const id = requestAnimationFrame(() => setNow(performance.now()));
+    return () => cancelAnimationFrame(id);
+  });
+  return { open: valueAt(c.open, now), body: valueAt(c.body, now), moving: busy };
 }
 
 function mmss(ms: number): string {
@@ -177,8 +258,8 @@ export function IslandApp() {
   const noticeShown = Boolean(view?.notice && now - view.notice.at_ms < NOTICE_FOR);
   const open = Boolean(view && (view.hover || view.approval || view.text_open || view.hold || summaryShown || noticeShown));
 
-  const opening = useOpening(open);
-  const settled = opening === 0 || opening === 1;
+  const motion = useMotion(open, bodyH);
+  const settled = !motion.moving;
 
   // The line of text takes the keyboard when it opens.
   useEffect(() => {
@@ -188,7 +269,7 @@ export function IslandApp() {
     }
   }, [view?.text_open]);
 
-  // The body's height, for the shape's own size (it animates).
+  // The body's height, for the shape's own size (it moves with the rest).
   useLayoutEffect(() => {
     const el = bodyRef.current;
     if (!el) return;
@@ -199,8 +280,8 @@ export function IslandApp() {
     return () => ro.disconnect();
   }, [open]);
 
-  // Tell the shell where the shape and the face are, whenever they move
-  // (after every render, and at the end of each size animation).
+  // Tell the shell where the shape and the face are once they have
+  // arrived (after every render; the last frame of a move is one).
   const last = useRef("");
   const report = () => {
     const base = rootRef.current?.getBoundingClientRect();
@@ -220,22 +301,20 @@ export function IslandApp() {
   const reportRef = useRef(report);
   reportRef.current = report;
   useLayoutEffect(() => reportRef.current());
-  const ready = view !== null;
-  useEffect(() => {
-    const el = shapeRef.current;
-    if (!el) return;
-    const done = () => reportRef.current();
-    el.addEventListener("transitionend", done);
-    return () => el.removeEventListener("transitionend", done);
-  }, [ready]);
 
   if (!view || !view.placement) return null;
 
   const p = view.placement;
   const notchH = p.notch.h;
   const name = view.synth?.name ?? "";
-  const width = open ? Math.min(OPEN_W, p.window.w - 8) : p.pill.w;
-  const height = open ? notchH + bodyH : p.pill.h;
+  // The shape, from the one motion: closed is the pill, open is the
+  // wide island as tall as its body.
+  const k = motion.open;
+  const openW = Math.min(OPEN_W, p.window.w - 8);
+  const width = p.pill.w + (openW - p.pill.w) * k;
+  const height = p.pill.h + (notchH + motion.body - p.pill.h) * k;
+  const closedR = Math.min(12, p.pill.h / 2);
+  const radius = closedR + (24 - closedR) * Math.min(1, Math.max(0, k));
   const keys = view.hotkeys.voice ? shortcutText(view.hotkeys.voice, view.os) : "";
 
   // The line under the name.
@@ -279,9 +358,10 @@ export function IslandApp() {
   // Closed: as tall as the band and a little more (the face's own box has
   // room around the eyes), about 34 px on a notch of 32.
   const small = Math.max(22, Math.min(p.pill.h + 2, 36));
-  const faceSize = small + (FACE_OPEN - small) * opening;
-  const faceLeft = 8 + 8 * opening;
-  const faceTop = ((notchH - small) / 2) * (1 - opening) + (notchH + 2) * opening;
+  // The same `k` as the shape's, in the same frame (the overshoot too).
+  const faceSize = small + (FACE_OPEN - small) * k;
+  const faceLeft = 8 + 8 * k;
+  const faceTop = ((notchH - small) / 2) * (1 - k) + (notchH + 2) * k;
 
   return (
     <div
@@ -293,7 +373,7 @@ export function IslandApp() {
       <div
         ref={shapeRef}
         className={`isl-shape state-${state}${p.real_notch ? " notch" : ""}`}
-        style={{ ["--accent" as string]: accent, left, width, height, borderBottomLeftRadius: open ? 24 : Math.min(12, p.pill.h / 2), borderBottomRightRadius: open ? 24 : Math.min(12, p.pill.h / 2) }}
+        style={{ ["--accent" as string]: accent, left, width, height, borderBottomLeftRadius: radius, borderBottomRightRadius: radius }}
       >
         <div className="isl-band" style={{ height: notchH }}>
           <div className="isl-ear left" style={{ width: (p.pill.w - p.notch.w) / 2 }} />
@@ -307,99 +387,102 @@ export function IslandApp() {
           <Face config={face} state={state} gaze={gaze} level={level} size={faceSize} label={name} />
         </div>
 
-        <div ref={bodyRef} className="isl-body" aria-hidden={!open}>
-          {open ? (
-            <>
-              <div className="isl-head" style={{ paddingLeft: faceWidth(FACE_OPEN) + 6, minHeight: FACE_OPEN }}>
-                <div className="isl-text">
-                  {/* A request may come from another linked synth: its name. */}
-                  <div className="isl-name">{approval?.synth ?? name}</div>
-                  <div className="isl-status" role="status">
-                    {status}
-                  </div>
-                </div>
-              </div>
-              {detail}
-              {notice ? (
-                <div className="isl-notice" role="alert">
-                  {notice}
-                  {view.notice?.code === "mic_denied" ? (
-                    <button type="button" className="isl-btn" onClick={() => void backend.islandMic()}>
-                      {t.micOpen}
-                    </button>
-                  ) : null}
-                </div>
-              ) : null}
-
-              {approval && quick ? (
-                <div className="isl-approval">
-                  <div className="isl-ask-title">{quick.title}</div>
-                  <div className="isl-row">
-                    <button type="button" className="isl-btn" onClick={() => void backend.approvalAnswer(approval.id, false, "once").finally(refresh)}>
-                      {t.deny}
-                    </button>
-                    {quick.unknown ? null : (
-                      <button type="button" className="isl-btn primary" onClick={() => void backend.approvalAnswer(approval.id, true, quick.duration, quick.hours).finally(refresh)}>
-                        {t.allow}
-                      </button>
-                    )}
-                  </div>
-                </div>
-              ) : null}
-
-              {view.text_open ? (
-                <div className="isl-input">
-                  <input
-                    ref={inputRef}
-                    value={text}
-                    maxLength={4000}
-                    placeholder={t.textPlaceholder(name)}
-                    onChange={(e) => setText(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                        e.preventDefault();
-                        void backend.islandTextSubmit(text);
-                      } else if (e.key === "Escape") {
-                        e.preventDefault();
-                        void backend.islandTextCancel();
-                      }
-                    }}
-                  />
-                  <div className="isl-hint">{t.textHint}</div>
-                </div>
-              ) : null}
-
-              {view.hover && !view.text_open && !approval ? (
-                <div className="isl-row">
-                  {view.synths.length > 1 ? (
-                    <div className="isl-synths" role="radiogroup" aria-label={t.switchSynth}>
-                      {view.synths.map((sy) => (
-                        <button
-                          key={sy.id}
-                          type="button"
-                          role="radio"
-                          aria-checked={sy.id === view.synth?.id}
-                          className={`isl-chip${sy.online ? "" : " off"}`}
-                          onClick={() => void backend.islandSelectSynth(sy.id)}
-                        >
-                          {sy.name}
-                        </button>
-                      ))}
+        {/* The body shows as far as the shape has grown. */}
+        <div className="isl-clip" style={{ height: Math.max(0, height - notchH) }}>
+          <div ref={bodyRef} className="isl-body" aria-hidden={!open}>
+            {open ? (
+              <>
+                <div className="isl-head" style={{ paddingLeft: faceWidth(FACE_OPEN) + 6, minHeight: FACE_OPEN }}>
+                  <div className="isl-text">
+                    {/* A request may come from another linked synth: its name. */}
+                    <div className="isl-name">{approval?.synth ?? name}</div>
+                    <div className="isl-status" role="status">
+                      {status}
                     </div>
-                  ) : null}
-                  <span className="isl-spacer" />
-                  {!view.paused && (view.driving || m?.stage === "working" || m?.stage === "accepted") ? (
-                    <button type="button" className="isl-btn danger" onClick={() => void backend.islandStop()}>
-                      {t.stop}
-                    </button>
-                  ) : null}
-                  <button type="button" className="isl-btn" onClick={() => void backend.islandOpenApp()}>
-                    {t.openApp}
-                  </button>
+                  </div>
                 </div>
-              ) : null}
-            </>
-          ) : null}
+                {detail}
+                {notice ? (
+                  <div className="isl-notice" role="alert">
+                    {notice}
+                    {view.notice?.code === "mic_denied" ? (
+                      <button type="button" className="isl-btn" onClick={() => void backend.islandMic()}>
+                        {t.micOpen}
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {approval && quick ? (
+                  <div className="isl-approval">
+                    <div className="isl-ask-title">{quick.title}</div>
+                    <div className="isl-row">
+                      <button type="button" className="isl-btn" onClick={() => void backend.approvalAnswer(approval.id, false, "once").finally(refresh)}>
+                        {t.deny}
+                      </button>
+                      {quick.unknown ? null : (
+                        <button type="button" className="isl-btn primary" onClick={() => void backend.approvalAnswer(approval.id, true, quick.duration, quick.hours).finally(refresh)}>
+                          {t.allow}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ) : null}
+
+                {view.text_open ? (
+                  <div className="isl-input">
+                    <input
+                      ref={inputRef}
+                      value={text}
+                      maxLength={4000}
+                      placeholder={t.textPlaceholder(name)}
+                      onChange={(e) => setText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                          e.preventDefault();
+                          void backend.islandTextSubmit(text);
+                        } else if (e.key === "Escape") {
+                          e.preventDefault();
+                          void backend.islandTextCancel();
+                        }
+                      }}
+                    />
+                    <div className="isl-hint">{t.textHint}</div>
+                  </div>
+                ) : null}
+
+                {view.hover && !view.text_open && !approval ? (
+                  <div className="isl-row">
+                    {view.synths.length > 1 ? (
+                      <div className="isl-synths" role="radiogroup" aria-label={t.switchSynth}>
+                        {view.synths.map((sy) => (
+                          <button
+                            key={sy.id}
+                            type="button"
+                            role="radio"
+                            aria-checked={sy.id === view.synth?.id}
+                            className={`isl-chip${sy.online ? "" : " off"}`}
+                            onClick={() => void backend.islandSelectSynth(sy.id)}
+                          >
+                            {sy.name}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                    <span className="isl-spacer" />
+                    {!view.paused && (view.driving || m?.stage === "working" || m?.stage === "accepted") ? (
+                      <button type="button" className="isl-btn danger" onClick={() => void backend.islandStop()}>
+                        {t.stop}
+                      </button>
+                    ) : null}
+                    <button type="button" className="isl-btn" onClick={() => void backend.islandOpenApp()}>
+                      {t.openApp}
+                    </button>
+                  </div>
+                ) : null}
+              </>
+            ) : null}
+          </div>
         </div>
       </div>
     </div>
