@@ -282,6 +282,23 @@ fn a_voice_message_carries_the_audio_or_the_text_recognized_here() {
     assert_eq!(text.params().unwrap_err().code, "failed", "a text message has no transcript");
 }
 
+#[test]
+fn a_silent_screenshot_hold_sends_the_screenshot_alone() {
+    let shot = Image { mime: "image/png".into(), data: vec![9; 50], long_edge: 1200 };
+    let alone = OwnerMessage { mode: Mode::ScreenVoice, audio: None, voice_transcript: None, images: vec![shot.clone()], ..voice(0, 0) };
+    let p = alone.params().unwrap();
+    assert_eq!(p["mode"], "screen_voice");
+    assert_eq!(p["images"].as_array().unwrap().len(), 1);
+    assert!(p.get("audio").is_none() && p.get("voice_transcript").is_none() && p.get("stt").is_none());
+    assert_eq!(p["text"], "");
+    // Without the screenshot there is nothing to send.
+    let nothing = OwnerMessage { images: vec![], ..alone.clone() };
+    assert_eq!(nothing.params().unwrap_err().code, "empty");
+    // A voice hold still needs its voice.
+    let voice_only = OwnerMessage { mode: Mode::Voice, audio: None, voice_transcript: None, images: vec![], ..voice(0, 0) };
+    assert_eq!(voice_only.params().unwrap_err().code, "empty");
+}
+
 #[tokio::test]
 async fn a_transcript_goes_only_to_a_synth_that_takes_it() {
     let (core, mut q) = linked(&[("new", WITH_STT), ("old", BOTH)]);

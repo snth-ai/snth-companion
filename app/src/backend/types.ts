@@ -534,6 +534,9 @@ export interface IslandView {
   /** On-device speech-to-text: the words of the hold so far, then the
    * text that was sent. Null with the speech going to the synth. */
   transcript: string | null;
+  /** A hold recognized on this computer runs while the speech model is
+   * still loading: no words yet. */
+  stt_loading: boolean;
   stt_card: SttCard | null;
 }
 

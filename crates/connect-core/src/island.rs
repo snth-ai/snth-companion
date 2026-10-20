@@ -11,7 +11,10 @@
 //!    a screenshot or a line of text as the owner's own message. A voice
 //!    note goes as audio, or (on-device speech-to-text, tz-local-stt.md)
 //!    as the text the app recognized itself (`voice_transcript`, `stt`
-//!    "device"), only to a synth that announces `island_device_stt`;
+//!    "device"), only to a synth that announces `island_device_stt`. A
+//!    screenshot + voice hold in which nothing was said sends the
+//!    screenshot alone (mode `screen_voice`, no voice; every synth with
+//!    the island takes pictures without a voice);
 //!  - the owner's choice of speech-to-text and the synth's one-time offer
 //!    of it (`IslandSettings::stt`, `stt_offer`);
 //!  - each synth's face (FaceConfig v1), cached per synth: `face.get` at
@@ -480,8 +483,14 @@ impl OwnerMessage {
             Mode::Voice | Mode::ScreenVoice if self.audio.is_some() && self.voice_transcript.is_some() => {
                 return Err(SendError::new("failed", "a voice message carries the audio or its transcript, not both"));
             }
-            Mode::Voice | Mode::ScreenVoice if self.audio.is_none() && transcript.is_none() => {
+            Mode::Voice if self.audio.is_none() && transcript.is_none() => {
                 return Err(SendError::new("empty", "no voice"));
+            }
+            // A screenshot + voice hold in which nothing was said sends
+            // the screenshot alone (the synth takes pictures without a
+            // voice).
+            Mode::ScreenVoice if self.audio.is_none() && transcript.is_none() && self.images.is_empty() => {
+                return Err(SendError::new("empty", "no voice and no screenshot"));
             }
             _ => {}
         }

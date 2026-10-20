@@ -45,23 +45,44 @@ pub trait Decoder {
     /// writes the prompt again at the start of the piece.
     fn decode(&mut self, audio: &[f32], lang: Option<&str>, abort: Option<&AtomicBool>) -> Result<Decoded, String>;
 
-    /// Where the speech is (Silero, else the energy detector).
-    fn speech(&mut self, audio: &[f32]) -> Vec<Span>;
+    /// Where the speech is by the voice detector itself (Silero). None
+    /// when it could not run (its model did not load, it failed).
+    fn vad(&mut self, audio: &[f32]) -> Option<Vec<Span>>;
+
+    /// Where the speech is: the voice detector, else the loudness
+    /// detector.
+    fn speech(&mut self, audio: &[f32]) -> Vec<Span> {
+        self.vad(audio).unwrap_or_else(|| vad::energy_spans(audio))
+    }
 }
 
 pub const ABORTED: &str = "aborted";
 
-/// How a hold ended.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Outcome {
-    /// What was said.
-    Text(String),
-    /// Nothing was said: nothing is sent.
-    Silent,
-    /// Something was said but nothing could be read from it: the audio
-    /// goes to the synth instead.
-    Unreadable,
+/// The voice detector's verdict on a whole hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Vad {
+    /// Speech was heard (by either detector).
+    Speech,
+    /// The voice detector went over the whole recording and found no
+    /// speech, and neither did the loudness detector.
+    Silence,
+    /// There is no verdict: the voice detector could not run, or there
+    /// was too little audio to judge.
+    NotRun,
 }
+
+/// How a hold ended on the speech thread. What is sent is decided by
+/// `release::decide`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Heard {
+    /// What was said, empty when nothing could be read.
+    pub text: String,
+    pub vad: Vad,
+}
+
+/// Less audio than this (a hold whose microphone started late) is not
+/// judged silent or not.
+const MIN_JUDGE: usize = RATE / 10;
 
 /// A step looks only when there is this much new audio.
 const MIN_STEP: usize = RATE / 10;
@@ -212,7 +233,7 @@ impl Streamer {
     /// Usually the owner stops talking a moment before letting go: when
     /// the last preview already holds all of the speech, it is the text
     /// and nothing is decoded.
-    pub fn finish(&mut self, dec: &mut dyn Decoder) -> Result<Outcome, String> {
+    pub fn finish(&mut self, dec: &mut dyn Decoder) -> Result<Heard, String> {
         let rest_spans = dec.speech(&self.audio[self.at..]);
         let rest = vad::speech_len(&rest_spans);
         let previewed = self.preview_len.saturating_sub(self.at);
@@ -229,19 +250,25 @@ impl Streamer {
         }
         self.preview.clear();
         let text = filter::whole(&filter::stitch(&self.committed));
-        if !text.is_empty() {
-            return Ok(Outcome::Text(text));
+        let vad = if !text.is_empty() || self.heard { Vad::Speech } else { self.verdict(dec) };
+        Ok(Heard { text, vad })
+    }
+
+    /// Silence only when the voice detector itself went over the whole
+    /// recording and neither it nor the loudness detector heard speech.
+    fn verdict(&self, dec: &mut dyn Decoder) -> Vad {
+        if self.audio.len() < MIN_JUDGE {
+            return Vad::NotRun;
         }
-        // Silent only when neither detector heard anything in the whole
-        // hold; else the synth gets the audio.
-        if !self.heard {
-            let silero = vad::speech_len(&dec.speech(&self.audio));
-            let energy = vad::speech_len(&vad::energy_spans(&self.audio));
-            if silero < vad::MIN_SPEECH && energy < vad::MIN_SPEECH {
-                return Ok(Outcome::Silent);
-            }
+        let Some(spans) = dec.vad(&self.audio) else {
+            return Vad::NotRun;
+        };
+        let energy = vad::speech_len(&vad::energy_spans(&self.audio));
+        if vad::speech_len(&spans) < vad::MIN_SPEECH && energy < vad::MIN_SPEECH {
+            Vad::Silence
+        } else {
+            Vad::Speech
         }
-        Ok(Outcome::Unreadable)
     }
 }
 
@@ -262,6 +289,8 @@ mod tests {
         /// The text it writes for a piece without words.
         on_silence: Option<&'static str>,
         abort_at_call: Option<usize>,
+        /// The voice detector could not run (its model is missing).
+        no_vad: bool,
     }
 
     impl Decoder for Fake {
@@ -278,8 +307,8 @@ mod tests {
             Ok(Decoded { segments: vec![words.join(" ")], lang: lang.is_none().then(|| (self.lang.to_string(), self.sure)) })
         }
 
-        fn speech(&mut self, audio: &[f32]) -> Vec<Span> {
-            vad::energy_spans(audio)
+        fn vad(&mut self, audio: &[f32]) -> Option<Vec<Span>> {
+            (!self.no_vad).then(|| vad::energy_spans(audio))
         }
     }
 
@@ -304,7 +333,8 @@ mod tests {
         // What finish decodes is only what came after the last commit.
         let before = dec.calls.len();
         let out = s.finish(&mut dec).unwrap();
-        let Outcome::Text(text) = out else { panic!("{out:?}") };
+        assert_eq!(out.vad, Vad::Speech);
+        let text = out.text;
         assert_eq!(text.split(' ').count(), 4, "{text}");
         let tail = dec.calls[before..].iter().map(|c| c.0).sum::<usize>();
         assert!(tail <= audio.len() - committed, "only the tail is decoded at the end");
@@ -355,8 +385,36 @@ mod tests {
         let mut dec = Fake { lang: "ru", sure: 1.0, on_silence: Some("Продолжение следует..."), ..Fake::default() };
         let mut s = Streamer::new();
         play(&mut s, &mut dec, &audio);
-        assert_eq!(s.finish(&mut dec).unwrap(), Outcome::Silent);
+        assert_eq!(s.finish(&mut dec).unwrap(), Heard { text: String::new(), vad: Vad::Silence });
         assert!(dec.calls.is_empty(), "silence is never decoded");
+    }
+
+    #[test]
+    fn without_the_voice_detector_there_is_no_silence_verdict() {
+        // The same silent hold, but the voice detector could not run: the
+        // loudness detector alone never drops a hold.
+        let audio = clip(4.0, &[]);
+        let mut dec = Fake { lang: "ru", sure: 1.0, no_vad: true, ..Fake::default() };
+        let mut s = Streamer::new();
+        play(&mut s, &mut dec, &audio);
+        assert_eq!(s.finish(&mut dec).unwrap(), Heard { text: String::new(), vad: Vad::NotRun });
+        // Speech without the voice detector is still heard (by loudness).
+        let mut dec = Fake { lang: "ru", sure: 1.0, no_vad: true, ..Fake::default() };
+        let mut s = Streamer::new();
+        play(&mut s, &mut dec, &clip(3.0, &[(0.3, 2.0)]));
+        let out = s.finish(&mut dec).unwrap();
+        assert!(!out.text.is_empty() && out.vad == Vad::Speech, "{out:?}");
+    }
+
+    #[test]
+    fn too_little_audio_is_not_judged() {
+        // A hold whose microphone started late: a few samples only.
+        let mut dec = Fake { lang: "ru", sure: 1.0, ..Fake::default() };
+        let mut s = Streamer::new();
+        s.push(&clip(0.05, &[]));
+        assert_eq!(s.finish(&mut dec).unwrap().vad, Vad::NotRun);
+        let mut s = Streamer::new();
+        assert_eq!(s.finish(&mut dec).unwrap().vad, Vad::NotRun, "no audio at all");
     }
 
     #[test]
@@ -367,13 +425,13 @@ mod tests {
             fn decode(&mut self, _: &[f32], _: Option<&str>, _: Option<&AtomicBool>) -> Result<Decoded, String> {
                 Ok(Decoded { segments: vec![" Спасибо.".into()], lang: Some(("ru".into(), 1.0)) })
             }
-            fn speech(&mut self, audio: &[f32]) -> Vec<Span> {
-                vad::energy_spans(audio)
+            fn vad(&mut self, audio: &[f32]) -> Option<Vec<Span>> {
+                Some(vad::energy_spans(audio))
             }
         }
         let mut s = Streamer::new();
         s.push(&clip(2.0, &[(0.3, 1.5)]));
-        assert_eq!(s.finish(&mut Thanks).unwrap(), Outcome::Unreadable);
+        assert_eq!(s.finish(&mut Thanks).unwrap(), Heard { text: String::new(), vad: Vad::Speech });
     }
 
     #[test]
@@ -401,7 +459,7 @@ mod tests {
         // Everything still adds up at the end.
         let rest = audio.len() - s.len();
         s.push(&audio[audio.len() - rest..]);
-        let Outcome::Text(text) = s.finish(&mut dec).unwrap() else { panic!() };
+        let text = s.finish(&mut dec).unwrap().text;
         assert_eq!(text.split(' ').count(), 3, "{text}");
     }
 

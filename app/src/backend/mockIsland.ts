@@ -15,9 +15,11 @@
 //         without Apple silicon, where it is not available)
 //   island.html?island=idle|hover|listening|screen|sending|accepted|thinking|
 //        working|driving|done|error|approval|text|offline|outdated|
-//        micdenied|asking|paused|two|shot|live|livesent|offer|offerdl|
-//        offerready|offerfail
+//        micdenied|asking|paused|two|shot|live|liveloading|livesent|
+//        heardnothing|offer|offerdl|offerready|offerfail
 //        (live = a hold with its words recognized on this computer;
+//         liveloading = the same while the model is still loading;
+//         heardnothing = a hold dropped as silence by the voice detector;
 //         livesent = the text going after the release; offer = Mia's offer
 //         of on-device speech-to-text; offerdl, offerready, offerfail = the
 //         model's download after "Turn on", done, failed)
@@ -312,6 +314,7 @@ export class MockIslandWindow {
       hotkeys: defaultHotkeys(os),
       mic: scenario === "micdenied" ? "denied" : scenario === "asking" ? "not_asked" : "granted",
       transcript: null,
+      stt_loading: scenario === "liveloading",
       stt_card: null,
     };
     const ru = lang === "ru";
@@ -353,6 +356,13 @@ export class MockIslandWindow {
       case "live":
         this.view.hold = "voice";
         this.view.transcript = spoken.split(" ").slice(0, 9).join(" ");
+        break;
+      case "liveloading":
+        this.view.hold = "voice";
+        this.view.transcript = "";
+        break;
+      case "heardnothing":
+        this.view.notice = notice("heard_nothing");
         break;
       case "livesent":
         this.view.sending = true;

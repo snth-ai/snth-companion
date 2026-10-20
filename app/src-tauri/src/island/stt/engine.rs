@@ -25,7 +25,7 @@ use std::time::Instant;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState, WhisperVadContext, WhisperVadContextParams, WhisperVadParams};
 
 use super::stream::{pick_lang, Decoded, Decoder, ABORTED};
-use super::vad::{self, Span, RATE};
+use super::vad::{Span, RATE};
 
 /// The smallest encoder size (in 20 ms frames, a multiple of 64, at
 /// least 192 = 3.8 s) that holds this many samples with 0.16 s of room;
@@ -168,8 +168,8 @@ impl Decoder for Engine {
         Ok(Decoded { segments, lang: detected })
     }
 
-    fn speech(&mut self, audio: &[f32]) -> Vec<Span> {
-        self.silero(audio).unwrap_or_else(|| vad::energy_spans(audio))
+    fn vad(&mut self, audio: &[f32]) -> Option<Vec<Span>> {
+        self.silero(audio)
     }
 }
 

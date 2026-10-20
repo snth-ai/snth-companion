@@ -26,7 +26,7 @@ import type { IslandView, SttCard } from "../backend/types";
 import { stringsFor } from "../i18n";
 import { shortcutText } from "../lib/format";
 import { Face, faceFor, faceWidth, type FaceState } from "./faceApi";
-import { aboutMb, tailOf, transcriptVisible } from "./sttView";
+import { aboutMb, sttLoadingVisible, tailOf, transcriptVisible } from "./sttView";
 
 /** How long the summary stays after the answer (TZ: 4-6 s). */
 const SUMMARY_FOR = 6000;
@@ -357,6 +357,7 @@ export function IslandApp() {
   // held, while the text goes, and a moment after it was accepted.
   const transcript = view?.transcript?.trim() ?? "";
   const transcriptShown = Boolean(view && transcriptVisible(view, now));
+  const sttLoadingShown = Boolean(view && sttLoadingVisible(view));
   const card = view?.stt_card ?? null;
   const open = Boolean(
     view && (view.hover || view.approval || view.text_open || view.hold || summaryShown || noticeShown || transcriptShown || card),
@@ -524,6 +525,8 @@ export function IslandApp() {
                       <div className={`isl-live${view.hold ? "" : " sent"}`} aria-live="polite">
                         {tailOf(transcript)}
                       </div>
+                    ) : sttLoadingShown ? (
+                      <div className="isl-live loading">{t.sttLoading}</div>
                     ) : null}
                   </div>
                 </div>
