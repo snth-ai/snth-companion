@@ -7,6 +7,7 @@ import { test } from "node:test";
 import {
   ACCESSORIES,
   DEFAULT_POOL,
+  EYE_SHAPES,
   IDLE_EMOTES,
   MAX_FACE_BYTES,
   PRESETS,
@@ -111,6 +112,30 @@ test("enums only from the list", () => {
   g.accessory = "hat";
   bad(g, /^accessory: must be one of/);
   for (const a of ACCESSORIES) assert.ok(validateFace({ ...classic(), accessory: a }).ok, a);
+});
+
+test("pill eyes: the newest shape, last in the list, valid with iris and pupil kept", () => {
+  assert.equal(EYE_SHAPES[EYE_SHAPES.length - 1], "pill");
+  const f = classic();
+  f.eyes.shape = "pill";
+  assert.ok(validateFace(f).ok);
+  assert.ok(validatePatch({ eyes: { shape: "pill" } }).ok);
+  assert.equal(mergeFace(classic(), { eyes: { shape: "pill" } }).face.eyes.iris.color, classic().eyes.iris.color);
+  assert.equal(clampFace(f).eyes.shape, "pill");
+});
+
+test("buddy: white pill eyes and a smile, valid, under 4 KB, not handed out by default", () => {
+  const b = presetFace("buddy");
+  const r = validateFace(b);
+  assert.ok(r.ok, r.ok ? "" : r.reason);
+  assert.equal(b.eyes.shape, "pill");
+  assert.equal(b.mouth.style, "smile");
+  assert.equal(b.brows.style, "none");
+  assert.equal(b.accessory, "none");
+  assert.equal(b.cheeks.blush, 0);
+  assert.ok(new TextEncoder().encode(JSON.stringify(b)).length <= MAX_FACE_BYTES);
+  assert.ok(!DEFAULT_POOL.includes("buddy"));
+  for (let i = 0; i < 300; i++) assert.notEqual(defaultFaceFor(`synth_${i}`).preset, "buddy");
 });
 
 test("idle emotes: at most 6, from the list, no repeats", () => {

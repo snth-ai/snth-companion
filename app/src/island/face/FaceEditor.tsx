@@ -217,24 +217,29 @@ export function FaceEditor(props: FaceEditorProps) {
             <Slider title={f.glow} value={face.eyes.glow} format={pct} onChange={(glow) => set({ eyes: { glow } }, "eyes.glow")} />
           </Group>
 
-          <Group title={t.editor.groups.iris}>
-            <Colour title={f.irisColor} value={face.eyes.iris.color} t={t} onChange={(color) => set({ eyes: { iris: { color } } }, "iris.color")} />
-            <Slider title={f.irisSize} value={face.eyes.iris.size} format={pct} onChange={(size) => set({ eyes: { iris: { size } } }, "iris.size")} />
-            <Row title={f.pupilShape} desc={t.pupils[face.eyes.pupil.shape]}>
-              <Glyphs
-                label={f.pupilShape}
-                value={face.eyes.pupil.shape}
-                options={PUPIL_SHAPES.map((s) => ({ value: s, title: t.pupils[s], glyph: <PupilGlyph shape={s} /> }))}
-                onChange={(shape) => set({ eyes: { pupil: { shape } } }, "pupil.shape")}
-              />
-            </Row>
-            <Colour title={f.pupilColor} value={face.eyes.pupil.color} t={t} onChange={(color) => set({ eyes: { pupil: { color } } }, "pupil.color")} />
-            <Slider title={f.pupilSize} value={face.eyes.pupil.size} format={pct} onChange={(size) => set({ eyes: { pupil: { size } } }, "pupil.size")} />
-          </Group>
+          {/* Pill eyes are solid: no iris or pupil to set. */}
+          {face.eyes.shape === "pill" ? null : (
+            <Group title={t.editor.groups.iris}>
+              <Colour title={f.irisColor} value={face.eyes.iris.color} t={t} onChange={(color) => set({ eyes: { iris: { color } } }, "iris.color")} />
+              <Slider title={f.irisSize} value={face.eyes.iris.size} format={pct} onChange={(size) => set({ eyes: { iris: { size } } }, "iris.size")} />
+              <Row title={f.pupilShape} desc={t.pupils[face.eyes.pupil.shape]}>
+                <Glyphs
+                  label={f.pupilShape}
+                  value={face.eyes.pupil.shape}
+                  options={PUPIL_SHAPES.map((s) => ({ value: s, title: t.pupils[s], glyph: <PupilGlyph shape={s} /> }))}
+                  onChange={(shape) => set({ eyes: { pupil: { shape } } }, "pupil.shape")}
+                />
+              </Row>
+              <Colour title={f.pupilColor} value={face.eyes.pupil.color} t={t} onChange={(color) => set({ eyes: { pupil: { color } } }, "pupil.color")} />
+              <Slider title={f.pupilSize} value={face.eyes.pupil.size} format={pct} onChange={(size) => set({ eyes: { pupil: { size } } }, "pupil.size")} />
+            </Group>
+          )}
 
           <Group title={t.editor.groups.lids}>
             <Slider title={f.lidRest} value={face.eyes.lids.rest} format={pct} onChange={(rest) => set({ eyes: { lids: { rest } } }, "lids.rest")} />
-            <Colour title={f.lidColor} value={face.eyes.lids.color} t={t} onChange={(color) => set({ eyes: { lids: { color } } }, "lids.color")} />
+            {face.eyes.shape === "pill" ? null : (
+              <Colour title={f.lidColor} value={face.eyes.lids.color} t={t} onChange={(color) => set({ eyes: { lids: { color } } }, "lids.color")} />
+            )}
             <Choice title={f.lashes} value={face.eyes.lashes} options={LASHES} labels={t.lashes} onChange={(lashes) => set({ eyes: { lashes } }, "lashes")} />
           </Group>
 

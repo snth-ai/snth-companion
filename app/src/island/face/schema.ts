@@ -10,7 +10,7 @@
 
 import presetsFile from "./presets.json" with { type: "json" };
 
-export const EYE_SHAPES = ["round", "oval", "almond", "droopy", "cat", "dot", "line", "star", "heart"] as const;
+export const EYE_SHAPES = ["round", "oval", "almond", "droopy", "cat", "dot", "line", "star", "heart", "pill"] as const;
 export const PUPIL_SHAPES = ["round", "slit", "star", "heart", "ring"] as const;
 export const LASHES = ["none", "light", "full"] as const;
 export const BROW_STYLES = ["none", "thin", "thick", "arched", "flat", "worried"] as const;

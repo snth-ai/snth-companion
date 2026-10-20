@@ -12,7 +12,7 @@
 
 import { useEffect, useId, useMemo, useRef, useState, type CSSProperties, type ReactElement } from "react";
 import { darken, drain, lighten, luminance, mix, visibleOnBlack } from "./color";
-import { eyeGeom, f, heart, softStar, sparkle } from "./geometry";
+import { PILL_EYE, eyeGeom, f, heart, pillPath, softStar, sparkle } from "./geometry";
 import { EMOTE_LENGTH, FaceSim, HERO_TIME, LID_REST, nodCurve, stillFrame, type Frame, type Vec } from "./motion";
 import { clampFace, type FaceConfig, type FaceState, type IdleEmote } from "./schema";
 
@@ -74,6 +74,8 @@ export interface FaceProps {
   autoSleep?: boolean;
   /** Plays an idle emote when `nonce` changes (editor preview). */
   emote?: { kind: IdleEmote; nonce: number } | null;
+  /** With `still`: a blink closure 0..1 to draw (review screenshots). */
+  blink?: number;
   label?: string;
   className?: string;
   style?: CSSProperties;
@@ -131,12 +133,13 @@ export function Face(props: FaceProps) {
     if (emoteKind && emoteNonce !== undefined) simRef.current?.playEmote(emoteKind);
   }, [emoteKind, emoteNonce]);
 
+  const stillBlink = still ? (props.blink ?? 0) : 0;
   const stillShot = useMemo(
     () =>
       still || !live
-        ? stillFrame(face, state, gaze, level, compact, still && emoteKind ? { kind: emoteKind, t: EMOTE_LENGTH[emoteKind] * 0.45, side: 1 } : null)
+        ? stillFrame(face, state, gaze, level, compact, still && emoteKind ? { kind: emoteKind, t: EMOTE_LENGTH[emoteKind] * 0.45, side: 1 } : null, stillBlink)
         : null,
-    [still, live, face, state, gaze, level, compact, emoteKind],
+    [still, live, face, state, gaze, level, compact, emoteKind, stillBlink],
   );
   const frame = stillShot ?? live!;
 
@@ -210,6 +213,8 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
   const { hx, hy } = geom;
   const d = Math.max(18 + face.eyes.spacing * 22, hx + 5);
   const flat = face.eyes.iris.size < 0.12 && face.eyes.pupil.size < 0.08;
+  /** Pill eyes: solid beans, iris and pupil ignored (see pillEyes). */
+  const pill = face.eyes.shape === "pill";
 
   const sclera = tone(visibleOnBlack(face.eyes.sclera, 0.06));
   const accent = tone(visibleOnBlack(face.palette.accent, 0.14));
@@ -220,7 +225,7 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
   const irisC = tone(face.eyes.iris.color);
   const pupilC = tone(face.eyes.pupil.color);
   const cheekC = tone(face.cheeks.color);
-  const glowC = flat ? sclera : accent;
+  const glowC = flat || pill ? sclera : accent;
   const lidVisible = luminance(lidC) > 0.025;
   const thick = det < 0.5 ? 1.3 : 1;
 
@@ -233,9 +238,14 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
   const gx = clamp(P.gx, -1.2, 1.2);
   const gy = clamp(P.gy, -1.2, 1.2);
   // Whole-eye shift with the gaze; flat eyes keep a steady outline and move
-  // a light core inside instead.
-  const shiftX = gx * R * (flat ? 0.05 : 0.08);
-  const shiftY = gy * R * (flat ? 0.04 : 0.06);
+  // a light core inside instead. Pill eyes have nothing inside to move, so
+  // the whole eye travels much further.
+  const shiftX = gx * (pill ? hx * 0.62 : R * (flat ? 0.05 : 0.08));
+  const shiftY = gy * (pill ? hy * 0.36 : R * (flat ? 0.04 : 0.06));
+  /** Pill eyes: head-turn roll with the horizontal gaze (degrees), and the
+   * springy settle after a blink. */
+  const roll = pill ? gx * 5 : 0;
+  const rebound = pill && !reduced ? (fr.rebound ?? 0) : 0;
 
   const headK = det < 0.5 ? 0.5 : 1;
   const nod = fr.state === "accepted" && !reduced ? nodCurve(vst) * (det < 0.5 ? 2 : 3) * px : 0;
@@ -505,6 +515,105 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
     );
   };
 
+  // ---------- pill eyes ----------
+
+  /** Pill eyes: two solid beans in the sclera colour. The gaze moves and
+   * turns the whole eye, the far eye a little narrower and the pair rolled
+   * like a turning head (the eye on the side looked at sits lower). The lids
+   * squash the bean from the top (u) and the bottom (l); closed it is a
+   * capsule bar, anchored low like the reference blink, that closedCurve
+   * bends (+ happy arch, - relaxed curve) and a smile under the eyes (high
+   * l with lowCurve up) turns into a happy arch too. tL / tR turn each eye
+   * (+ inner side lower), `stretch` makes both taller or flatter. */
+  const pillEyes = () => {
+    const rr = hx * PILL_EYE.r;
+    const bar = Math.max(hy * 0.24, 2.4 * px);
+    const lc = clamp(P.lowCurve, -1, 1);
+    const vert = -gy * 0.1;
+    const pink = tone(HEART_PINK);
+    return eyeData.map((e) => {
+      const s = e.s;
+      const left = s < 0;
+      const top = -hy + 2 * hy * e.u;
+      const bot = hy - 2 * hy * e.l;
+      const open = bot - top;
+      const closed = smooth(1 - (open - bar) / (bar * 2));
+      const happy = lc > 0 ? smooth(lc) * smooth((e.l - 0.3) / 0.3) : 0;
+      const h = lerp(Math.max(bar, open), bar * 1.35, happy);
+      const cy = lerp(open >= bar ? (top + bot) / 2 : bot - bar / 2, -hy * 0.18, happy);
+      const far = Math.max(0, s * gx) * 0.08;
+      const H = h * Math.max(0.3, 1 + P.stretch + vert - rebound * 0.1);
+      const W = 2 * hx * (1 + 0.1 * closed + 0.14 * happy - 0.35 * P.stretch + rebound * 0.05 - far);
+      const curve = clamp(P.closedCurve, -1, 1) * closed;
+      // Only a capsule bends; a taller bean first flattens into one.
+      const bend = lerp(curve, 1, happy) * smooth((2 * rr - H) / (rr * 0.8));
+      const ang = roll - s * (face.eyes.tilt * 16 + (left ? P.tL : P.tR) * 14) + e.blink * 4 * (gx < -0.05 ? -1 : 1);
+      const ex = s * d + shiftX;
+      const ey = shiftY + e.lift + s * gx * hy * 0.2 + rebound * hy * 0.16;
+      const hk = clamp(P.heart, 0, 1.4);
+      const bean = 1 - 0.65 * Math.min(1, hk);
+      let body: ReactElement;
+      if (Math.abs(bend) > 0.01 && H < 2 * rr) {
+        const half = Math.max(0, W / 2 - H / 2);
+        const depth = bend * W * 0.3;
+        const y1 = cy + depth / 2;
+        body = <path d={`M${f(-half)},${f(y1)}Q0,${f(y1 - 2 * depth)} ${f(half)},${f(y1)}`} fill="none" stroke={sclera} strokeWidth={f(H)} strokeLinecap="round" />;
+      } else {
+        body = <path d={pillPath(W, H, rr, cy)} fill={sclera} />;
+      }
+      const shineAmt = luminance(sclera) < 0.8 ? face.eyes.shine * (1 - closed) : 0;
+      return (
+        <g key={s} opacity={1 - off} transform={`translate(${f(ex)} ${f(ey)}) rotate(${f(ang)}) scale(${f(s * e.sc)} ${f(e.sc)})`}>
+          {glow > 0.01 ? <ellipse cy={f(cy)} rx={f(W * 0.78)} ry={f(H * 0.74)} fill={url("glow")} opacity={glow * (1 - 0.6 * closed)} /> : null}
+          <g opacity={hk > 0.02 ? 1 - Math.min(1, hk) * 0.85 : 1} transform={bean < 1 ? `translate(0 ${f(cy)}) scale(${f(bean)}) translate(0 ${f(-cy)})` : undefined}>
+            {body}
+            {shineAmt > 0.02 ? <ellipse cx={f(-W * 0.18)} cy={f(cy - H * 0.27)} rx={f(W * 0.14)} ry={f(H * 0.09)} fill={lighten(sclera, 0.75)} opacity={shineAmt * 0.8} /> : null}
+          </g>
+          {hk > 0.02 ? <path d={heart(0, cy, Math.max(hx, hy) * 0.78 * hk)} fill={pink} /> : null}
+          {pillLashes(W, H, cy, closed)}
+        </g>
+      );
+    });
+  };
+
+  /** Lashes on a pill eye: short flicks off the top outer corner. */
+  const pillLashes = (W: number, H: number, cy: number, closed: number) => {
+    if (face.eyes.lashes === "none" || closed > 0.95) return null;
+    const full = face.eyes.lashes === "full";
+    const spec: [number, number, number][] = tiny
+      ? [[0.82, 50, (2.6 * px) / R]]
+      : full
+        ? [
+            [0.3, 14, 0.22],
+            [0.62, 34, 0.28],
+            [0.92, 58, 0.32],
+          ]
+        : [
+            [0.5, 26, 0.2],
+            [0.86, 50, 0.25],
+          ];
+    const a = W / 2;
+    const r = Math.min(hx * PILL_EYE.r, H / 2, a);
+    const w = tiny ? 1 * px : R * (full ? 0.085 : 0.07) * thick;
+    const topAt = (x: number) => {
+      const dx = Math.max(0, x - (a - r));
+      return cy - H / 2 + (r - Math.sqrt(Math.max(0, r * r - dx * dx)));
+    };
+    return (
+      <g fill="none" stroke={ink} strokeWidth={f(w)} strokeLinecap="round" opacity={1 - closed}>
+        {spec.map(([fx, deg, len], i) => {
+          const x = fx * a;
+          const y = topAt(x);
+          const ang = (deg * Math.PI) / 180;
+          const L = R * len;
+          const dx = Math.sin(ang) * L;
+          const dy = -Math.cos(ang) * L;
+          return <path key={i} d={`M${f(x)},${f(y)}Q${f(x + dx * 0.35)},${f(y + dy * 0.75)} ${f(x + dx)},${f(y + dy)}`} />;
+        })}
+      </g>
+    );
+  };
+
   /** Offline: two still grey capsules, 8 x 2 px, no glow. */
   const capsules = () => {
     if (off < 0.01) return null;
@@ -565,20 +674,35 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
 
   const mouthY = Math.max(hy, R * 0.9) + R * 0.52 + 2;
 
+  // Pill faces: a thin smile tucked between the eyes, as low as their
+  // bottoms. It is part of the look, so it stays on the closed island too,
+  // rides along with the eyes and drops a little with each blink.
+  const mouthOp = pill ? Math.max(det, 1 - off) : det;
+  const mouthRoll = roll * 0.8;
+  const mouthDrop = pill ? ((fr.blinkL + fr.blinkR) / 2) * hy * 0.14 + rebound * hy * 0.1 : 0;
+  const mouthAt = pill
+    ? { x: P.mouthX * R * 0.3 + shiftX * 0.55, y: hy * 0.86 + shiftY * 0.5 + mouthDrop }
+    : { x: P.mouthX * R * 0.3, y: mouthY };
+
   const mouth = () => {
+    const m = mouthShape();
+    return m && mouthRoll ? <g transform={`rotate(${f(mouthRoll)} ${f(mouthAt.x)} ${f(mouthAt.y)})`}>{m}</g> : m;
+  };
+
+  const mouthShape = () => {
     const style = face.mouth.style;
-    if (det < 0.01 || style === "none") return null;
+    if (mouthOp < 0.01 || style === "none") return null;
     const sm = clamp(P.smile, -1, 1);
     const op = clamp(P.open, 0, 1.2);
-    const x0 = P.mouthX * R * 0.3;
-    const y0 = mouthY;
-    const lw = Math.max(1.5, R * 0.12);
+    const x0 = mouthAt.x;
+    const y0 = mouthAt.y;
+    const lw = pill ? Math.max(1.25 * px, hy * 0.085) : Math.max(1.5, R * 0.12);
     const inside = darken(mouthC, 0.72);
 
     if (style === "dot") {
       const r = R * 0.11 * (1 + op * 1.7);
-      if (op < 0.1) return <circle cx={f(x0)} cy={f(y0)} r={f(r)} fill={mouthC} opacity={det} />;
-      return <ellipse cx={f(x0)} cy={f(y0 + r * 0.2)} rx={f(r * 0.85)} ry={f(r * 1.1)} fill={inside} stroke={mouthC} strokeWidth={f(lw * 0.9)} opacity={det} />;
+      if (op < 0.1) return <circle cx={f(x0)} cy={f(y0)} r={f(r)} fill={mouthC} opacity={mouthOp} />;
+      return <ellipse cx={f(x0)} cy={f(y0 + r * 0.2)} rx={f(r * 0.85)} ry={f(r * 1.1)} fill={inside} stroke={mouthC} strokeWidth={f(lw * 0.9)} opacity={mouthOp} />;
     }
 
     // A cat mouth stays a cat mouth while content; unhappy, it flattens.
@@ -588,7 +712,7 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
       const y = y0 - R * 0.06;
       const lip = `M${f(x0 - w)},${f(y - depth * 0.35)}Q${f(x0 - w / 2)},${f(y + depth * 1.2)} ${f(x0)},${f(y)}Q${f(x0 + w / 2)},${f(y + depth * 1.2)} ${f(x0 + w)},${f(y - depth * 0.35)}`;
       return (
-        <g opacity={det}>
+        <g opacity={mouthOp}>
           {op > 0.05 ? (
             <ellipse cx={f(x0)} cy={f(y + depth * 0.5 + op * R * 0.22)} rx={f(w * 0.42)} ry={f(op * R * 0.34 + R * 0.04)} fill={inside} stroke={mouthC} strokeWidth={f(lw * 0.8)} />
           ) : null}
@@ -597,9 +721,10 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
       );
     }
 
-    const w = R * (style === "line" || style === "cat" ? 0.4 : 0.5);
-    const yc = y0 - sm * R * 0.15;
-    const mid = y0 + sm * R * 0.15;
+    const w = pill ? hy * (style === "line" ? 0.55 : 0.7) : R * (style === "line" || style === "cat" ? 0.4 : 0.5);
+    const sag = pill ? hy * 0.17 : R * 0.15;
+    const yc = y0 - sm * sag;
+    const mid = y0 + sm * sag;
     const tiltY = P.mouthX * R * 0.12;
     const lx = x0 - w;
     const rx = x0 + w;
@@ -607,13 +732,13 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
     const ry = yc - tiltY;
     const cU = 2 * mid - (ly + ry) / 2;
     if (op < 0.04) {
-      return <path d={`M${f(lx)},${f(ly)}Q${f(x0)},${f(cU)} ${f(rx)},${f(ry)}`} fill="none" stroke={mouthC} strokeWidth={f(lw)} strokeLinecap="round" opacity={det} />;
+      return <path d={`M${f(lx)},${f(ly)}Q${f(x0)},${f(cU)} ${f(rx)},${f(ry)}`} fill="none" stroke={mouthC} strokeWidth={f(lw)} strokeLinecap="round" opacity={mouthOp} />;
     }
     const lowMid = mid + op * R * 0.8;
     const cL = 2 * lowMid - (ly + ry) / 2;
     const shape = `M${f(lx)},${f(ly)}Q${f(x0)},${f(cU)} ${f(rx)},${f(ry)}Q${f(x0)},${f(cL)} ${f(lx)},${f(ly)}Z`;
     return (
-      <g opacity={det}>
+      <g opacity={mouthOp}>
         <clipPath id={id("m")}>
           <path d={shape} />
         </clipPath>
@@ -1002,7 +1127,7 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
         {headphones("band")}
         {top()}
         {cheeks()}
-        {eyeData.map(eye)}
+        {pill ? pillEyes() : eyeData.map(eye)}
         {capsules()}
         {brows()}
         {mouth()}

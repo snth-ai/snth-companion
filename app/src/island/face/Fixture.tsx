@@ -27,6 +27,8 @@ export interface FixtureProps {
   still?: boolean;
   reduced?: boolean;
   emote?: { kind: IdleEmote; nonce: number } | null;
+  /** With `still`: a blink closure 0..1 (review screenshots). */
+  blink?: number;
   /** The whole menu bar width; default: just around the island. */
   barWidth?: number;
   /** Shows the cutout outline and the face slot (review aid). */
@@ -64,6 +66,7 @@ export function NotchFixture(props: FixtureProps) {
             still={props.still}
             reducedMotion={props.reduced}
             emote={props.emote}
+            blink={props.blink}
             autoSleep={false}
             style={{ width: Math.min(slotW, faceWidth(h)), height: h }}
           />

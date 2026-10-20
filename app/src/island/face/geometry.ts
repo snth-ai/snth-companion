@@ -231,6 +231,11 @@ function makeEye(shape: EyeShape, R: number): EyeGeom {
     }
     case "star":
       return build(starSegs(0, R * 0.08, R * 1.18, R * 0.62, 5, 0.3), R * 1.05, R * 1.05);
+    case "pill": {
+      const hx = R * PILL_EYE.hx;
+      const hy = R * PILL_EYE.hy;
+      return build(pillSegs(2 * hx, 2 * hy, hx * PILL_EYE.r), hx, hy);
+    }
     case "heart": {
       const r = R * 1.02;
       const cy = R * 0.05;
@@ -246,6 +251,78 @@ function makeEye(shape: EyeShape, R: number): EyeGeom {
       );
     }
   }
+}
+
+// ---------- the pill eye ----------
+
+/** Proportions of the pill eye at rest: half width and half height in R,
+ * corner radius in half widths. About 1 : 1.75, a tall soft bean. */
+export const PILL_EYE = { hx: 0.62, hy: 1.08, r: 0.9 };
+
+/** A tall rounded rectangle that looks drawn by hand: the four corners are
+ * a little different, the long sides bow out a touch and the corners are squarer
+ * than a circle (a squircle). As it gets flat, every corner becomes a half
+ * circle, so a flat one is exactly a capsule (the same outline as a stroke
+ * with round caps of width h). Centred on (0, 0), outer side toward +x. */
+function pillSegs(w: number, h: number, r: number): Seg[] {
+  const a = w / 2;
+  const b = h / 2;
+  const lim = Math.max(0.01, Math.min(a, b));
+  // Top inner, top outer, bottom outer, bottom inner.
+  const [tl, tr, br, bl] = [0.92, 1.06, 1, 0.9].map((k) => Math.min(r * k, lim));
+  // Squarer corners while the eye is tall, true half circles once flat.
+  const t = Math.min(1, Math.max(0, (b - r) / r));
+  const c = 0.5523 + (0.63 - 0.5523) * t * t * (3 - 2 * t);
+  // The long sides bow out a little, in proportion to the eye, so a flat
+  // bar has none. Top and bottom are mostly corner and stay straight.
+  const out = h * 0.022 * t * 1.33;
+  const tl0: Pt = [-a + tl!, -b];
+  const tr0: Pt = [a - tr!, -b];
+  const tr1: Pt = [a, -b + tr!];
+  const br0: Pt = [a, b - br!];
+  const br1: Pt = [a - br!, b];
+  const bl0: Pt = [-a + bl!, b];
+  const bl1: Pt = [-a, b - bl!];
+  const tl1: Pt = [-a, -b + tl!];
+  const edge = (p: Pt, q: Pt, nx: number, ny: number): Seg => ({
+    k: "C",
+    p: [p, [p[0] + (q[0] - p[0]) / 3 + nx, p[1] + (q[1] - p[1]) / 3 + ny], [p[0] + ((q[0] - p[0]) * 2) / 3 + nx, p[1] + ((q[1] - p[1]) * 2) / 3 + ny], q],
+  });
+  const edges = [edge(tl0, tr0, 0, 0), edge(tr1, br0, out, 0), edge(br1, bl0, 0, 0), edge(bl1, tl1, -out * 0.7, 0)];
+  // Each corner leaves the edge before it and joins the next one along
+  // their own tangents, so the bowed sides meet the corners without a kink.
+  // A side that has shrunk to nothing (a flat eye) has no tangent of its
+  // own; the corner then runs along the axis, as a plain rounded corner.
+  const unit = (x: number, y: number, fallback: Pt): Pt => {
+    const n = Math.hypot(x, y);
+    return n < 1e-6 ? fallback : [x / n, y / n];
+  };
+  const corner = (prev: Seg, next: Seg, rad: number, along: Pt, into: Pt): Seg => {
+    const q = prev.p[3] as Pt;
+    const q2 = prev.p[2] as Pt;
+    const n0 = next.p[0] as Pt;
+    const n1 = next.p[1] as Pt;
+    const u = unit(q[0] - q2[0], q[1] - q2[1], along);
+    const v = unit(n1[0] - n0[0], n1[1] - n0[1], into);
+    return { k: "C", p: [q, [q[0] + u[0] * rad * c, q[1] + u[1] * rad * c], [n0[0] - v[0] * rad * c, n0[1] - v[1] * rad * c], n0] };
+  };
+  const [top, right, bottom, left] = edges as [Seg, Seg, Seg, Seg];
+  return [
+    top,
+    corner(top, right, tr!, [1, 0], [0, 1]),
+    right,
+    corner(right, bottom, br!, [0, 1], [-1, 0]),
+    bottom,
+    corner(bottom, left, bl!, [-1, 0], [0, -1]),
+    left,
+    corner(left, top, tl!, [0, -1], [1, 0]),
+  ];
+}
+
+/** The pill eye as a path: w x h, corner radius r, centred on (0, cy). */
+export function pillPath(w: number, h: number, r: number, cy = 0): string {
+  const segs = pillSegs(w, h, r).map((s) => ({ ...s, p: s.p.map(([x, y]) => [x, y + cy]) as typeof s.p }) as Seg);
+  return segsToPath(segs);
 }
 
 function starSegs(cx: number, cy: number, ro: number, ri: number, points: number, round: number): Seg[] {

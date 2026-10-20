@@ -16,7 +16,9 @@
 //         is the gaze; the strip under it plays a hold, a line of text, a
 //         request, an answer. &full=1 starts in full screen: the island
 //         hides, and the pointer at the desktop's top edge brings the menu
-//         bar and the island back, as the shell does.)
+//         bar and the island back, as the shell does. &face=<preset>
+//         puts that preset on Mia instead of her own look, e.g.
+//         &face=buddy.)
 //
 // Nothing here touches the network or the computer.
 
@@ -62,8 +64,10 @@ export function canonical(accelerator: string): string {
 }
 
 /** The face Mia set for herself in the mock: her preset, a little
- * changed. */
+ * changed, or the preset named by &face= (review). */
 const MIA_FACE: FaceConfig = (() => {
+  const named = params.get("face");
+  if (named) return presetFace(named);
   const face = presetFace("mia");
   face.accessory = "none";
   return face;
@@ -134,7 +138,7 @@ export class MockIslandScreen {
   async faceSet(synthId: string, face: FaceConfig): Promise<FaceSetResult> {
     await new Promise((r) => window.setTimeout(r, 250));
     if (JSON.stringify(face).length > 4096) return { result: "invalid", reason: "a face is at most 4 KB" };
-    if (params.get("faceset") === "invalid") return { result: "invalid", reason: "eyes.shape: one of round, oval, almond, droopy, cat, dot, line, star, heart" };
+    if (params.get("faceset") === "invalid") return { result: "invalid", reason: "eyes.shape: one of round, oval, almond, droopy, cat, dot, line, star, heart, pill" };
     this.state().island.faces[synthId] = face;
     void this.changed();
     return { result: "saved", face };

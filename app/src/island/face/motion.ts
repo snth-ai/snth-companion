@@ -54,6 +54,7 @@ export const CHANNELS = [
   "glr", // glasses tilt, degrees
   "ax", // trailing copy of the head for antenna and halo (lags behind)
   "ay",
+  "stretch", // pill eyes: taller (+) or squashed (-), as a fraction of the height
 ] as const;
 
 export type Channel = (typeof CHANNELS)[number];
@@ -96,6 +97,7 @@ const GROUP: Record<Channel, Group> = {
   glr: "face",
   ax: "wobble",
   ay: "wobble",
+  stretch: "pop",
 };
 
 /** When a channel counts as settled, in its own units: well under what a
@@ -137,6 +139,9 @@ export interface Frame {
   t: number;
   /** Reduced motion: the previous state's frame, fading out (a goes 0 to 1). */
   fade?: { from: Frame; a: number };
+  /** Pill eyes: the springy settle after a blink, a damped wave around 0
+   * (+ = landed low and squashed). Absent for other shapes. */
+  rebound?: number;
 }
 
 export interface EmoteRun {
@@ -269,6 +274,7 @@ export function targetPose(input: TargetInput): Pose {
     glr: 0,
     ax: 0,
     ay: 0,
+    stretch: 0,
   };
   const both = (a: "u" | "l" | "t" | "s", v: number) => {
     p[`${a}L` as Channel] = v;
@@ -489,12 +495,18 @@ export function targetPose(input: TargetInput): Pose {
     }
   }
 
+  const pill = face.eyes.shape === "pill";
+  if (pill) pillPose(p, state, st, t, level, rest);
+
   if (state === "idle" && emote && !reduced) applyEmote(p, emote, rest, baseSmile);
 
-  // Eyelids follow the eyes a little: looking down lowers them.
-  const follow = p.gy * 0.1;
-  p.uL = clamp(p.uL + follow, 0, 1);
-  p.uR = clamp(p.uR + follow, 0, 1);
+  // Eyelids follow the eyes a little: looking down lowers them. Pill eyes
+  // have no lids; the drawing squashes them with the gaze instead.
+  if (!pill) {
+    const follow = p.gy * 0.1;
+    p.uL = clamp(p.uL + follow, 0, 1);
+    p.uR = clamp(p.uR + follow, 0, 1);
+  }
 
   if (reduced) {
     p.hx = 0;
@@ -505,6 +517,85 @@ export function targetPose(input: TargetInput): Pose {
   p.ax = p.hx;
   p.ay = p.hy;
   return p;
+}
+
+/** Pill eyes have no lids, iris or brows to act with, so the states are
+ * told by the shape of the whole eye: how tall, how squashed, how tilted
+ * (tL / tR turn the eye, + inner side lower), and a closed eye is a bar
+ * that closedCurve bends (+ happy arch, - relaxed). Runs after the state's
+ * own pose, before the idle emotes. */
+function pillPose(p: Pose, state: FaceState, st: number, t: number, level: number, rest: number): void {
+  // A blink is a flat bar, not a curve.
+  p.closedCurve = 0;
+  switch (state) {
+    case "sleeping": {
+      // Flat bars low in the eye, a slow breath in their width and height.
+      const breath = Math.sin((t * Math.PI * 2) / 4.2);
+      p.uL = p.uR = 0.9;
+      p.lL = p.lR = 0.06;
+      p.sL = p.sR = 1 + 0.035 * breath;
+      p.stretch = 0.15 + 0.12 * breath;
+      break;
+    }
+    case "listening":
+      // Taller and attentive; the voice makes them swell a little. Taller,
+      // not bigger, so the meter beside the eye keeps its room.
+      p.stretch = 0.06 + level * 0.12;
+      p.uL = p.uR = 0;
+      p.sL = p.sR = 1;
+      break;
+    case "accepted":
+      // Cheeks up (the bottom rises) and a squash on the nod.
+      p.lL = p.lR = 0.2;
+      p.stretch = -0.14 * nodCurve(st);
+      break;
+    case "thinking":
+      // Up and to the side; one eye squashed from the top and turned.
+      p.uL = rest * 0.3;
+      p.uR = 0.3;
+      p.tR = 0.22;
+      p.tL = -0.05;
+      p.stretch = 0.03;
+      break;
+    case "working":
+      // Two-thirds open and level, focused.
+      p.tL = p.tR = 0.08;
+      break;
+    case "approval": {
+      // Tall, a pleading turn (outer sides lower), a stretch on the lift.
+      const lift = liftCurve(st);
+      p.stretch = 0.1 + 0.08 * lift;
+      p.sL = p.sR = 1;
+      p.tL = p.tR = -0.28;
+      break;
+    }
+    case "done": {
+      // Happy arches (^ ^) that hop with the head, and a wide thin smile
+      // instead of an open mouth.
+      const hop = envelope(st, 0, 0.42, 0.12, 0.3);
+      p.stretch = 0.25 * hop;
+      p.open = 0;
+      break;
+    }
+    case "error": {
+      // A wince on the hit, then smaller, uneven, worried eyes.
+      const hit = st < 0.35 ? Math.sin((st / 0.35) * Math.PI) : 0;
+      p.sL = 0.86;
+      p.sR = 0.78;
+      p.uL = 0.1 + 0.3 * hit;
+      p.uR = 0.18 + 0.3 * hit;
+      p.lL = p.lR = 0.06 + 0.15 * hit;
+      p.tL = p.tR = -0.32;
+      p.stretch = -0.06;
+      break;
+    }
+    case "offline":
+      p.uL = p.uR = 0.85;
+      p.lL = p.lR = 0.1;
+      break;
+    default:
+      break;
+  }
 }
 
 function applyEmote(p: Pose, e: EmoteRun, rest: number, baseSmile: number): void {
@@ -561,6 +652,7 @@ function applyEmote(p: Pose, e: EmoteRun, rest: number, baseSmile: number): void
       p.bRa += 8 * k;
       p.hy -= 2.2 * k;
       p.hr -= 5 * k;
+      p.stretch -= 0.1 * k;
       break;
     }
     case "heart_eyes": {
@@ -612,6 +704,7 @@ function applyEmote(p: Pose, e: EmoteRun, rest: number, baseSmile: number): void
       p.open = lerp(p.open, 0.5, k);
       p.smile = lerp(p.smile, -0.1, k);
       p.hy -= 2 * k;
+      p.stretch += 0.16 * k;
       p.ear = -14 * k;
       p.gl += 0.3 * k;
       break;
@@ -653,7 +746,9 @@ function springFor(g: Group, face: FaceConfig, state: FaceState): Spring {
   switch (g) {
     case "gaze":
       // At the computer the eyes stay on the cursor: stiff, no overshoot.
-      return state === "driving" ? spring(1400, 1) : spring(420 + 680 * cur, 0.92);
+      // Pill eyes move as whole eyes and land with a little give.
+      if (state === "driving") return spring(1400, 1);
+      return face.eyes.shape === "pill" ? spring(300 + 420 * cur, 0.62) : spring(420 + 680 * cur, 0.92);
     case "head":
       // Calm characters stop cleanly; lively ones keep a little bounce.
       return spring(70 + 70 * live, 0.65 + 0.3 * (1 - live));
@@ -699,6 +794,14 @@ const BLINK_CLOSE = 0.065;
 const BLINK_HOLD = 0.02;
 const BLINK_OPEN = 0.11;
 const BLINK_PAIR_GAP = 0.1;
+/** Pill eyes: how long they settle after a blink. */
+const REBOUND = 0.42;
+
+/** The settle after a blink of a pill eye, `e` seconds after it opened. */
+export function reboundCurve(e: number): number {
+  if (e < 0 || e >= REBOUND) return 0;
+  return Math.sin((2 * Math.PI * e) / 0.26) * Math.exp(-e / 0.1);
+}
 
 export class FaceSim {
   private input: SimInput;
@@ -733,6 +836,8 @@ export class FaceSim {
   private blinkLen = BLINK_CLOSE + BLINK_HOLD + BLINK_OPEN;
   /** Blinks left in the current burst, the scheduled one included. */
   private blinksLeft = 1;
+  /** When the last blink of a pill eye opened (its rebound starts there). */
+  private reboundAt = -Infinity;
 
   private emote: { kind: IdleEmote; start: number; side: 1 | -1 } | null = null;
   private nextEmote: number;
@@ -865,6 +970,7 @@ export class FaceSim {
     if (this.blinkStart < 0) return 0;
     const e = now - this.blinkStart;
     if (e >= this.blinkLen) {
+      if (this.input.face.eyes.shape === "pill") this.reboundAt = this.blinkStart + this.blinkLen;
       this.blinkStart = -1;
       return 0;
     }
@@ -1063,7 +1169,8 @@ export class FaceSim {
     // every frame; the slow ambient motion of a state gets its capped rate.
     // The symbols beside the eyes fade in over 150 ms after a state change.
     const symbolIn = !reduced && SYMBOL_STATES.has(this.state) && st < 0.2;
-    const fast = blink > 0 || this.blinkStart >= 0 || this.emote !== null || inTimeline || fading || symbolIn;
+    const settling = !reduced && now - this.reboundAt < REBOUND;
+    const fast = blink > 0 || this.blinkStart >= 0 || this.emote !== null || inTimeline || fading || symbolIn || settling;
     const capped = fps > 0 && !fast;
     const busy = fast || (moving && fps === 0);
 
@@ -1107,7 +1214,9 @@ export class FaceSim {
   };
 
   private makeFrame(now: number, blink: number, st: number): Frame {
+    const rebound = this.input.reduced ? 0 : reboundCurve(now - this.reboundAt);
     return {
+      ...(rebound !== 0 ? { rebound } : {}),
       pose: { ...this.pose },
       blinkL: blink,
       blinkR: blink,
@@ -1128,11 +1237,12 @@ export function stillFrame(
   level: number,
   compact: boolean,
   emote?: EmoteRun | null,
+  blink = 0,
 ): Frame {
   const st = HERO_TIME[state] ?? 1.2;
   const g = gaze ?? NO_GAZE;
   const amp = state === "driving" ? 1 : 0.25 + 0.75 * face.motion.curiosity;
   const look = { x: clamp(g.x, -1, 1) * amp, y: clamp(g.y, -1, 1) * amp };
   const pose = targetPose({ face, state, st, t: st, look, lean: look, level, emote: emote ?? null, reduced: false, compact });
-  return { pose, blinkL: 0, blinkR: 0, level, levelSlow: level * 0.8, state, st, t: st };
+  return { pose, blinkL: blink, blinkR: blink, level, levelSlow: level * 0.8, state, st, t: st };
 }

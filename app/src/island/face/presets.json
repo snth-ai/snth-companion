@@ -385,6 +385,38 @@
         "motion": { "blink": 0.5, "curiosity": 0.7, "liveliness": 1, "sleepy_after_min": 15 },
         "idle_emotes": ["look_around", "wink", "surprised", "squint"]
       }
+    },
+    {
+      "name": "buddy",
+      "title_en": "Buddy",
+      "title_ru": "Дружок",
+      "blurb_en": "Two white beans and a little smile. Says it all with a squish.",
+      "blurb_ru": "Две белые фасолинки и улыбка. Все чувства видно по форме глаз.",
+      "face": {
+        "v": 1,
+        "preset": "buddy",
+        "eyes": {
+          "shape": "pill",
+          "size": 0.8,
+          "spacing": 0.9,
+          "tilt": 0,
+          "sclera": "#FAFAFA",
+          "iris": { "color": "#FAFAFA", "size": 0 },
+          "pupil": { "color": "#000000", "size": 0, "shape": "round" },
+          "shine": 0,
+          "lids": { "color": "#000000", "rest": 0 },
+          "lashes": "none",
+          "glow": 0
+        },
+        "brows": { "style": "none", "color": "#FAFAFA" },
+        "mouth": { "style": "smile", "color": "#FAFAFA" },
+        "cheeks": { "blush": 0, "color": "#FF8FA3" },
+        "accessory": "none",
+        "accessory_color": "#FAFAFA",
+        "palette": { "accent": "#FAFAFA" },
+        "motion": { "blink": 0.6, "curiosity": 0.85, "liveliness": 0.7, "sleepy_after_min": 10 },
+        "idle_emotes": ["look_around", "wink", "squint", "surprised", "yawn", "heart_eyes"]
+      }
     }
   ]
 }

@@ -78,6 +78,7 @@ export const faceEn = {
     line: "Bars",
     star: "Stars",
     heart: "Hearts",
+    pill: "Beans",
   },
   pupils: { round: "Round", slit: "Slit", star: "Star", heart: "Heart", ring: "Ring" },
   lashes: { none: "None", light: "Light", full: "Full" },
