@@ -60,6 +60,10 @@
     "allow-face-refresh",
     "allow-face-set",
     "allow-island-ask-design",
-    "allow-island-mic"
+    "allow-island-mic",
+    "allow-island-stt-set",
+    "allow-island-stt-download",
+    "allow-island-stt-cancel",
+    "allow-island-stt-delete"
   ]
 }
