@@ -38,6 +38,10 @@
 //! come, and the release sends the text instead of the audio when the
 //! synth takes it. The synth's one-time offer to switch it on is a card
 //! on the island (`SttCard`), shown only while the island is idle.
+//!
+//! With wake by name on (`wake/`, off by default) the owner may say the
+//! main synth's name instead of holding a key: the wake becomes a hold of
+//! the voice key and is sent the same way.
 
 pub mod audio;
 pub mod geometry;
@@ -45,6 +49,7 @@ pub mod hold;
 pub mod panel;
 pub mod shot;
 pub mod stt;
+pub mod wake;
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -205,6 +210,9 @@ pub struct View {
     /// words yet (the island says so quietly).
     pub stt_loading: bool,
     pub stt_card: Option<SttCard>,
+    /// Wake by name: off, listening (the dot in the right ear), paused
+    /// and why, or recording a request.
+    pub wake: wake::pause::Status,
 }
 
 #[derive(Default)]
@@ -267,6 +275,8 @@ struct Hold {
     picture: Option<tauri::async_runtime::JoinHandle<Result<core_island::Image, String>>>,
     synth_id: String,
     stt: Speech,
+    /// Started by the synth's name, not a key (`wake/`).
+    wake: bool,
 }
 
 /// Who recognizes a hold's speech.
@@ -292,6 +302,8 @@ pub struct Island {
     mic_asked: AtomicBool,
     /// On-device speech-to-text: the model files and the speech thread.
     pub stt: stt::Stt,
+    /// Wake by name: its models and its listening thread.
+    pub wake_word: wake::Wake,
 }
 
 impl Island {
@@ -306,6 +318,7 @@ impl Island {
             problems: Mutex::new(HashMap::new()),
             mic_asked: AtomicBool::new(false),
             stt: stt::Stt::new(data_dir),
+            wake_word: wake::Wake::new(data_dir),
         }
     }
 }
@@ -419,6 +432,7 @@ pub fn view(ctx: &Ctx) -> View {
         // `transcript` is Some only for a hold recognized here.
         stt_loading: hold.is_some() && inner.transcript.is_some() && island.stt.engine() != stt::EngineState::Ready,
         stt_card,
+        wake: island.wake_word.status(),
     };
     drop(inner);
     // The owner has seen the offer: a restart shows it again until it is
@@ -477,6 +491,7 @@ pub fn sync(ctx: &Arc<Ctx>) {
     if !want_keys {
         cancel_hold(ctx);
     }
+    ctx.island.wake_word.kick();
     emit_view(ctx);
 }
 
@@ -811,7 +826,7 @@ fn start_hold(ctx: &Arc<Ctx>, kind: HotkeyKind, synth_id: String) {
                     stt::Route::Device => start_stt(&ctx2, &recording),
                     stt::Route::Synth(why) => Speech::Synth(why),
                 };
-                let h = Hold { recording, picture, synth_id, stt };
+                let h = Hold { recording, picture, synth_id, stt, wake: false };
                 // Under `running`'s lock, so a release either finds this
                 // hold there or has left its end in `early` already.
                 let early = {
@@ -942,7 +957,7 @@ async fn take_picture(ctx: &Arc<Ctx>) -> Result<core_island::Image, String> {
 /// the voice detector heard no speech in the whole recording
 /// (`stt::release`). One log line says which and why.
 async fn finish(ctx: &Arc<Ctx>, kind: HotkeyKind, h: Hold) {
-    let Hold { recording, picture, synth_id, stt } = h;
+    let Hold { recording, picture, synth_id, stt, wake } = h;
     let released = Instant::now();
     // From the release until the message is on its way the island says
     // "sending", whatever happens below (a panic included).
@@ -1016,6 +1031,20 @@ async fn finish(ctx: &Arc<Ctx>, kind: HotkeyKind, h: Hold) {
     let mode = if kind == HotkeyKind::ScreenVoice && !images.is_empty() { Mode::ScreenVoice } else { Mode::Voice };
     let (msg, fallback) = match release {
         stt::Release::Text(text) => {
+            // Wake by name: the request without the name in front; the
+            // name alone sends nothing and shows nothing.
+            let text = match wake.then(|| wake::request(ctx, &text)) {
+                None => text,
+                Some(Some(request)) => request,
+                Some(None) => {
+                    connect_core::logln!("island: wake: only the name was said; nothing sent");
+                    ctx.island.wake_word.count_dropped();
+                    drop(recognizing);
+                    ctx.island.inner.lock().unwrap().transcript = None;
+                    emit_view(ctx);
+                    return;
+                }
+            };
             connect_core::logln!("island: speech-to-text: sent transcript {waited} ms after release ({} characters, {secs:.1} s of audio)", text.chars().count());
             let msg = OwnerMessage { client_id: core_island::new_client_id(), mode, text: String::new(), audio: None, images, voice_transcript: Some(text.clone()) };
             ctx.island.inner.lock().unwrap().transcript = Some(text);
@@ -1035,8 +1064,11 @@ async fn finish(ctx: &Arc<Ctx>, kind: HotkeyKind, h: Hold) {
             connect_core::logln!("island: speech-to-text: dropped: silence (vad) ({secs:.1} s of audio)");
             drop(recognizing);
             ctx.island.inner.lock().unwrap().transcript = None;
-            // Seen, not just logged: the owner knows nothing went.
-            ctx.island.notice("heard_nothing", "");
+            // Seen, not just logged: the owner knows nothing went. A wake
+            // heard nothing after the name: nothing to say.
+            if !wake {
+                ctx.island.notice("heard_nothing", "");
+            }
             emit_view(ctx);
             return;
         }
@@ -1281,6 +1313,7 @@ pub fn spawn(ctx: Arc<Ctx>) {
     let mut events = ctx.core.subscribe();
     let poll_ctx = ctx.clone();
     tauri::async_runtime::spawn(async move { poll(poll_ctx).await });
+    wake::spawn(ctx.clone());
     tauri::async_runtime::spawn(async move {
         sync(&ctx);
         loop {

@@ -75,6 +75,9 @@ pub enum Status {
 
 pub struct Models {
     dir: PathBuf,
+    /// The files this set holds: `FILES` for speech-to-text, another list
+    /// for wake by name (island/wake).
+    files: &'static [&'static ModelFile],
     status: Mutex<Status>,
     cancel: AtomicBool,
     running: AtomicBool,
@@ -143,8 +146,23 @@ enum Fail {
 
 impl Models {
     pub fn new(dir: PathBuf) -> Models {
-        let status = if FILES.iter().all(|f| good(&dir, f)) { Status::Ready } else { Status::Missing };
-        Models { dir, status: Mutex::new(status), cancel: AtomicBool::new(false), running: AtomicBool::new(false) }
+        Models::with_files(dir, &FILES)
+    }
+
+    /// A set of other pinned files, in a folder of its own.
+    pub fn with_files(dir: PathBuf, files: &'static [&'static ModelFile]) -> Models {
+        let status = if files.iter().all(|f| good(&dir, f)) { Status::Ready } else { Status::Missing };
+        Models { dir, files, status: Mutex::new(status), cancel: AtomicBool::new(false), running: AtomicBool::new(false) }
+    }
+
+    /// Where a file of this set lives.
+    pub fn path(&self, f: &ModelFile) -> PathBuf {
+        self.dir.join(f.name)
+    }
+
+    /// The bytes of this set.
+    pub fn size(&self) -> u64 {
+        self.files.iter().map(|f| f.size).sum()
     }
 
     pub fn status(&self) -> Status {
@@ -176,7 +194,7 @@ impl Models {
 
     /// Bytes still to fetch (the parts already on disk count as fetched).
     fn remaining(&self) -> u64 {
-        FILES
+        self.files
             .iter()
             .filter(|f| !good(&self.dir, f))
             .map(|f| f.size.saturating_sub(std::fs::metadata(part(&self.dir, f)).map(|m| m.len()).unwrap_or(0)))
@@ -210,7 +228,7 @@ impl Models {
             }
         }
         self.cancel.store(false, Ordering::Release);
-        let total = total_size();
+        let total = self.size();
         self.set(Status::Downloading { done: total.saturating_sub(need - SPARE), total });
         changed();
         let me = self.clone();
@@ -256,7 +274,7 @@ impl Models {
             std::thread::sleep(Duration::from_millis(100));
         }
         let mut first_err = None;
-        for f in FILES {
+        for f in self.files {
             for p in [self.dir.join(f.name), part(&self.dir, f), marker(&self.dir, f)] {
                 match std::fs::remove_file(&p) {
                     Ok(()) => {}
@@ -275,10 +293,10 @@ impl Models {
     }
 
     fn fetch_all(&self, changed: &(dyn Fn() + Send + Sync)) -> Result<(), Fail> {
-        let total: u64 = total_size();
+        let total: u64 = self.size();
         // Bytes of the files done before the one in progress.
         let mut base = 0u64;
-        for f in FILES {
+        for f in self.files {
             if good(&self.dir, f) {
                 base += f.size;
                 continue;

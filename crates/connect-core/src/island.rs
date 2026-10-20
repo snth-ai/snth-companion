@@ -17,6 +17,8 @@
 //!    the island takes pictures without a voice);
 //!  - the owner's choice of speech-to-text and the synth's one-time offer
 //!    of it (`IslandSettings::stt`, `stt_offer`);
+//!  - wake by name (`IslandSettings::wake`, `wake_phrase`): the owner's
+//!    own, never sent to the synth;
 //!  - each synth's face (FaceConfig v1), cached per synth: `face.get` at
 //!    link time, `face.set` from the owner's editor, `island.event
 //!    kind=face` when the synth changed it itself;
@@ -328,12 +330,25 @@ pub struct IslandSettings {
     pub stt: SttMode,
     #[serde(default)]
     pub stt_offer: SttOffer,
+    /// Wake by name (tz-wake-word.md): the island listens for the main
+    /// synth's name and takes what follows as a hold. Off by default.
+    #[serde(default)]
+    pub wake: bool,
+    /// The owner's extra wake phrase, next to the synth's name. Empty:
+    /// the name alone.
+    #[serde(default)]
+    pub wake_phrase: String,
 }
+
+/// The longest extra wake phrase, in characters.
+pub const WAKE_PHRASE_MAX: usize = 40;
 
 impl IslandSettings {
     pub fn normalize(&mut self) {
         self.main_synth = self.main_synth.trim().to_string();
         self.hotkeys.normalize();
+        let phrase = self.wake_phrase.split_whitespace().collect::<Vec<_>>().join(" ");
+        self.wake_phrase = phrase.chars().take(WAKE_PHRASE_MAX).collect();
     }
 
     /// The synth the keys talk to among these links: the chosen one while

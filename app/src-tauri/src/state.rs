@@ -173,6 +173,8 @@ pub struct IslandDto {
     pub key_problems: std::collections::HashMap<connect_core::island::HotkeyKind, String>,
     pub mic: crate::island::audio::MicPermission,
     pub stt: SttDto,
+    /// Wake by name.
+    pub wake: crate::island::wake::WakeDto,
 }
 
 /// On-device speech-to-text on the Island screen (the switch itself is
@@ -292,6 +294,7 @@ pub async fn build_state(ctx: &Ctx) -> UiState {
                 model: ctx.island.stt.models.status(),
                 size: crate::island::stt::model::total_size(),
             },
+            wake: crate::island::wake::dto(ctx),
         },
         prefs: PrefsDto {
             onboarded: prefs.onboarded,

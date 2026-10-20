@@ -17,6 +17,7 @@
     "allow-island-mic",
     "allow-island-stt-offer",
     "allow-island-stt-card-hide",
+    "allow-island-wake-cancel",
     "allow-island-stt-download",
     "allow-approvals-pending",
     "allow-approval-answer"

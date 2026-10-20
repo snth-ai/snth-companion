@@ -173,6 +173,16 @@ mod capture {
         pub fn read_from(&self, from: usize) -> Vec<i16> {
             self.shared.lock().map(|s| s.samples.get(from..).map(<[i16]>::to_vec).unwrap_or_default()).unwrap_or_default()
         }
+
+        /// Forget the first `n` samples: the next index 0 is the old `n`.
+        /// Wake by name keeps only the last seconds while it listens, and
+        /// cuts the recording to the request when the name is heard.
+        pub fn drop_front(&self, n: usize) {
+            if let Ok(mut s) = self.shared.lock() {
+                let n = n.min(s.samples.len());
+                s.samples.drain(..n);
+            }
+        }
     }
 
     struct Shared {
@@ -344,6 +354,8 @@ mod capture {
         pub fn read_from(&self, _from: usize) -> Vec<i16> {
             Vec::new()
         }
+
+        pub fn drop_front(&self, _n: usize) {}
     }
 
     pub fn start(_on_level: Arc<dyn Fn(f32) + Send + Sync>) -> Result<Recording, String> {
@@ -361,7 +373,7 @@ mod capture {
     }
 }
 
-pub use capture::{start, Recording};
+pub use capture::{start, Recording, Tap};
 
 // --- the permission ---
 
