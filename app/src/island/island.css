@@ -178,6 +178,52 @@ html.island #root {
   margin-top: 10px;
   animation: isl-in 0.3s ease both;
 }
+
+/* The words of a hold (on-device speech-to-text): under the status, two
+   lines at most, dimmed while the key is held, brighter once sent. */
+.isl-live {
+  margin-top: 3px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: rgba(255, 255, 255, 0.5);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  transition: color 0.2s ease;
+}
+.isl-live.sent {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+/* The synth's offer of on-device speech-to-text, then the download. */
+.isl-stt {
+  margin-top: 10px;
+  animation: isl-in 0.3s ease both;
+}
+.isl-stt-text {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.92);
+}
+.isl-stt .isl-row {
+  margin-top: 10px;
+}
+.isl-progress {
+  margin-top: 10px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+.isl-progress i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.25s linear;
+}
 .isl-ask-title {
   font-weight: 600;
   margin: 2px 0 10px;
@@ -357,8 +403,12 @@ html.island #root {
   .isl-summary,
   .isl-task,
   .isl-notice,
-  .isl-approval {
+  .isl-approval,
+  .isl-stt {
     animation: none;
+  }
+  .isl-progress i {
+    transition: none;
   }
   .isl-dots i,
   .isl-ring {

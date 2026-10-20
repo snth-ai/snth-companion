@@ -143,7 +143,7 @@ URL parameters stage a screen or a state directly:
 | `account` | the platform account: `signed_out` (first run, nothing linked: "Sign in with SNTH" waits about 2 s in the "browser", then shows the consent screen for Mia and Maya), `consent` (signed in, the consent screen), `two` (signed in, Mia and Maya linked), `none` (signed in, no synths: the code field), `repair` (two linked, Maya refused her token). Without it: signed out, Mia linked with a code, as before |
 | `login` | with `account=signed_out`: the sign-in fails, `denied` (Cancel in the browser) or `expired` |
 | `connectfail` | with `account=consent`: linking Maya fails, `connect_unavailable`, `synth_outdated`, `synth_unreachable` |
-| `island` | the Island screen (with `screen=island`): `off` (default), `on`, `outdated` (the synth is older than the island), `taken` (another app holds the talk key), `micdenied`, `two` (with `account=two`: Maya listens to the keys), `nolink` (on, Mia offline: the keys are released). On `island.html` (the island window on a pretend desktop): `idle` (default), `hover`, `listening`, `screen`, `sending`, `accepted`, `thinking`, `working`, `driving`, `done`, `error`, `approval`, `text`, `offline`, `outdated`, `micdenied`, `asking`, `paused`, `two`, `shot`; with `notch=0` (a Mac without a notch) and `os=windows`. The strip under the desktop plays a hold, a line of text, an answer, a request |
+| `island` | the Island screen (with `screen=island`): `off` (default), `on`, `outdated` (the synth is older than the island), `taken` (another app holds the talk key), `micdenied`, `two` (with `account=two`: Maya listens to the keys), `nolink` (on, Mia offline: the keys are released). On `island.html` (the island window on a pretend desktop): `idle` (default), `hover`, `listening`, `screen`, `sending`, `accepted`, `thinking`, `working`, `driving`, `done`, `error`, `approval`, `text`, `offline`, `outdated`, `micdenied`, `asking`, `paused`, `two`, `shot`, and for speech on this computer `live` (the words of a hold), `livesent` (the text going), `offer` (the synth's offer), `offerdl`, `offerready`, `offerfail` (the model's download after "Turn on"); with `notch=0` (a Mac without a notch) and `os=windows`. The strip under the desktop plays a hold, a hold with its words, the offer, a line of text, an answer, a request. Speech recognition on the Island screen: `stt` (on, the model here), `sttdl` (downloading), `sttspace` (the disk is too full), `sttold` (the synth does not take text yet), `sttintel` (not available); `sttnospace=1` makes the mock download fail for lack of space |
 | `faceset` | `invalid`: the synth refuses every face the editor saves |
 | `lang` | `en`, `ru` |
 | `theme` | `light`, `dark` |
@@ -570,8 +570,37 @@ talks to `<platform>/api/app/v1/*` only. There is no override in the UI.
     preset of its id.
   - Island screen: on/off, who listens, the three keys (recorder,
     conflicts with each other and the stop shortcut, a system check,
-    default), the microphone, the face editor and "Ask <name> to design
-    their own face" (a line of text through `owner.message`).
+    default), the microphone, speech recognition, the face editor and "Ask
+    <name> to design their own face" (a line of text through
+    `owner.message`).
+  - On-device speech-to-text (`src-tauri/src/island/stt/`, TZ
+    `tz-local-stt.md` in the synth's repo; off by default, the switch
+    "Speech recognition: through the synth / on this computer" on the
+    Island screen, `IslandSettings.stt` in settings.json). Apple silicon
+    only: whisper.cpp through `whisper-rs` 0.15.1 with Metal, a
+    target-specific dependency, so Windows, Linux and the Intel half of a
+    universal build do not build it and keep the audio path (the switch
+    says it is not available there). The model is `ggml-large-v3-turbo-q5_0`
+    plus the Silero VAD for whisper.cpp, pinned to a Hugging Face revision
+    and a sha256 (`stt/model.rs`), 548 MB in `<data dir>/stt/`, fetched
+    only on the owner's yes, resumed after a break, checked, deletable, with
+    a disk-space check. One thread (`island-stt`) loads the model when a
+    hold starts (or the switch goes on) and unloads it after 5 min idle.
+    While the key is held (`stream.rs`) the audio is cut at pauses (Silero;
+    the loudness detector when it is missing), each piece decoded once with
+    the encoder window cut to the piece, and a preview of the rest goes to
+    the island (`island:view` `transcript`). The release usually takes the
+    last preview as it is. The text goes as `owner.message`
+    `voice_transcript` with `stt: "device"` and no audio, only to a synth
+    whose hello_ack has `island_device_stt`; a synth without it, a missing
+    model, an engine error, text that is only a known whisper invention
+    ("Продолжение следует...") or nothing read from audio with speech in it
+    send the audio as before (one log line). A hold where neither detector
+    hears speech sends nothing, like a tap. The synth's offer (an island
+    card, `SttCard`, `stt_offer` pending/shown/accepted/declined, pending
+    after the update for owners with the island on) shows only on an idle
+    island; accepting it starts the download and shows its progress
+    there.
 - Webview permissions: `build.rs` lists every app command, which makes Tauri
   enforce `capabilities/*.json` per window. The main window gets the app's
   commands and the event listener; the approval window gets five commands.
@@ -828,6 +857,15 @@ then split off), so it waits for the release manager.
   change, the microphone prompt and a real recording, the helper's
   `get_desktop_state` picture (and which display it takes), the island out
   of the picture, the keys on Windows, a whole round trip with a synth.
+- On-device speech-to-text, live. Tested: the cutting, stitching, silence,
+  hallucination filter, language choice and offer rules (unit tests), and
+  the real model through the speech thread on generated Russian and
+  English clips fed in real time (`cargo test -p snth-connect --release --
+  --ignored stt_real --nocapture --test-threads 1`, files in
+  /tmp/whisper-test). Not done: a real microphone hold in the app, the
+  download from Hugging Face end to end in the app, the offer on a real
+  island, a Mac on macOS 12, a signed and notarized build with whisper.cpp
+  in it.
 - Sign-in through the platform, and several synths at once, end to end. The
   core is tested against a fake platform (PKCE, the state check, consent,
   the sync adding and dropping synths, a revoked app token, sign-out, a

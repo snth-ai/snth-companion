@@ -30,6 +30,12 @@ const SCENARIOS = [
   "paused",
   "two",
   "shot",
+  "live",
+  "livesent",
+  "offer",
+  "offerdl",
+  "offerready",
+  "offerfail",
 ];
 
 function setParam(key: string, value: string | null) {
@@ -102,6 +108,12 @@ export function IslandStage() {
         </button>
         <button type="button" className="btn small" onClick={() => win.playHold("screen_voice")}>
           hold with screenshot
+        </button>
+        <button type="button" className="btn small" onClick={() => win.playLiveHold()}>
+          hold, words on device
+        </button>
+        <button type="button" className="btn small" onClick={() => win.playOffer()}>
+          speech offer
         </button>
         <button type="button" className="btn small" onClick={() => win.playText()}>
           type a message

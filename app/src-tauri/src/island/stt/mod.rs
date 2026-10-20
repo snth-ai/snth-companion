@@ -22,6 +22,10 @@
 //! one exception: a hold in which nothing was said at all sends nothing,
 //! like a tap shorter than a third of a second.
 
+// Without the engine (Windows, Linux, Intel Macs) only the model files
+// and the settings are used; the stream is there for its tests.
+#![cfg_attr(not(all(target_os = "macos", target_arch = "aarch64")), allow(dead_code))]
+
 pub mod filter;
 pub mod model;
 pub mod stream;

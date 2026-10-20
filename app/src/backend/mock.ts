@@ -107,6 +107,7 @@ import type {
   UpdateStatus,
   FaceConfig,
   HotkeyKind,
+  SttMode,
   IslandRect,
   IslandSignal,
 } from "./types";
@@ -2030,6 +2031,30 @@ class MockBackend implements Backend {
 
   faceRefresh(_synthId: string) {
     return this.islandScreen.faceRefresh();
+  }
+
+  islandSttSet(mode: SttMode) {
+    return this.islandScreen.sttSet(mode);
+  }
+
+  islandSttDownload() {
+    return this.islandScreen.sttDownload();
+  }
+
+  islandSttCancel() {
+    return this.islandScreen.sttCancel();
+  }
+
+  islandSttDelete() {
+    return this.islandScreen.sttDelete();
+  }
+
+  islandSttOffer(accept: boolean) {
+    return this.islandWin.sttOffer(accept);
+  }
+
+  islandSttCardHide() {
+    return this.islandWin.sttCardHide();
   }
 
   faceSet(synthId: string, face: FaceConfig, _patch: boolean) {

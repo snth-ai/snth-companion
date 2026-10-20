@@ -12,14 +12,21 @@
 // In full screen the shell hides the island (`view.hidden`) until the menu
 // bar comes in: the whole island fades out and slides up, and back, as the
 // bar does (about 0.2 s).
+//
+// With on-device speech-to-text the words of a hold show under the status
+// while the key is held (small, dimmed, the last two lines), and the text
+// that went stays a moment after the release. The synth's offer to turn
+// it on (and then the model's download) is a card the shell sends only
+// while the island is idle.
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { quickAnswer } from "../approval/ApprovalView";
 import { backend } from "../backend";
-import type { IslandView } from "../backend/types";
+import type { IslandView, SttCard } from "../backend/types";
 import { stringsFor } from "../i18n";
 import { shortcutText } from "../lib/format";
 import { Face, faceFor, faceWidth, type FaceState } from "./faceApi";
+import { aboutMb, tailOf, transcriptVisible } from "./sttView";
 
 /** How long the summary stays after the answer (TZ: 4-6 s). */
 const SUMMARY_FOR = 6000;
@@ -226,6 +233,66 @@ function useMotion(open: boolean, bodyH: number): { open: number; body: number; 
   return { open: valueAt(c.open, now), body: valueAt(c.body, now), moving: busy };
 }
 
+function SttCardView(props: { card: SttCard; t: ReturnType<typeof stringsFor>["island"]["w"] }) {
+  const { card, t } = props;
+  if (card.kind === "offer") {
+    return (
+      <div className="isl-stt" role="dialog" aria-label={t.sttOn}>
+        <p className="isl-stt-text">{t.sttOffer(aboutMb(card.size))}</p>
+        <div className="isl-row">
+          <span className="isl-spacer" />
+          <button type="button" className="isl-btn" onClick={() => void backend.islandSttOffer(false)}>
+            {t.sttNotNow}
+          </button>
+          <button type="button" className="isl-btn primary" onClick={() => void backend.islandSttOffer(true)}>
+            {t.sttOn}
+          </button>
+        </div>
+      </div>
+    );
+  }
+  if (card.kind === "download" || card.kind === "verifying") {
+    const pct = card.kind === "download" ? card.percent : 100;
+    return (
+      <div className="isl-stt" role="status">
+        <p className="isl-stt-text">{card.kind === "download" ? t.sttDownloading(card.percent) : t.sttVerifying}</p>
+        <div className="isl-progress" aria-hidden="true">
+          <i style={{ width: `${pct}%` }} />
+        </div>
+        <div className="isl-row">
+          <span className="isl-spacer" />
+          <button type="button" className="isl-btn" onClick={() => void backend.islandSttCardHide()}>
+            {t.sttHide}
+          </button>
+        </div>
+      </div>
+    );
+  }
+  if (card.kind === "ready") {
+    return (
+      <div className="isl-stt" role="status">
+        <p className="isl-stt-text">{t.sttReady}</p>
+      </div>
+    );
+  }
+  return (
+    <div className="isl-stt" role="alert">
+      <p className="isl-stt-text">{t.sttFailed[card.code] ?? t.sttFailed.failed}</p>
+      <div className="isl-row">
+        <span className="isl-spacer" />
+        <button type="button" className="isl-btn" onClick={() => void backend.islandSttCardHide()}>
+          {t.sttHide}
+        </button>
+        {card.code === "no_space" ? null : (
+          <button type="button" className="isl-btn primary" onClick={() => void backend.islandSttDownload().catch(() => undefined)}>
+            {t.sttRetry}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function mmss(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
@@ -286,7 +353,14 @@ export function IslandApp() {
   /** The owner is busy with the island: the face does not get bored then. */
   const engaged = Boolean(view && (view.hover || view.text_open || view.hold || view.approval || summaryShown));
   const noticeShown = Boolean(view?.notice && now - view.notice.at_ms < NOTICE_FOR);
-  const open = Boolean(view && (view.hover || view.approval || view.text_open || view.hold || summaryShown || noticeShown));
+  // The words of the hold (on-device speech-to-text): while the key is
+  // held, while the text goes, and a moment after it was accepted.
+  const transcript = view?.transcript?.trim() ?? "";
+  const transcriptShown = Boolean(view && transcriptVisible(view, now));
+  const card = view?.stt_card ?? null;
+  const open = Boolean(
+    view && (view.hover || view.approval || view.text_open || view.hold || summaryShown || noticeShown || transcriptShown || card),
+  );
 
   const motion = useMotion(open, bodyH);
   const settled = !motion.moving;
@@ -446,6 +520,11 @@ export function IslandApp() {
                     <div className="isl-status" role="status">
                       {status}
                     </div>
+                    {transcriptShown ? (
+                      <div className={`isl-live${view.hold ? "" : " sent"}`} aria-live="polite">
+                        {tailOf(transcript)}
+                      </div>
+                    ) : null}
                   </div>
                 </div>
                 {detail}
@@ -459,6 +538,8 @@ export function IslandApp() {
                     ) : null}
                   </div>
                 ) : null}
+
+                {card && !approval ? <SttCardView card={card} t={t} /> : null}
 
                 {approval && quick ? (
                   <div className="isl-approval">

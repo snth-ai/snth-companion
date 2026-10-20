@@ -393,6 +393,12 @@ export interface Hotkeys {
 
 export type MicPermission = "granted" | "denied" | "not_asked" | "unknown";
 
+/** Who turns the owner's voice into text: the synth (the default, it
+ * hears the tone of voice too) or this computer (faster). */
+export type SttMode = "synth" | "device";
+/** The synth's one-time offer of on-device speech-to-text. */
+export type SttOffer = "pending" | "shown" | "accepted" | "declined";
+
 export interface IslandSettings {
   /** Off by default (a test feature). */
   enabled: boolean;
@@ -400,7 +406,35 @@ export interface IslandSettings {
   main_synth: string;
   /** Accelerators; "" = that key is off. */
   hotkeys: Hotkeys;
+  stt: SttMode;
+  stt_offer: SttOffer;
 }
+
+/** The on-device speech-to-text model. */
+export type SttModelStatus =
+  | { state: "missing" }
+  | { state: "downloading"; done: number; total: number }
+  | { state: "verifying" }
+  | { state: "ready" }
+  /** code: no_space (detail "<need> <free>" in bytes), network, checksum, io. */
+  | { state: "failed"; code: string; detail: string };
+
+export interface SttState {
+  /** The engine is in this build (a Mac with Apple silicon). */
+  available: boolean;
+  model: SttModelStatus;
+  /** The download, in bytes. */
+  size: number;
+}
+
+/** The speech-to-text card on the island: the synth's offer, then the
+ * model's download when it was accepted there. */
+export type SttCard =
+  | { kind: "offer"; size: number }
+  | { kind: "download"; percent: number }
+  | { kind: "verifying" }
+  | { kind: "ready" }
+  | { kind: "failed"; code: string };
 
 /** The Island screen. */
 export interface IslandState {
@@ -413,6 +447,10 @@ export interface IslandState {
   faces: Record<string, FaceConfig>;
   /** synth_id -> it takes island messages (announced the feature). */
   supported: Record<string, boolean>;
+  /** synth_id -> it takes a voice message as text recognized here. */
+  device_stt: Record<string, boolean>;
+  /** On-device speech-to-text. */
+  stt: SttState;
   /** This system's default keys. */
   defaults: Hotkeys;
   /** The keys are registered with the system right now. */
@@ -493,6 +531,10 @@ export interface IslandView {
   hidden: boolean;
   hotkeys: Hotkeys;
   mic: MicPermission;
+  /** On-device speech-to-text: the words of the hold so far, then the
+   * text that was sent. Null with the speech going to the synth. */
+  transcript: string | null;
+  stt_card: SttCard | null;
 }
 
 export type IslandSignal =
@@ -760,6 +802,14 @@ export interface Backend {
   islandAskDesign(synthId: string): Promise<void>;
   /** The microphone: make the system ask, or open its privacy settings. */
   islandMic(): Promise<void>;
+  /** On-device speech-to-text on or off. Err: unsupported. On fetches the
+   * model when it is not here. */
+  islandSttSet(mode: SttMode): Promise<UiState>;
+  /** Fetch the model (again). Err: no_space, unsupported. */
+  islandSttDownload(): Promise<UiState>;
+  islandSttCancel(): Promise<UiState>;
+  /** Delete the model; the speech goes to the synth again. */
+  islandSttDelete(): Promise<UiState>;
 
   // --- the island window ---
   islandView(): Promise<IslandView>;
@@ -770,6 +820,10 @@ export interface Backend {
   /** "Stop": pause, as the stop shortcut does. */
   islandStop(): Promise<void>;
   islandOpenApp(): Promise<void>;
+  /** The synth's offer of on-device speech-to-text: "Turn on" / "Not now". */
+  islandSttOffer(accept: boolean): Promise<void>;
+  /** Hide the model's download card (it goes on, in Settings). */
+  islandSttCardHide(): Promise<void>;
   /** The island window's own signals: its view, the gaze, the mic level. */
   subscribeIsland(listener: (signal: IslandSignal) => void): () => void;
 
