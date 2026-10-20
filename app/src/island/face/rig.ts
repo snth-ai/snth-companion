@@ -20,6 +20,14 @@
 //          model: it tracks a moving pointer, gets bored of a resting one and
 //          glances away, startles at a flick, looks down with a happy squint
 //          when the pointer comes close, and breathes.
+//   smooth The same look and character as head, tuned for fluid motion (the
+//          owner liked head but found it jerky): slow pointer motion is
+//          followed by smooth pursuit (a critically damped glide), only big
+//          or fast shifts saccade, and those ease in and out over 140-220 ms
+//          with a 3% overshoot; the head spring is near critical, breath is
+//          drawn every frame, startle and squint ease in and out, and the
+//          squint waits for the pointer to dwell near the face. Its numbers
+//          are live-tunable (SmoothTuning), the lab has sliders for them.
 //
 // "classic" is the shipped behaviour: no rig at all (motion.ts keeps its own
 // gaze springs and Face.tsx its sliding eyes).
@@ -34,8 +42,11 @@ export interface Vec {
   y: number;
 }
 
-export type MotionStyle = "classic" | "cozmo" | "gloss" | "head";
-export const MOTION_STYLES: readonly MotionStyle[] = ["classic", "cozmo", "gloss", "head"];
+export type MotionStyle = "classic" | "cozmo" | "gloss" | "head" | "smooth";
+export const MOTION_STYLES: readonly MotionStyle[] = ["classic", "cozmo", "gloss", "head", "smooth"];
+
+/** Styles with the head layer (sphere turn, breath, attention). */
+export const HEAD_STYLES: ReadonlySet<MotionStyle> = new Set(["head", "smooth"]);
 
 /** Saccades: thresholds in gaze units (the -1..1 vector Face gets), times in seconds. */
 export const SACCADE = {
@@ -160,6 +171,7 @@ export const GLOSS = {
 };
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 const smooth = (t: number) => {
   const x = clamp(t, 0, 1);
   return x * x * (3 - 2 * x);
@@ -189,6 +201,30 @@ export interface RigFrame {
   /** What the attention model is doing (for the lab caption). */
   mode: "track" | "bored" | "near" | "deep" | "state";
   saccading: boolean;
+  /** Smooth style: the live-tuned turn (degrees), Cozmo share, breath size. */
+  yaw?: number;
+  pitch?: number;
+  cozmoGain?: number;
+  breathScale?: number;
+  breathDrift?: number;
+}
+
+/** What FaceSim needs from a rig (GazeRig for cozmo / gloss / head,
+ * SmoothRig for smooth). */
+export interface Rig {
+  readonly style: MotionStyle;
+  noteCursor(g: Vec | null, now: number): void;
+  step(now: number, dt: number, inp: RigInput): RigOut;
+  busy(now: number): boolean;
+  wakeTimes(): number[];
+  ambientFps(reduced: boolean): number;
+  frame(now: number): RigFrame;
+  /** Live tuning (smooth style only). */
+  setTuning?(t: Partial<SmoothTuning> | undefined): void;
+  /** How much of the pill eye's after-blink bounce to keep (1 = all). */
+  reboundGain?(): number;
+  /** Blink length multiplier (1 = the shared timing). */
+  blinkScale?(): number;
 }
 
 export interface RigInput {
@@ -215,7 +251,7 @@ interface Jump {
   micro: boolean;
 }
 
-export class GazeRig {
+export class GazeRig implements Rig {
   readonly style: MotionStyle;
   private rand: () => number;
 
@@ -585,16 +621,29 @@ export function onSphere(x: number, y: number, R: number, yaw: number, pitch: nu
 }
 
 /** Where the beans and the mouth go for a style, the eyes' gaze and the head. */
-export function placePill(style: MotionStyle, eye: Vec, head: Vec, g: PillGeom): PillPlacement {
-  if (style !== "head") return cozmo(eye.x, eye.y, g);
-  // Head: Cozmo perspective from the eyes' offset inside the head (and a
-  // share of the head turn), then the whole plane turned on a sphere.
-  const rel = { x: eye.x - head.x, y: eye.y - head.y };
+export function placePill(style: MotionStyle, eye: Vec, head: Vec, g: PillGeom, rig?: RigFrame): PillPlacement {
+  if (!HEAD_STYLES.has(style)) return cozmo(eye.x, eye.y, g);
   const S = SPHERE;
-  const base = cozmo(rel.x * S.relGain + head.x * S.headGain, rel.y * S.relGain + head.y * S.headGain, g);
+  let base: PillPlacement;
+  let yawDeg = S.yaw;
+  let pitchDeg = S.pitch;
+  if (style === "smooth") {
+    // Smooth: the Cozmo perspective follows the eyes themselves (a share of
+    // it), so a saccade changes it once instead of pumping it up while the
+    // head lags and back down as the head catches up.
+    const k = rig?.cozmoGain ?? SMOOTH.cozmoGain;
+    base = cozmo(eye.x * k, eye.y * k, g);
+    yawDeg = rig?.yaw ?? SMOOTH_DEFAULTS.turn;
+    pitchDeg = rig?.pitch ?? SMOOTH_DEFAULTS.turn * SMOOTH.pitchOfTurn;
+  } else {
+    // Head: Cozmo perspective from the eyes' offset inside the head (and a
+    // share of the head turn), then the whole plane turned on a sphere.
+    const rel = { x: eye.x - head.x, y: eye.y - head.y };
+    base = cozmo(rel.x * S.relGain + head.x * S.headGain, rel.y * S.relGain + head.y * S.headGain, g);
+  }
   const R = S.radius * g.d;
-  const yaw = (clamp(head.x, -1.2, 1.2) * S.yaw * Math.PI) / 180;
-  const pitch = (clamp(head.y, -1.2, 1.2) * S.pitch * Math.PI) / 180;
+  const yaw = (clamp(head.x, -1.2, 1.2) * yawDeg * Math.PI) / 180;
+  const pitch = (clamp(head.y, -1.2, 1.2) * pitchDeg * Math.PI) / 180;
   const turn = (p: Place): Place => {
     const q = onSphere(p.x, p.y, R, yaw, pitch, S.camera);
     return { x: q.x, y: q.y, sx: p.sx * q.sx, sy: p.sy * q.sy };
@@ -607,4 +656,394 @@ export function placePill(style: MotionStyle, eye: Vec, head: Vec, g: PillGeom):
     hl: { x: -tx * GLOSS.slide, y: -ty * GLOSS.slideY },
     turn: { x: tx, y: ty },
   };
+}
+
+// ---------- smooth: the fluid head style (C2) ----------
+
+/** The live-tunable part of the smooth style (the lab's sliders). */
+export interface SmoothTuning {
+  /** 0..1: how much the gaze glides instead of jumping. Higher = a larger
+   * offset still glides (saccade threshold), slower glides and longer jumps. */
+  smoothness: number;
+  /** Head spring: stiffness (1/s^2) and damping ratio (1 = critical). */
+  headK: number;
+  headZeta: number;
+  /** Max head turn sideways, degrees (up / down is 0.7 of it). */
+  turn: number;
+  /** Breath size, 1 = default, 0 = none (and the loop may rest). */
+  breath: number;
+  /** Boredom: glance away from a resting pointer after `boredAfter` s. */
+  bored: boolean;
+  boredAfter: number;
+}
+
+export const SMOOTH_DEFAULTS: SmoothTuning = {
+  smoothness: 0.5,
+  headK: 30,
+  headZeta: 0.85,
+  turn: 16,
+  breath: 1,
+  bored: true,
+  boredAfter: 4,
+};
+
+/** Fixed numbers of the smooth style (seconds, gaze units). */
+export const SMOOTH = {
+  /** Eye-to-target distance that triggers a saccade, at smoothness 0 and 1. */
+  saccadeAt: [0.2, 0.6] as const,
+  /** Pursuit glide: natural frequency (rad/s) at smoothness 0 and 1, critically damped. */
+  pursuitW: [26, 10] as const,
+  /** Saccade length for a short and a full (amplitude >= durFullAt) jump, at smoothness 0 and 1. */
+  durShort: [0.1, 0.18] as const,
+  durLong: [0.16, 0.28] as const,
+  durFullAt: 1.2,
+  overshoot: 0.03,
+  settle: 0.09,
+  /** After a saccade lands, pursuit only (no new jump) for this long. */
+  refract: 0.1,
+  blinkAmp: 0.9,
+  blinkChance: 0.35,
+  blinkCooldown: 2,
+  headFollow: 0.72,
+  pitchOfTurn: 0.7,
+  cozmoGain: 0.75,
+  breathPeriod: 4.6,
+  breathScale: 0.006,
+  breathDrift: 0.22,
+  /** Near: enter / leave radius (hysteresis), dwell before the squint, look-down. */
+  nearIn: 0.22,
+  nearOut: 0.3,
+  nearDwell: 0.4,
+  nearLookDown: 0.35,
+  /** Squint: critically damped toward on / off at this frequency (rad/s). */
+  squintW: 7,
+  flick: 4.5,
+  flickTau: 0.05,
+  startleRise: 0.18,
+  startleHold: 0.12,
+  startleFall: 0.5,
+  startleGain: 0.75,
+  startleCooldown: 2.5,
+  /** Keep this much of the pill eye's bounce after a blink. */
+  rebound: 0.35,
+  /** Blinks a little slower than the shared timing, softer. */
+  blinkScale: 1.2,
+};
+
+/** The numbers a smoothness value stands for. */
+export function smoothDerived(t: SmoothTuning) {
+  const s = clamp(t.smoothness, 0, 1);
+  return {
+    saccadeAt: lerp(SMOOTH.saccadeAt[0], SMOOTH.saccadeAt[1], s),
+    pursuitW: lerp(SMOOTH.pursuitW[0], SMOOTH.pursuitW[1], s),
+    durShort: lerp(SMOOTH.durShort[0], SMOOTH.durShort[1], s),
+    durLong: lerp(SMOOTH.durLong[0], SMOOTH.durLong[1], s),
+  };
+}
+
+/** Cubic Hermite from p0 (velocity v0, per second) to p1 (velocity 0) over T seconds, at x 0..1. */
+function hermite(p0: number, v0: number, p1: number, T: number, x: number): number {
+  const x2 = x * x;
+  const x3 = x2 * x;
+  return (2 * x3 - 3 * x2 + 1) * p0 + (x3 - 2 * x2 + x) * T * v0 + (-2 * x3 + 3 * x2) * p1;
+}
+
+interface Glide {
+  p0: Vec;
+  v0: Vec;
+  /** Where it lands (past the target by the overshoot), and the target. */
+  over: Vec;
+  to: Vec;
+  t0: number;
+  dur: number;
+}
+
+export class SmoothRig implements Rig {
+  readonly style: MotionStyle = "smooth";
+  private rand: () => number;
+  private t: SmoothTuning = { ...SMOOTH_DEFAULTS };
+  private d = smoothDerived(SMOOTH_DEFAULTS);
+
+  private eye: Vec;
+  private eyeV: Vec = { x: 0, y: 0 };
+  private want: Vec;
+  private sac: Glide | null = null;
+  private sacEnd = -Infinity;
+  private lastBlinkAsk = -Infinity;
+
+  private head: Vec;
+  private headV: Vec = { x: 0, y: 0 };
+
+  private cursorPrev: Vec | null = null;
+  private cursorPrevAt = -Infinity;
+  private speed = 0;
+  private lastMeaningful: number;
+  private meaningfulFrom: Vec | null = null;
+  private surpriseAt = -Infinity;
+  private nearSince: number | null = null;
+  private nearOn = false;
+  private squint = 0;
+  private squintV = 0;
+  private bored: { away: boolean; until: number; spot: Vec } | null = null;
+  private mode: RigFrame["mode"] = "track";
+  private breathe = 0;
+
+  constructor(now: number, start: Vec, rand: () => number = Math.random) {
+    this.rand = rand;
+    this.eye = { ...start };
+    this.want = { ...start };
+    this.head = { x: start.x * SMOOTH.headFollow, y: start.y * SMOOTH.headFollow };
+    this.lastMeaningful = now;
+  }
+
+  private r(lo: number, hi: number): number {
+    return lo + this.rand() * (hi - lo);
+  }
+
+  setTuning(t: Partial<SmoothTuning> | undefined): void {
+    this.t = { ...SMOOTH_DEFAULTS, ...(t ?? {}) };
+    this.d = smoothDerived(this.t);
+  }
+
+  reboundGain(): number {
+    return SMOOTH.rebound;
+  }
+
+  blinkScale(): number {
+    return SMOOTH.blinkScale;
+  }
+
+  noteCursor(g: Vec | null, now: number): void {
+    if (!g) {
+      this.cursorPrev = null;
+      return;
+    }
+    const prev = this.cursorPrev;
+    const dt = now - this.cursorPrevAt;
+    if (prev && dt > 0.004 && dt < 0.15) {
+      const v = Math.hypot(g.x - prev.x, g.y - prev.y) / dt;
+      this.speed += (v - this.speed) * (1 - Math.exp(-dt / SMOOTH.flickTau));
+    } else {
+      this.speed = 0;
+    }
+    this.cursorPrev = { ...g };
+    this.cursorPrevAt = now;
+    const from = this.meaningfulFrom;
+    if (!from || Math.hypot(g.x - from.x, g.y - from.y) > ATTENTION.meaningful) {
+      this.lastMeaningful = now;
+      this.meaningfulFrom = { ...g };
+      this.bored = null;
+    }
+    if (this.speed > SMOOTH.flick && now - this.surpriseAt > SMOOTH.startleCooldown) this.surpriseAt = now;
+  }
+
+  /** Startle 0..1: eases in, holds a moment, eases out. */
+  surpriseLevel(now: number): number {
+    const e = now - this.surpriseAt;
+    const { startleRise: a, startleHold: h, startleFall: b } = SMOOTH;
+    if (e < 0 || e > a + h + b) return 0;
+    const k = e < a ? smooth(e / a) : e < a + h ? 1 : 1 - smooth((e - a - h) / b);
+    return k * SMOOTH.startleGain;
+  }
+
+  private attend(now: number, inp: RigInput): Vec {
+    if (inp.reduced || inp.state !== "idle") {
+      this.mode = inp.state === "idle" ? "track" : "state";
+      this.bored = null;
+      this.nearSince = null;
+      this.nearOn = false;
+      return inp.want;
+    }
+    // Near, with a dwell before it counts and a wider radius to leave, so a
+    // pointer passing by does not trigger it and the edge does not flicker.
+    const c = inp.cursor;
+    const dist = c ? len(c) : Infinity;
+    if (this.nearOn) {
+      if (dist > SMOOTH.nearOut) {
+        this.nearOn = false;
+        this.nearSince = null;
+      }
+    } else if (dist < SMOOTH.nearIn) {
+      if (this.nearSince === null) this.nearSince = now;
+      else if (now - this.nearSince >= SMOOTH.nearDwell) this.nearOn = true;
+    } else {
+      this.nearSince = null;
+    }
+    if (this.nearOn) {
+      this.mode = "near";
+      this.bored = null;
+      return { x: inp.want.x, y: clamp(inp.want.y + SMOOTH.nearLookDown, -1, 1) };
+    }
+    const rest = now - this.lastMeaningful;
+    if (!this.t.bored || rest < this.t.boredAfter) {
+      this.mode = "track";
+      this.bored = null;
+      return inp.want;
+    }
+    const deep = rest > this.t.boredAfter + ATTENTION.deepAfter - ATTENTION.boredAfter;
+    if (!this.bored || now >= this.bored.until) {
+      const away = !this.bored || !this.bored.away;
+      if (away) {
+        let spot: Vec;
+        if (deep && this.rand() < 0.4) spot = { x: this.r(-0.1, 0.1), y: this.r(-0.05, 0.12) };
+        else {
+          const side = inp.want.x > 0.15 ? -1 : inp.want.x < -0.15 ? 1 : this.rand() < 0.5 ? -1 : 1;
+          spot = { x: side * this.r(0.35, 0.85), y: this.r(-0.4, 0.25) };
+        }
+        this.bored = { away: true, until: now + this.r(ATTENTION.awayMin, ATTENTION.awayMax) * (deep ? 2 : 1.2), spot };
+      } else {
+        this.bored = { away: false, until: now + this.r(ATTENTION.backMin, ATTENTION.backMax) * (deep ? 0.8 : 1.2), spot: inp.want };
+      }
+    }
+    this.mode = deep ? "deep" : "bored";
+    return this.bored.away ? this.bored.spot : inp.want;
+  }
+
+  step(now: number, dt: number, inp: RigInput): RigOut {
+    let blink = false;
+    const want = this.attend(now, inp);
+    this.want = want;
+    if (inp.reduced) {
+      this.eye = { ...want };
+      this.eyeV = { x: 0, y: 0 };
+      this.sac = null;
+      this.head = { x: want.x * SMOOTH.headFollow, y: want.y * SMOOTH.headFollow };
+      this.headV = { x: 0, y: 0 };
+      this.squint = 0;
+      this.squintV = 0;
+      this.breathe = 0;
+      return { eye: this.eye, blink };
+    }
+    const steps = Math.max(1, Math.ceil(dt / (1 / 240)));
+    const h = dt / steps;
+
+    if (!this.sac) {
+      const dist = Math.hypot(want.x - this.eye.x, want.y - this.eye.y);
+      if (inp.state !== "driving" && dist > this.d.saccadeAt && now - this.sacEnd > SMOOTH.refract) blink = this.startSaccade(now, want);
+    }
+    if (this.sac) {
+      const j = this.sac;
+      const x = (now - j.t0) / j.dur;
+      const prev = { ...this.eye };
+      if (x < 1) {
+        this.eye = { x: hermite(j.p0.x, j.v0.x, j.over.x, j.dur, x), y: hermite(j.p0.y, j.v0.y, j.over.y, j.dur, x) };
+      } else {
+        const x2 = (now - j.t0 - j.dur) / SMOOTH.settle;
+        if (x2 < 1) {
+          const k = smooth(x2);
+          this.eye = { x: j.over.x + (j.to.x - j.over.x) * k, y: j.over.y + (j.to.y - j.over.y) * k };
+        } else {
+          this.eye = { ...j.to };
+          this.sac = null;
+          this.sacEnd = now;
+        }
+      }
+      this.eyeV = this.sac && dt > 0 ? { x: (this.eye.x - prev.x) / dt, y: (this.eye.y - prev.y) / dt } : { x: 0, y: 0 };
+    } else {
+      // Smooth pursuit: a critically damped glide after the target.
+      const w = inp.state === "driving" ? 30 : this.d.pursuitW;
+      for (let i = 0; i < steps; i++) {
+        this.eyeV.x += (w * w * (want.x - this.eye.x) - 2 * w * this.eyeV.x) * h;
+        this.eyeV.y += (w * w * (want.y - this.eye.y) - 2 * w * this.eyeV.y) * h;
+        this.eye.x += this.eyeV.x * h;
+        this.eye.y += this.eyeV.y * h;
+      }
+    }
+
+    // The head follows the eyes on its own, slower spring.
+    const k = this.t.headK;
+    const c = 2 * this.t.headZeta * Math.sqrt(k);
+    const tx = this.eye.x * SMOOTH.headFollow;
+    const ty = this.eye.y * SMOOTH.headFollow;
+    for (let i = 0; i < steps; i++) {
+      this.headV.x += (k * (tx - this.head.x) - c * this.headV.x) * h;
+      this.headV.y += (k * (ty - this.head.y) - c * this.headV.y) * h;
+      this.head.x += this.headV.x * h;
+      this.head.y += this.headV.y * h;
+    }
+
+    // Squint: critically damped toward on / off, so it eases both ways.
+    const sq = this.mode === "near" ? 1 : 0;
+    const sw = SMOOTH.squintW;
+    for (let i = 0; i < steps; i++) {
+      this.squintV += (sw * sw * (sq - this.squint) - 2 * sw * this.squintV) * h;
+      this.squint += this.squintV * h;
+    }
+    this.breathe = this.t.breath > 0 ? Math.sin((now * 2 * Math.PI) / SMOOTH.breathPeriod) : 0;
+    return { eye: this.eye, blink };
+  }
+
+  private startSaccade(now: number, to: Vec): boolean {
+    const amp = Math.hypot(to.x - this.eye.x, to.y - this.eye.y);
+    const k = clamp(amp / SMOOTH.durFullAt, 0, 1);
+    const ov = SMOOTH.overshoot;
+    this.sac = {
+      p0: { ...this.eye },
+      v0: { ...this.eyeV },
+      over: { x: to.x + (to.x - this.eye.x) * ov, y: to.y + (to.y - this.eye.y) * ov },
+      to: { ...to },
+      t0: now,
+      dur: lerp(this.d.durShort, this.d.durLong, k),
+    };
+    if (amp >= SMOOTH.blinkAmp && now - this.lastBlinkAsk > SMOOTH.blinkCooldown && this.rand() < SMOOTH.blinkChance) {
+      this.lastBlinkAsk = now;
+      return true;
+    }
+    return false;
+  }
+
+  busy(now: number): boolean {
+    // Breathing is drawn every frame (no stepping); breath 0 lets it rest.
+    if (this.t.breath > 0) return true;
+    if (this.sac) return true;
+    if (Math.abs(this.want.x - this.eye.x) > 0.002 || Math.abs(this.want.y - this.eye.y) > 0.002) return true;
+    if (Math.abs(this.eyeV.x) > 0.01 || Math.abs(this.eyeV.y) > 0.01) return true;
+    const f = SMOOTH.headFollow;
+    if (Math.abs(this.eye.x * f - this.head.x) > 0.003 || Math.abs(this.eye.y * f - this.head.y) > 0.003) return true;
+    if (Math.abs(this.headV.x) > 0.01 || Math.abs(this.headV.y) > 0.01) return true;
+    if (this.surpriseLevel(now) > 0) return true;
+    if (Math.abs((this.mode === "near" ? 1 : 0) - this.squint) > 0.002 || Math.abs(this.squintV) > 0.01) return true;
+    return false;
+  }
+
+  wakeTimes(): number[] {
+    const out: number[] = [];
+    if (this.t.bored) out.push(this.lastMeaningful + this.t.boredAfter + 0.01);
+    if (this.bored) out.push(this.bored.until);
+    if (this.nearSince !== null && !this.nearOn) out.push(this.nearSince + SMOOTH.nearDwell + 0.01);
+    return out;
+  }
+
+  ambientFps(): number {
+    return 0;
+  }
+
+  frame(now: number): RigFrame {
+    const b = this.t.breath;
+    return {
+      style: "smooth",
+      head: { ...this.head },
+      breathe: this.breathe,
+      surprise: this.surpriseLevel(now),
+      squint: clamp(this.squint, 0, 1),
+      mode: this.mode,
+      saccading: this.sac !== null,
+      yaw: this.t.turn,
+      pitch: this.t.turn * SMOOTH.pitchOfTurn,
+      cozmoGain: SMOOTH.cozmoGain,
+      breathScale: SMOOTH.breathScale * b,
+      breathDrift: SMOOTH.breathDrift * b,
+    };
+  }
+}
+
+/** The rig for a style (classic has none). */
+export function makeRig(style: MotionStyle, now: number, start: Vec, tuning?: Partial<SmoothTuning>): Rig | null {
+  if (style === "classic") return null;
+  if (style === "smooth") {
+    const r = new SmoothRig(now, start);
+    r.setTuning(tuning);
+    return r;
+  }
+  return new GazeRig(style, now, start);
 }

@@ -133,3 +133,118 @@ test("classic stays the default: no style means the shipped sliding eyes", () =>
   assert.equal(styleOf({ face: presetFace("buddy"), motionStyle: "head" }), "head");
   assert.equal(styleOf({ face: presetFace("mia"), motionStyle: "head" }), "classic", "the rig is for pill eyes only");
 });
+
+// ---------- smooth (C2) ----------
+
+import { SMOOTH, SMOOTH_DEFAULTS, SmoothRig, makeRig, smoothDerived } from "./rig.ts";
+
+const idle = (want, cursor = null) => ({ want, cursor, state: "idle", reduced: false });
+
+test("smooth: a slowly moving target is followed by a glide, never held still and never jumped", () => {
+  const rig = new SmoothRig(0, { x: -0.6, y: 0 }, () => 0.9);
+  let t = 0;
+  let prev = -0.6;
+  let held = 0;
+  let maxStep = 0;
+  for (let i = 0; i < 240; i++) {
+    t += 1 / 120;
+    const out = rig.step(t, 1 / 120, idle({ x: -0.6 + 0.5 * t, y: 0 }));
+    const step = Math.abs(out.eye.x - prev);
+    if (i > 10 && step < 1e-4) held++;
+    maxStep = Math.max(maxStep, step);
+    prev = out.eye.x;
+    assert.equal(rig.frame(t).saccading, false, `no saccade at ${t.toFixed(2)}`);
+  }
+  assert.equal(held, 0, "no stair-step holds");
+  assert.ok(maxStep < 0.02, `continuous (largest step per frame ${maxStep})`);
+});
+
+test("smooth: a big jump is an eased saccade of 140-220 ms with a 2-4% overshoot", () => {
+  const d = smoothDerived(SMOOTH_DEFAULTS);
+  assert.ok(Math.abs(d.durShort - 0.14) < 1e-9 && Math.abs(d.durLong - 0.22) < 1e-9);
+  assert.ok(SMOOTH.overshoot >= 0.02 && SMOOTH.overshoot <= 0.04);
+  const rig = new SmoothRig(0, { x: -0.5, y: 0 }, () => 0.9);
+  let t = 0;
+  const xs = [];
+  for (let i = 0; i < 120; i++) {
+    t += 1 / 240;
+    xs.push({ t, x: rig.step(t, 1 / 240, idle({ x: 0.5, y: 0 })).eye.x });
+  }
+  const peak = Math.max(...xs.map((p) => p.x));
+  assert.ok(peak > 0.5 && peak <= 0.5 + 1.0 * SMOOTH.overshoot + 1e-6, `overshoot ${peak}`);
+  const reached = xs.find((p) => p.x >= 0.5);
+  assert.ok(reached.t > 0.1 && reached.t < 0.24, `reached at ${reached.t}`);
+  // Eased: the first and last steps of the jump are small, no velocity snap.
+  const steps = xs.slice(1).map((p, i) => Math.abs(p.x - xs[i].x));
+  const biggest = Math.max(...steps);
+  assert.ok(steps[0] < biggest * 0.25, "eases in");
+  const end = xs.at(-1).x;
+  assert.ok(Math.abs(end - 0.5) < 1e-6, "settles on the target");
+});
+
+test("smooth: the head follows without wobble at the default damping", () => {
+  const rig = new SmoothRig(0, { x: 0, y: 0 }, () => 0.9);
+  let t = 0;
+  let peak = 0;
+  for (let i = 0; i < 480; i++) {
+    t += 1 / 120;
+    rig.step(t, 1 / 120, { want: { x: 0.9, y: 0 }, cursor: null, state: "listening", reduced: false });
+    peak = Math.max(peak, rig.frame(t).head.x);
+  }
+  const rest = 0.9 * SMOOTH.headFollow;
+  assert.ok(peak < rest * 1.02, `overshoot at most 2% (peak ${peak}, rest ${rest})`);
+  assert.ok(Math.abs(rig.frame(t).head.x - rest) < 0.01);
+});
+
+test("smooth: a pointer passing the face does not squint; a dwelling one does, easing in", () => {
+  const rig = new SmoothRig(0, { x: 0, y: 0 }, () => 0.9);
+  const near = { x: 0.05, y: 0.1 };
+  let t = 0;
+  for (let i = 0; i < 36; i++) {
+    t += 1 / 120;
+    rig.step(t, 1 / 120, idle(near, near));
+  }
+  assert.equal(rig.frame(t).mode, "track", "0.3 s near is only passing by");
+  for (let i = 0; i < 36; i++) {
+    t += 1 / 120;
+    rig.step(t, 1 / 120, idle({ x: 0.8, y: 0 }, { x: 0.8, y: 0 }));
+  }
+  for (let i = 0; i < 60; i++) {
+    t += 1 / 120;
+    rig.step(t, 1 / 120, idle(near, near));
+  }
+  assert.equal(rig.frame(t).mode, "near");
+  const early = rig.frame(t).squint;
+  for (let i = 0; i < 120; i++) {
+    t += 1 / 120;
+    rig.step(t, 1 / 120, idle(near, near));
+  }
+  assert.ok(early < 0.5 && rig.frame(t).squint > 0.9, `eases in (${early} then ${rig.frame(t).squint})`);
+});
+
+test("smooth: the startle eases in and out", () => {
+  const rig = new SmoothRig(0, { x: 0, y: 0 }, () => 0.9);
+  let t = 0;
+  for (let i = 0; i <= 6; i++) {
+    rig.noteCursor({ x: -0.9 + i * 0.3, y: 0.2 }, t);
+    t += 0.016;
+  }
+  // Onset: the first moment with any startle.
+  let start = 0;
+  while (rig.surpriseLevel(start + 0.0005) === 0 && start < 1) start += 0.0005;
+  assert.ok(rig.surpriseLevel(start + 0.03) < 0.15, "no pop at the start");
+  assert.ok(rig.surpriseLevel(start + 0.25) > 0.6, "full at the hold");
+  assert.ok(rig.surpriseLevel(start + 0.7) < 0.4, "eases out");
+  assert.equal(rig.surpriseLevel(start + 1), 0);
+});
+
+test("smooth: live tuning applies, breath 0 lets the loop rest, makeRig picks the class", () => {
+  const rig = makeRig("smooth", 0, { x: 0, y: 0 }, { turn: 24, breath: 0 });
+  assert.ok(rig instanceof SmoothRig);
+  rig.step(0.01, 0.01, idle({ x: 0, y: 0 }));
+  assert.equal(rig.frame(0.01).yaw, 24);
+  assert.equal(rig.busy(0.01), false, "settled and no breath: nothing to draw");
+  rig.setTuning({ breath: 1 });
+  assert.equal(rig.busy(0.02), true, "breathing is drawn every frame");
+  assert.equal(makeRig("classic", 0, { x: 0, y: 0 }), null);
+});

@@ -14,7 +14,7 @@
 // cross-fade, nothing blinks or wanders; only the microphone meter moves.
 
 // The .ts extension keeps this file runnable as is under `node --test`.
-import { GazeRig, type MotionStyle, type RigFrame } from "./rig.ts";
+import { makeRig, type MotionStyle, type Rig, type RigFrame, type SmoothTuning } from "./rig.ts";
 import type { FaceConfig, FaceState, IdleEmote } from "./schema";
 
 // ---------- the clock ----------
@@ -795,6 +795,8 @@ export interface SimInput {
   compact: boolean;
   /** Pill eyes only: how the gaze moves (rig.ts). Default classic. */
   motionStyle?: MotionStyle;
+  /** Live tuning of the smooth style (the lab's sliders). */
+  rigTuning?: Partial<SmoothTuning>;
 }
 
 /** The motion style in effect: the rig works on pill eyes only. */
@@ -921,7 +923,7 @@ export class FaceSim {
   private fadeStart = 0;
 
   /** The gaze rig (pill eyes with a motion style), else null. */
-  private rig: GazeRig | null = null;
+  private rig: Rig | null = null;
 
   constructor(input: SimInput, onFrame: (frame: Frame) => void) {
     const now = faceClock();
@@ -949,9 +951,12 @@ export class FaceSim {
       this.rig = null;
       return;
     }
-    if (this.rig?.style === style) return;
-    this.rig = new GazeRig(style, now, { x: this.pose.gx, y: this.pose.gy });
-    this.rig.noteCursor(this.input.gaze, now);
+    if (this.rig?.style === style) {
+      this.rig.setTuning?.(this.input.rigTuning);
+      return;
+    }
+    this.rig = makeRig(style, now, { x: this.pose.gx, y: this.pose.gy }, this.input.rigTuning);
+    this.rig?.noteCursor(this.input.gaze, now);
   }
 
   /** The first frame, before any animation. */
@@ -1109,7 +1114,7 @@ export class FaceSim {
       // Reduced motion and driving: straight onto the target, no saccades.
       // With the rig the saccades happen there; only the daydreaming glances
       // stay here (and the head style has its own attention instead).
-      if (this.rig && !reduced && !driving && this.rig.style !== "head") this.daydream(now, state, live);
+      if (this.rig && !reduced && !driving && this.rig.style !== "head" && this.rig.style !== "smooth") this.daydream(now, state, live);
       else this.wander = null;
       this.fix = want;
       this.jitter = { x: 0, y: 0 };
@@ -1221,7 +1226,7 @@ export class FaceSim {
     if (!noBlinks && this.blinkStart < 0 && now >= this.blinkAt) {
       this.blinkStart = now;
       const slow = face.motion.blink < 0.3 ? 1.25 : 1;
-      const v = rand(0.92, 1.12) * slow;
+      const v = rand(0.92, 1.12) * slow * (this.rig?.blinkScale?.() ?? 1);
       this.blinkClose = BLINK_CLOSE * v;
       this.blinkLen = (BLINK_CLOSE + BLINK_HOLD + BLINK_OPEN) * v;
       this.blinksLeft -= 1;
@@ -1336,7 +1341,7 @@ export class FaceSim {
   };
 
   private makeFrame(now: number, blink: number, st: number): Frame {
-    const rebound = this.input.reduced ? 0 : reboundCurve(now - this.reboundAt);
+    const rebound = this.input.reduced ? 0 : reboundCurve(now - this.reboundAt) * (this.rig?.reboundGain?.() ?? 1);
     return {
       ...(rebound !== 0 ? { rebound } : {}),
       ...(this.rig ? { rig: this.rig.frame(now) } : {}),

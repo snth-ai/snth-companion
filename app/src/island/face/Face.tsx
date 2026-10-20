@@ -14,7 +14,7 @@ import { useEffect, useId, useMemo, useRef, useState, type CSSProperties, type R
 import { darken, drain, lighten, luminance, mix, visibleOnBlack } from "./color";
 import { PILL_EYE, eyeGeom, f, heart, pillPath, softStar, sparkle } from "./geometry";
 import { EMOTE_LENGTH, FaceSim, HERO_TIME, LID_REST, nodCurve, stillFrame, styleOf, type Frame, type Vec } from "./motion";
-import { GLOSS, HEAD, placePill, type MotionStyle, type PillPlacement } from "./rig";
+import { GLOSS, HEAD, HEAD_STYLES, placePill, type MotionStyle, type PillPlacement, type SmoothTuning } from "./rig";
 import { clampFace, type FaceConfig, type FaceState, type IdleEmote } from "./schema";
 
 /** Below this height (px) brows, mouth and accessories are hidden. */
@@ -80,6 +80,8 @@ export interface FaceProps {
   /** Pill eyes: how the gaze moves and how the beans are drawn (rig.ts).
    * Default "classic", the shipped sliding eyes. */
   motionStyle?: MotionStyle;
+  /** Live tuning of the smooth style (lab sliders); ignored by the others. */
+  rigTuning?: Partial<SmoothTuning>;
   label?: string;
   className?: string;
   style?: CSSProperties;
@@ -110,9 +112,10 @@ export function Face(props: FaceProps) {
   const uid = useId().replace(/[^a-zA-Z0-9_-]/g, "");
 
   const motionStyle = props.motionStyle ?? "classic";
+  const rigTuning = props.rigTuning;
   const input = useMemo(
-    () => ({ face, state, gaze, level, reduced, autoSleep, compact, motionStyle }),
-    [face, state, gaze, level, reduced, autoSleep, compact, motionStyle],
+    () => ({ face, state, gaze, level, reduced, autoSleep, compact, motionStyle, rigTuning }),
+    [face, state, gaze, level, reduced, autoSleep, compact, motionStyle, rigTuning],
   );
   const inputRef = useRef(input);
   inputRef.current = input;
@@ -180,6 +183,9 @@ export function Face(props: FaceProps) {
 // ---------- drawing ----------
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+/** Scale factors need finer steps than f's 0.01: a 1% step of a whole
+ * eye or face is a visible pop while it breathes or turns. */
+const fs = (n: number) => (Math.round(n * 10000) / 10000).toString();
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 const smooth = (t: number) => {
   const x = clamp(t, 0, 1);
@@ -252,7 +258,7 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
    * (perspective, head turn) instead of sliding them (see rig.ts). */
   const style: MotionStyle = pill ? (o.style ?? "classic") : "classic";
   const rigOn = style !== "classic";
-  const gloss = style === "gloss" || style === "head";
+  const gloss = style === "gloss" || HEAD_STYLES.has(style);
   // Whole-eye shift with the gaze; flat eyes keep a steady outline and move
   // a light core inside instead. Pill eyes have nothing inside to move, so
   // the whole eye travels much further.
@@ -266,8 +272,10 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
   const headK = det < 0.5 ? 0.5 : 1;
   const nod = fr.state === "accepted" && !reduced ? nodCurve(vst) * (det < 0.5 ? 2 : 3) * px : 0;
   // Head style: a slow breath, a tiny scale and drift around the eye line.
-  const breath = style === "head" && fr.rig && !reduced ? fr.rig.breathe : 0;
-  const breathe = breath ? ` translate(0 ${f(hy + HEAD.breathDrift * breath)}) scale(${f(1 + HEAD.breathScale * breath)}) translate(0 ${f(-hy)})` : "";
+  const breath = HEAD_STYLES.has(style) && fr.rig && !reduced ? fr.rig.breathe : 0;
+  const bDrift = fr.rig?.breathDrift ?? HEAD.breathDrift;
+  const bScale = fr.rig?.breathScale ?? HEAD.breathScale;
+  const breathe = breath ? ` translate(0 ${f(hy + bDrift * breath)}) scale(${fs(1 + bScale * breath)}) translate(0 ${f(-hy)})` : "";
   const head = `translate(${f(P.hx * headK)} ${f(P.hy * headK + nod)}) rotate(${f(P.hr * (det < 0.5 ? 0.45 : 1))} 0 ${f(R)})${breathe}`;
   // Antenna and halo trail the head on a loose spring.
   const wobX = clamp((P.ax - P.hx) * 1.4 - P.hr * 0.25, -R, R);
@@ -349,7 +357,7 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
   });
 
   const place: PillPlacement | null = rigOn
-    ? placePill(style, { x: gx, y: gy }, fr.rig ? fr.rig.head : { x: gx, y: gy }, { d, hx, hy, mouthX: 0, mouthY: hy * 0.86 })
+    ? placePill(style, { x: gx, y: gy }, fr.rig ? fr.rig.head : { x: gx, y: gy }, { d, hx, hy, mouthX: 0, mouthY: hy * 0.86 }, fr.rig)
     : null;
 
   const rot = (s: number) => -s * face.eyes.tilt * 16;
@@ -571,7 +579,10 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
       const curve = clamp(P.closedCurve, -1, 1) * closed;
       // Only a capsule bends; a taller bean first flattens into one.
       const bend = lerp(curve, 1, happy) * smooth((2 * rr - H) / (rr * 0.8));
-      const ang = roll - s * (face.eyes.tilt * 16 + (left ? P.tL : P.tR) * 14) + e.blink * 4 * (gx < -0.05 ? -1 : 1);
+      // The blink's small turn follows the gaze side; smooth eases it through
+      // the middle instead of flipping sign.
+      const blinkSide = style === "smooth" ? clamp(gx / 0.2, -1, 1) : gx < -0.05 ? -1 : 1;
+      const ang = roll - s * (face.eyes.tilt * 16 + (left ? P.tL : P.tR) * 14) + e.blink * 4 * blinkSide;
       const ex = pl ? pl.x : s * d + shiftX;
       const ey = pl ? pl.y + e.lift + rebound * hy * 0.16 : shiftY + e.lift + s * gx * hy * 0.2 + rebound * hy * 0.16;
       const ecy = pl ? cy * pl.sy : cy;
@@ -597,7 +608,7 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
       const specY = ecy + clamp(GLOSS.y + (place?.hl.y ?? 0), -0.32, -0.12) * H;
       const specK = tiny ? 0.8 : 1;
       return (
-        <g key={s} opacity={1 - off} transform={`translate(${f(ex)} ${f(ey)}) rotate(${f(ang)}) scale(${f(s * e.sc)} ${f(e.sc)})`}>
+        <g key={s} opacity={1 - off} transform={`translate(${f(ex)} ${f(ey)}) rotate(${f(ang)}) scale(${(rigOn ? fs : f)(s * e.sc)} ${(rigOn ? fs : f)(e.sc)})`}>
           {glow > 0.01 ? <ellipse cy={f(ecy)} rx={f(W * 0.78)} ry={f(H * 0.74)} fill={url("glow")} opacity={glow * (1 - 0.6 * closed)} /> : null}
           {gloss && !tiny ? <ellipse cy={f(ecy)} rx={f(W * 0.95)} ry={f(H * 0.78)} fill={url("amb")} /> : null}
           <g opacity={hk > 0.02 ? 1 - Math.min(1, hk) * 0.85 : 1} transform={bean < 1 ? `translate(0 ${f(ecy)}) scale(${f(bean)}) translate(0 ${f(-ecy)})` : undefined}>
@@ -737,7 +748,7 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
     if (m && place) {
       // Foreshortened with the turn, around its own anchor.
       const { x, y } = mouthAt;
-      return <g transform={`translate(${f(x)} ${f(y)}) scale(${f(place.mouth.sx)} ${f(place.mouth.sy)}) translate(${f(-x)} ${f(-y)})`}>{m}</g>;
+      return <g transform={`translate(${f(x)} ${f(y)}) scale(${fs(place.mouth.sx)} ${fs(place.mouth.sy)}) translate(${f(-x)} ${f(-y)})`}>{m}</g>;
     }
     return m && mouthRoll ? <g transform={`rotate(${f(mouthRoll)} ${f(mouthAt.x)} ${f(mouthAt.y)})`}>{m}</g> : m;
   };
