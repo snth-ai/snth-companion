@@ -203,6 +203,18 @@ export function FaceEditor(props: FaceEditorProps) {
                 onChange={(shape) => set({ eyes: { shape } }, "eyes.shape")}
               />
             </Row>
+            {/* Pill eyes are one solid colour: it comes first, with quick picks. */}
+            {face.eyes.shape === "pill" ? (
+              <Colour
+                title={f.eyeColour}
+                desc={f.eyeColourDesc}
+                value={face.eyes.sclera}
+                t={t}
+                presets={PILL_COLOURS}
+                presetLabel={f.eyeColourPick}
+                onChange={(sclera) => set({ eyes: { sclera } }, "eyes.sclera")}
+              />
+            ) : null}
             <Slider title={f.size} value={face.eyes.size} format={pct} onChange={(size) => set({ eyes: { size } }, "eyes.size")} />
             <Slider title={f.spacing} value={face.eyes.spacing} format={pct} onChange={(spacing) => set({ eyes: { spacing } }, "eyes.spacing")} />
             <Slider
@@ -212,7 +224,9 @@ export function FaceEditor(props: FaceEditorProps) {
               format={(v) => t.editor.degrees(Math.round(v * 16))}
               onChange={(tilt) => set({ eyes: { tilt } }, "eyes.tilt")}
             />
-            <Colour title={f.sclera} value={face.eyes.sclera} t={t} onChange={(sclera) => set({ eyes: { sclera } }, "eyes.sclera")} />
+            {face.eyes.shape === "pill" ? null : (
+              <Colour title={f.sclera} value={face.eyes.sclera} t={t} onChange={(sclera) => set({ eyes: { sclera } }, "eyes.sclera")} />
+            )}
             <Slider title={f.shine} value={face.eyes.shine} format={pct} onChange={(shine) => set({ eyes: { shine } }, "eyes.shine")} />
             <Slider title={f.glow} value={face.eyes.glow} format={pct} onChange={(glow) => set({ eyes: { glow } }, "eyes.glow")} />
           </Group>
@@ -443,7 +457,19 @@ function Slider(props: {
 
 const HEX = /^#?([0-9a-fA-F]{6})$/;
 
-function Colour(props: { title: string; desc?: ReactNode; value: string; t: FaceStrings; onChange: (hex: string) => void }) {
+/** Quick eye colours for pill eyes: light, saturated, dark and near-black. */
+const PILL_COLOURS = ["#FAFAFA", "#FFB3CF", "#C9B6FF", "#9FD4FF", "#A8F0D4", "#FFE066", "#FF9F43", "#E5484D", "#2F6BFF", "#1B2A6B", "#6B1020", "#141418"];
+
+function Colour(props: {
+  title: string;
+  desc?: ReactNode;
+  value: string;
+  t: FaceStrings;
+  onChange: (hex: string) => void;
+  /** Quick picks shown before the hex field. */
+  presets?: readonly string[];
+  presetLabel?: (hex: string) => string;
+}) {
   const [text, setText] = useState(props.value.toUpperCase());
   useEffect(() => setText(props.value.toUpperCase()), [props.value]);
   const apply = () => {
@@ -453,7 +479,24 @@ function Colour(props: { title: string; desc?: ReactNode; value: string; t: Face
   };
   return (
     <Row title={props.title} desc={props.desc}>
-      <span className="fe-colour">
+      <span className={`fe-colour${props.presets ? " with-presets" : ""}`}>
+        {props.presets ? (
+          <span className="fe-colour-presets" role="radiogroup" aria-label={props.title}>
+            {props.presets.map((hex) => (
+              <button
+                key={hex}
+                type="button"
+                role="radio"
+                aria-checked={props.value.toUpperCase() === hex}
+                aria-label={props.presetLabel ? props.presetLabel(hex) : hex}
+                title={hex}
+                className="fe-colour-dot"
+                style={{ background: hex }}
+                onClick={() => props.onChange(hex)}
+              />
+            ))}
+          </span>
+        ) : null}
         <input
           className="input fe-hex"
           type="text"

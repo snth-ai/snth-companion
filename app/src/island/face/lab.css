@@ -313,3 +313,299 @@ body {
   padding: 8px;
   resize: vertical;
 }
+
+/* ---------- "Наряди Дружка" ---------- */
+
+.dl {
+  margin-top: 34px;
+  padding: 22px 22px 26px;
+  border-radius: 18px;
+  background: var(--lab-panel);
+  border: 1px solid var(--lab-line);
+}
+
+.dl-head h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+  font-weight: 650;
+}
+
+.dl-head p {
+  margin: 0 0 18px;
+  color: var(--lab-text-2);
+  max-width: 720px;
+}
+
+.dl-main {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 28px;
+  align-items: start;
+}
+
+@media (max-width: 860px) {
+  .dl-main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.dl-stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  position: sticky;
+  top: 16px;
+}
+
+.dl-slot {
+  line-height: 0;
+}
+
+/* The open island: black, rounded, the face centred at 84 px. */
+.dl-open {
+  width: 240px;
+  height: 124px;
+  border-radius: 28px;
+  background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* The closed island: the band hangs from the screen's top edge (the line). */
+.dl-screen {
+  width: 200px;
+  border-top: 1px solid #4a454b;
+}
+
+.dl-closed {
+  position: relative;
+  width: 100%;
+  height: 32px;
+  background: #000;
+  border-radius: 0 0 12px 12px;
+  overflow: hidden;
+}
+
+.dl-closed-face {
+  position: absolute;
+  left: 8px;
+  top: -1px;
+  height: 34px;
+}
+
+.dl-pickers {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dl-row {
+  display: grid;
+  grid-template-columns: 130px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+}
+
+.dl-label {
+  color: var(--lab-text-2);
+  font-size: 13px;
+}
+
+.dl-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.lab .dl-chips button {
+  border: 1px solid var(--lab-line);
+  background: #262227;
+  padding: 5px 10px;
+  font-size: 12.5px;
+  border-radius: 8px;
+}
+
+.lab .dl-chips button.on {
+  color: var(--lab-text);
+  border-color: var(--lab-accent);
+  box-shadow: inset 0 0 0 1px var(--lab-accent);
+}
+
+.lab .dl-chips button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.dl-states,
+.dl-emotes {
+  justify-content: center;
+}
+
+.dl-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.lab .dl-swatch {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.lab .dl-swatch.on {
+  outline: 2px solid var(--lab-accent);
+  outline-offset: 2px;
+}
+
+.dl-free {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 4px;
+  font: 11.5px/1 ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--lab-text-2);
+}
+
+.dl-free input {
+  width: 30px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--lab-line);
+  border-radius: 6px;
+  background: transparent;
+}
+
+.dl-range {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 340px;
+}
+
+.dl-range input {
+  flex: 1;
+  accent-color: var(--lab-accent);
+}
+
+.dl-range output {
+  width: 40px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.dl-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.lab .dl-actions button {
+  border: 1px solid var(--lab-line);
+  background: #2a262b;
+  padding: 7px 12px;
+  font-size: 12.5px;
+}
+
+.lab .dl-actions .dl-copy {
+  color: var(--lab-text);
+  border-color: var(--lab-accent);
+}
+
+.dl-copied {
+  font-size: 12px;
+  color: var(--lab-text-2);
+}
+
+.dl-json {
+  min-height: 220px;
+}
+
+.dl-grid-title {
+  margin: 28px 0 12px;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.dl-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+.dl-card {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 8px 10px;
+  border-radius: 14px;
+  border: 1px solid var(--lab-line);
+  background: #1a171b;
+}
+
+.dl-card.on {
+  border-color: var(--lab-accent);
+}
+
+.dl-card .dl-open {
+  width: 200px;
+}
+
+.dl-card .dl-screen {
+  width: 180px;
+}
+
+.lab .dl-card figcaption button {
+  font-size: 12.5px;
+  padding: 4px 10px;
+}
+
+/* Review matrices for screenshots. */
+.dl-shots {
+  padding: 16px;
+  display: inline-flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: max-content;
+}
+
+.dl-shots-head,
+.dl-shots-row {
+  display: grid;
+  grid-template-columns: 110px repeat(var(--cols, 7), 212px) repeat(var(--cols, 7), 172px);
+  gap: 8px;
+  align-items: center;
+}
+
+.dl-shots-head span {
+  color: var(--lab-text-3);
+  font-size: 11px;
+  text-align: center;
+}
+
+.dl-shots-label {
+  color: var(--lab-text-2);
+  font-size: 12.5px;
+}
+
+.dl-shots-cell {
+  display: flex;
+  justify-content: center;
+}
+
+.dl-shots .dl-open {
+  width: 204px;
+}
+
+.dl-shots .dl-screen {
+  width: 164px;
+}
