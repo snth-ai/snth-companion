@@ -77,6 +77,11 @@ export const tauriBackend: Backend = {
   islandSttDownload: () => invoke("island_stt_download"),
   islandSttCancel: () => invoke("island_stt_cancel"),
   islandSttDelete: () => invoke("island_stt_delete"),
+  islandWakeSet: (on) => invoke("island_wake_set", { on }),
+  islandWakePhrase: (phrase) => invoke("island_wake_phrase", { phrase }),
+  islandWakeDownload: () => invoke("island_wake_download"),
+  islandWakeDownloadCancel: () => invoke("island_wake_download_cancel"),
+  islandWakeDelete: () => invoke("island_wake_delete"),
 
   islandView: () => invoke("island_view"),
   islandLayout: (hit, faceX, faceY) => invoke("island_layout", { hit, faceX, faceY }),
@@ -87,6 +92,7 @@ export const tauriBackend: Backend = {
   islandOpenApp: () => invoke("island_open_app"),
   islandSttOffer: (accept) => invoke("island_stt_offer", { accept }),
   islandSttCardHide: () => invoke("island_stt_card_hide"),
+  islandWakeCancel: () => invoke("island_wake_cancel"),
   subscribeIsland(listener) {
     let stopped = false;
     const offs: Array<() => void> = [];

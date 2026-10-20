@@ -3,7 +3,8 @@
 // own: the editor saves it to the synth (face.set), and the synth may
 // change it too, or design one itself when asked. Speech recognition:
 // through the synth (the default) or on this computer, with the model's
-// download, status and removal.
+// download, status and removal. Wake by name: the switch, the names it
+// answers to, an extra phrase, what it does now, its own small model.
 
 import { useEffect, useRef, useState } from "react";
 import { backend } from "../backend";
@@ -225,6 +226,129 @@ function SttSection(props: { name: string; takesText: boolean }) {
   );
 }
 
+/** Wake by name (Apple silicon only; hidden elsewhere). */
+function WakeSection(props: { name: string }) {
+  const { state, s, lang, act } = useStore();
+  const t = s.island;
+  const isl = state.island;
+  const wake = isl.wake;
+  const on = isl.settings.wake;
+  const saved = isl.settings.wake_phrase;
+  const [phrase, setPhrase] = useState(saved);
+  useEffect(() => setPhrase(saved), [saved]);
+  const model = wake.model;
+  const size = formatBytes(wake.size, s, lang);
+  const [problem, setProblem] = useState<string | null>(null);
+  const run = (work: () => Promise<UiState>) => {
+    setProblem(null);
+    void act(() =>
+      work().catch((e) => {
+        if (String(e) !== "no_space") setProblem(t.sttFailed.io!("", ""));
+        return null;
+      }),
+    );
+  };
+  // The name as the owner says it: the Cyrillic spelling in Russian.
+  const said = (lang === "ru" ? wake.names.find((n) => /[а-яё]/i.test(n)) : undefined) ?? wake.names[0] ?? props.name;
+  const savePhrase = () => {
+    if (phrase.trim() !== saved) run(() => backend.islandWakePhrase(phrase));
+  };
+
+  let modelText: string;
+  switch (model.state) {
+    case "downloading": {
+      const pct = Math.min(100, Math.floor((model.done * 100) / Math.max(1, model.total)));
+      modelText = t.wakeDownloading(pct, formatBytes(model.done, s, lang), formatBytes(model.total, s, lang));
+      break;
+    }
+    case "verifying":
+      modelText = t.sttVerifying;
+      break;
+    case "ready":
+      modelText = t.sttReady(size);
+      break;
+    case "failed": {
+      const [need, free] = model.detail.split(" ").map((n) => formatBytes(Number(n) || 0, s, lang));
+      modelText = (t.sttFailed[model.code] ?? t.sttFailed.io!)(need ?? "", free ?? "");
+      break;
+    }
+    default:
+      modelText = t.wakeMissing(size);
+  }
+
+  let now: string;
+  if (wake.state === "paused") now = t.wakePaused[wake.reason] ?? "";
+  else if (wake.state === "waiting") {
+    const w = t.wakeWaiting[wake.need];
+    now = typeof w === "function" ? w(props.name) : (w ?? "");
+  } else now = t.wakeStatus[wake.state] ?? "";
+  if (wake.wakes > 0 && (wake.state === "listening" || wake.state === "paused")) now = `${now} ${t.wakeCount(wake.wakes, wake.dropped)}`;
+
+  return (
+    <Section title={t.wake} note={t.wakeMicLine}>
+      <div className="group">
+        <SwitchRow title={t.wakeSwitch} desc={t.wakeDesc(said)} checked={on} onChange={(next) => run(() => backend.islandWakeSet(next))} />
+        {on ? (
+          <>
+            <Row title={t.wakeNamesTitle} desc={wake.names.length ? wake.names.join(" · ") : t.wakeNoName} />
+            <Row title={t.wakePhrase} desc={t.wakePhraseDesc}>
+              <input
+                className="input wake-phrase"
+                value={phrase}
+                maxLength={40}
+                placeholder={t.wakePhrasePlaceholder}
+                aria-label={t.wakePhrase}
+                onChange={(e) => setPhrase(e.target.value)}
+                onBlur={savePhrase}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") e.currentTarget.blur();
+                }}
+              />
+            </Row>
+            <Row title={t.wakeNow} desc={<span className={wake.state === "paused" ? "warn-text" : undefined}>{now}</span>} />
+          </>
+        ) : null}
+        {on || model.state !== "missing" ? (
+          <>
+            <Row title={t.wakeModel} desc={<span className={model.state === "failed" ? "error-text" : undefined}>{modelText}</span>}>
+              {model.state === "downloading" ? (
+                <button type="button" className="btn small" onClick={() => run(() => backend.islandWakeDownloadCancel())}>
+                  {t.sttCancel}
+                </button>
+              ) : null}
+              {model.state === "missing" ? (
+                <button type="button" className="btn small" onClick={() => run(() => backend.islandWakeDownload())}>
+                  {t.sttDownload}
+                </button>
+              ) : null}
+              {model.state === "failed" ? (
+                <button type="button" className="btn small" onClick={() => run(() => backend.islandWakeDownload())}>
+                  {t.sttRetry}
+                </button>
+              ) : null}
+              {model.state === "ready" ? (
+                <button type="button" className="btn small quiet" onClick={() => run(() => backend.islandWakeDelete())}>
+                  {t.sttDelete}
+                </button>
+              ) : null}
+            </Row>
+            {model.state === "downloading" ? (
+              <div className="stt-progress" aria-hidden="true">
+                <i style={{ width: `${Math.min(100, (model.done * 100) / Math.max(1, model.total))}%` }} />
+              </div>
+            ) : null}
+          </>
+        ) : null}
+      </div>
+      {problem ? (
+        <div className="error-text" role="alert">
+          {problem}
+        </div>
+      ) : null}
+    </Section>
+  );
+}
+
 type SaveState = { kind: "idle" } | { kind: "saving" } | { kind: "saved" } | { kind: "error"; text: string };
 
 function FaceSection(props: { synthId: string; name: string; supported: boolean; online: boolean }) {
@@ -398,6 +522,8 @@ export function Island() {
               </Section>
 
               <SttSection name={name} takesText={mainId ? isl.device_stt[mainId] === true : false} />
+
+              {isl.wake?.available ? <WakeSection name={name} /> : null}
 
               {mainId ? <FaceSection key={mainId} synthId={mainId} name={name} supported={supported} online={online} /> : null}
             </>

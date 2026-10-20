@@ -1937,6 +1937,14 @@ details.more .more-body {
   flex-wrap: wrap;
   margin-top: 12px;
 }
+/* Wake by name's extra phrase, in its row. */
+.input.wake-phrase {
+  width: 180px;
+  flex: none;
+}
+.row-desc .warn-text {
+  color: var(--warn-text);
+}
 /* The speech model's download on the Island screen. */
 .stt-progress {
   height: 4px;

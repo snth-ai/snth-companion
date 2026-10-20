@@ -1151,6 +1151,40 @@ export const en = {
     sttCancel: "Stop",
     sttRetry: "Try again",
     sttDelete: "Delete model",
+    // Wake by name.
+    wake: "Wake by name",
+    wakeSwitch: "Answer to the name",
+    wakeDesc: (n: string) => `Say “${n}, …” and the island listens without a key, then sends what you said like a held key.`,
+    wakeNamesTitle: "Answers to",
+    wakeNoName: "No name yet: link a synth first.",
+    wakePhrase: "Extra wake phrase",
+    wakePhraseDesc: "Optional. Said at the start, it works like the name.",
+    wakePhrasePlaceholder: "Hey buddy",
+    wakeMicLine:
+      "While this is on, the microphone stays on and macOS shows its orange dot, which cannot be hidden. Listening pauses by itself during calls, while the screen is locked and while you hold a key. Nothing leaves this computer until you say the name.",
+    wakeNow: "Now",
+    wakeStatus: {
+      off: "Off.",
+      listening: "Listening for the name.",
+      woke: "Heard the name, listening to you.",
+    } as Record<string, string>,
+    wakePaused: {
+      app_paused: "Paused: SNTH Connect is paused.",
+      hold: "Paused while you hold a key.",
+      locked: "Paused: the screen is locked.",
+      mic_busy: "Paused: another app uses the microphone (a call).",
+    } as Record<string, string>,
+    wakeWaiting: {
+      island: "Waiting: the island is off or no synth is linked.",
+      synth: (n: string) => `Waiting: ${n} is offline or needs an update.`,
+      mic: "Waiting: allow the microphone above.",
+      model: "Waiting for its model.",
+      loading: "Starting…",
+    } as Record<string, string | ((n: string) => string)>,
+    wakeCount: (wakes: number, dropped: number) => `Since the app started: ${wakes} wakes, ${dropped} of them sent nothing.`,
+    wakeModel: "Name model",
+    wakeMissing: (size: string) => `Not downloaded (${size}).`,
+    wakeDownloading: (pct: number, done: string, total: string) => `Downloading: ${pct}% (${done} of ${total}).`,
     // The island window.
     w: {
       idle: (keys: string) => `Hold ${keys} to talk`,
@@ -1189,6 +1223,15 @@ export const en = {
       sttRetry: "Try again",
       sttHide: "Hide",
       sttLoading: "loading speech recognition…",
+      wakeListening: "Listening · Esc cancels",
+      idleWake: (keys: string, n: string) => (keys ? `Hold ${keys} or say “${n}”` : `Say “${n}” to talk`),
+      wakeHint: (n: string) => `Listening for “${n}”`,
+      wakePaused: {
+        app_paused: "Not listening for the name: SNTH Connect is paused",
+        hold: "Not listening for the name while you hold a key",
+        locked: "Not listening for the name: the screen is locked",
+        mic_busy: "Not listening for the name: the microphone is in use",
+      } as Record<string, string>,
       channel: {
         telegram: "Telegram",
         tguser: "Telegram",

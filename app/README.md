@@ -143,7 +143,7 @@ URL parameters stage a screen or a state directly:
 | `account` | the platform account: `signed_out` (first run, nothing linked: "Sign in with SNTH" waits about 2 s in the "browser", then shows the consent screen for Mia and Maya), `consent` (signed in, the consent screen), `two` (signed in, Mia and Maya linked), `none` (signed in, no synths: the code field), `repair` (two linked, Maya refused her token). Without it: signed out, Mia linked with a code, as before |
 | `login` | with `account=signed_out`: the sign-in fails, `denied` (Cancel in the browser) or `expired` |
 | `connectfail` | with `account=consent`: linking Maya fails, `connect_unavailable`, `synth_outdated`, `synth_unreachable` |
-| `island` | the Island screen (with `screen=island`): `off` (default), `on`, `outdated` (the synth is older than the island), `taken` (another app holds the talk key), `micdenied`, `two` (with `account=two`: Maya listens to the keys), `nolink` (on, Mia offline: the keys are released). On `island.html` (the island window on a pretend desktop): `idle` (default), `hover`, `listening`, `screen`, `sending`, `accepted`, `thinking`, `working`, `driving`, `done`, `error`, `approval`, `text`, `offline`, `outdated`, `micdenied`, `asking`, `paused`, `two`, `shot`, and for speech on this computer `live` (the words of a hold), `livesent` (the text going), `offer` (the synth's offer), `offerdl`, `offerready`, `offerfail` (the model's download after "Turn on"); with `notch=0` (a Mac without a notch) and `os=windows`. The strip under the desktop plays a hold, a hold with its words, the offer, a line of text, an answer, a request. Speech recognition on the Island screen: `stt` (on, the model here), `sttdl` (downloading), `sttspace` (the disk is too full), `sttold` (the synth does not take text yet), `sttintel` (not available); `sttnospace=1` makes the mock download fail for lack of space |
+| `island` | the Island screen (with `screen=island`): `off` (default), `on`, `outdated` (the synth is older than the island), `taken` (another app holds the talk key), `micdenied`, `two` (with `account=two`: Maya listens to the keys), `nolink` (on, Mia offline: the keys are released). On `island.html` (the island window on a pretend desktop): `idle` (default), `hover`, `listening`, `screen`, `sending`, `accepted`, `thinking`, `working`, `driving`, `done`, `error`, `approval`, `text`, `offline`, `outdated`, `micdenied`, `asking`, `paused`, `two`, `shot`, and for speech on this computer `live` (the words of a hold), `livesent` (the text going), `offer` (the synth's offer), `offerdl`, `offerready`, `offerfail` (the model's download after "Turn on"), and for wake by name `wakeidle` (the dot), `wakepaused` (paused for a call), `woke` (a wake recording with its words), `wokename` (the name alone); with `notch=0` (a Mac without a notch) and `os=windows`. The strip under the desktop plays a hold, a hold with its words, the offer, a wake by name (with a request, or the name alone), a call pausing it, a line of text, an answer, a request. Speech recognition on the Island screen: `stt` (on, the model here), `sttdl` (downloading), `sttspace` (the disk is too full), `sttold` (the synth does not take text yet), `sttintel` (not available); wake by name: `wake` (on, listening), `wakedl` (its model downloading), `wakecall` (paused: the microphone is in use); `sttnospace=1` makes the mock download fail for lack of space |
 | `faceset` | `invalid`: the synth refuses every face the editor saves |
 | `lang` | `en`, `ru` |
 | `theme` | `light`, `dark` |
@@ -609,6 +609,43 @@ talks to `<platform>/api/app/v1/*` only. There is no override in the UI.
     after the update for owners with the island on) shows only on an idle
     island; accepting it starts the download and shows its progress
     there.
+  - Wake by name (`src-tauri/src/island/wake/`, TZ `tz-wake-word.md` in
+    the synth's repo; off by default, «Откликаться на имя» on the Island
+    screen, `IslandSettings.wake` + `wake_phrase`). Apple silicon only
+    (hidden elsewhere). Its own download in `<data dir>/wake/`: whisper
+    tiny multilingual q5_1 (`wake::TINY`, 32 MB, pinned like the hold's
+    model) and a copy of the Silero file, so deleting one model never
+    breaks the other. One thread (`island-wake`) keeps the microphone open
+    through `audio.rs` (the hold's own capture, trimmed to the last 4 s
+    with `Tap::drop_front`) and feeds `listen.rs`: the loudness against
+    the room's floor finds stretches; each is checked once (after 2 s, or
+    when it ended): Silero says whether it is speech, whisper tiny on the
+    CPU decodes its first 2 s with the name as the prompt (Russian with
+    "Мия.", English with "Mia." only after a near miss), and `names.rs`
+    matches the name by sound (Cyrillic and Latin to one key, exact for
+    names of up to four letters) as the first or second word only. The
+    name heard, the running recording is cut to the speech (0.5 s
+    pre-roll) and becomes a hold of the voice key (`wake::start`, same
+    `Hold`, same speech-to-text session); a second of silence (Silero)
+    releases it through the hold's own path (`island::finish`, every
+    fallback), the name alone waits 6 s for the request, a minute is the
+    cap, Escape (a global shortcut only while a wake records) or a click on
+    the island cancels, then 2 s are skipped. A transcript that is only
+    the name sends nothing (`wake::request`); a sent transcript has the
+    name stripped. It pauses by itself (`pause.rs`) while the app is
+    paused, a hold key is down, the screen is locked
+    (`CGSessionCopyCurrentDictionary`), or another process records from an
+    input device (`system.rs`: CoreAudio process objects, macOS 14+; a
+    process that says "running input" with no input device is ignored,
+    as `avconferenced` does for days on macOS 26; before 14 a known call
+    app in front). The view's `wake` (`off`, `waiting`, `listening`,
+    `paused`, `woke`) puts a dim dot in the closed island's right ear (a
+    ring while paused). Log lines: `island: wake: heard "<name>" (score),
+    recording`, `sent after <why>`, `sent nothing: <why>`, `paused, the
+    microphone is in use by <app>`; never the words. Measured on an M1
+    Air: 0.3% of one core in a quiet room with the capture, about 2.2% of
+    one core on non-stop speech without the name (a decode is about 40 ms
+    on two threads), 110 MB peak with whisper tiny loaded.
 - Webview permissions: `build.rs` lists every app command, which makes Tauri
   enforce `capabilities/*.json` per window. The main window gets the app's
   commands and the event listener; the approval window gets five commands.

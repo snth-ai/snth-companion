@@ -36,6 +36,10 @@ const SCENARIOS = [
   "offerdl",
   "offerready",
   "offerfail",
+  "wakeidle",
+  "wakepaused",
+  "woke",
+  "wokename",
 ];
 
 function setParam(key: string, value: string | null) {
@@ -114,6 +118,15 @@ export function IslandStage() {
         </button>
         <button type="button" className="btn small" onClick={() => win.playOffer()}>
           speech offer
+        </button>
+        <button type="button" className="btn small" onClick={() => win.playWake()}>
+          say "Mia, ..."
+        </button>
+        <button type="button" className="btn small" onClick={() => win.playWake(true)}>
+          say "Mia" alone
+        </button>
+        <button type="button" className="btn small" onClick={() => win.toggleWakePause()}>
+          wake: call / no call
         </button>
         <button type="button" className="btn small" onClick={() => win.playText()}>
           type a message

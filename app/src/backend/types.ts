@@ -408,7 +408,38 @@ export interface IslandSettings {
   hotkeys: Hotkeys;
   stt: SttMode;
   stt_offer: SttOffer;
+  /** Wake by name: off by default. */
+  wake: boolean;
+  /** The owner's extra wake phrase; "" = the name alone. */
+  wake_phrase: string;
 }
+
+/** Why wake by name does not listen at all yet. */
+export type WakeNeed = "island" | "synth" | "mic" | "model" | "loading";
+/** Why it paused by itself. */
+export type WakePause = "app_paused" | "hold" | "locked" | "mic_busy";
+/** What wake by name does now. "woke": the name was heard, the request
+ * is being recorded (the island shows it as a hold). */
+export type WakeStatus =
+  | { state: "off" }
+  | { state: "waiting"; need: WakeNeed }
+  | { state: "listening" }
+  | { state: "paused"; reason: WakePause }
+  | { state: "woke" };
+
+/** Wake by name on the Island screen. */
+export type WakeState = WakeStatus & {
+  /** The mode exists here (a Mac with Apple silicon); hidden elsewhere. */
+  available: boolean;
+  /** Its own small model (whisper tiny + the voice detector). */
+  model: SttModelStatus;
+  size: number;
+  /** The names it answers to ("Mia", "Мия", "Миа", the extra phrase). */
+  names: string[];
+  /** Wakes since the app started, and those that sent nothing. */
+  wakes: number;
+  dropped: number;
+};
 
 /** The on-device speech-to-text model. */
 export type SttModelStatus =
@@ -451,6 +482,8 @@ export interface IslandState {
   device_stt: Record<string, boolean>;
   /** On-device speech-to-text. */
   stt: SttState;
+  /** Wake by name. */
+  wake: WakeState;
   /** This system's default keys. */
   defaults: Hotkeys;
   /** The keys are registered with the system right now. */
@@ -538,6 +571,8 @@ export interface IslandView {
    * still loading: no words yet. */
   stt_loading: boolean;
   stt_card: SttCard | null;
+  /** Wake by name: the dot in the right ear while it listens. */
+  wake: WakeStatus;
 }
 
 export type IslandSignal =
@@ -813,6 +848,14 @@ export interface Backend {
   islandSttCancel(): Promise<UiState>;
   /** Delete the model; the speech goes to the synth again. */
   islandSttDelete(): Promise<UiState>;
+  /** Wake by name on or off. Err: unsupported. On fetches its model. */
+  islandWakeSet(on: boolean): Promise<UiState>;
+  islandWakePhrase(phrase: string): Promise<UiState>;
+  /** Fetch its model (again). Err: no_space, unsupported. */
+  islandWakeDownload(): Promise<UiState>;
+  islandWakeDownloadCancel(): Promise<UiState>;
+  /** Delete its model; the mode switches off. */
+  islandWakeDelete(): Promise<UiState>;
 
   // --- the island window ---
   islandView(): Promise<IslandView>;
@@ -827,6 +870,8 @@ export interface Backend {
   islandSttOffer(accept: boolean): Promise<void>;
   /** Hide the model's download card (it goes on, in Settings). */
   islandSttCardHide(): Promise<void>;
+  /** A click on the island while a wake records: cancel it. */
+  islandWakeCancel(): Promise<void>;
   /** The island window's own signals: its view, the gaze, the mic level. */
   subscribeIsland(listener: (signal: IslandSignal) => void): () => void;
 
