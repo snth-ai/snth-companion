@@ -14,7 +14,8 @@
 //         sttold = on, but Mia does not take text yet; sttintel = a Mac
 //         without Apple silicon, where it is not available. Wake by name:
 //         wake = on and listening; wakedl = its model downloading;
-//         wakecall = paused, another app uses the microphone)
+//         wakecall = paused, another app uses the microphone; wakebt =
+//         paused, the only microphone is in AirPods)
 //   island.html?island=idle|hover|listening|screen|sending|accepted|thinking|
 //        working|driving|done|error|approval|text|offline|outdated|
 //        micdenied|asking|paused|two|shot|live|liveloading|livesent|
@@ -138,7 +139,9 @@ export function stagedIslandState(os: string, links: LinkBrief[]): IslandState {
       ? { state: "waiting", need: "model" }
       : scenario === "wakecall"
         ? { state: "paused", reason: "mic_busy" }
-        : { state: "listening" };
+        : scenario === "wakebt"
+          ? { state: "paused", reason: "bt_mic" }
+          : { state: "listening" };
   return {
     available: os !== "linux",
     settings: {

@@ -3,8 +3,10 @@
 //! It runs only while everything it needs is there (`Need`): the switch,
 //! the island on, the main synth linked, the microphone allowed, the
 //! models. Then it pauses by itself (`Pause`) while the app is paused,
-//! while a hold runs, while the screen is locked, and while another app
-//! uses the microphone (a call). A pause stops the microphone; the island
+//! while a hold runs, while the screen is locked, while another app uses
+//! the microphone (a call), and while the only microphone is a Bluetooth
+//! headset's (`device.rs`: open all the time it ruins the headset's
+//! sound). A pause stops the microphone; the island
 //! and Settings say why.
 
 use serde::Serialize;
@@ -37,6 +39,8 @@ pub enum Pause {
     Locked,
     /// Another app records (a call).
     MicBusy,
+    /// The only microphone is in a Bluetooth headset.
+    BtMic,
 }
 
 /// What the island and Settings show.
@@ -66,6 +70,8 @@ pub struct Inputs {
     pub holding: bool,
     pub locked: bool,
     pub mic_busy: bool,
+    /// The default input is Bluetooth and there is no other microphone.
+    pub bt_only: bool,
     /// A wake of ours is recording.
     pub woke: bool,
 }
@@ -100,6 +106,8 @@ pub fn status(i: &Inputs) -> Status {
         Some(Pause::Locked)
     } else if i.mic_busy {
         Some(Pause::MicBusy)
+    } else if i.bt_only {
+        Some(Pause::BtMic)
     } else if i.holding {
         Some(Pause::Hold)
     } else {
@@ -155,6 +163,8 @@ mod tests {
         assert_eq!(paused(Inputs { holding: true, ..ready() }), Some(Pause::Hold));
         assert_eq!(paused(Inputs { locked: true, ..ready() }), Some(Pause::Locked));
         assert_eq!(paused(Inputs { mic_busy: true, ..ready() }), Some(Pause::MicBusy));
+        assert_eq!(paused(Inputs { bt_only: true, ..ready() }), Some(Pause::BtMic), "AirPods on a Mac mini");
+        assert_eq!(serde_json::to_value(status(&Inputs { bt_only: true, ..ready() })).unwrap(), serde_json::json!({"state": "paused", "reason": "bt_mic"}));
         // Several at once: the one that explains most.
         assert_eq!(paused(Inputs { mic_busy: true, holding: true, ..ready() }), Some(Pause::MicBusy));
         assert_eq!(paused(Inputs { app_paused: true, locked: true, ..ready() }), Some(Pause::AppPaused));

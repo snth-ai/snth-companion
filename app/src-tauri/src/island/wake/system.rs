@@ -1,5 +1,6 @@
 //! What the system says: does another app use the microphone, is the
-//! screen locked.
+//! screen locked, which input devices there are (`input_devices`, for
+//! `device::choose`).
 //!
 //! The microphone: macOS 14 and later list every process that uses audio
 //! as a CoreAudio process object (`kAudioHardwarePropertyProcessObjectList`)
@@ -45,6 +46,12 @@ mod mac {
     const SCOPE_GLOBAL: u32 = fourcc(b"glob");
     const SCOPE_INPUT: u32 = fourcc(b"inpt");
     const PROCESS_DEVICES: u32 = fourcc(b"pdv#");
+    const HARDWARE_DEVICES: u32 = fourcc(b"dev#");
+    const DEFAULT_INPUT: u32 = fourcc(b"dIn ");
+    const DEVICE_STREAMS: u32 = fourcc(b"stm#");
+    const DEVICE_UID: u32 = fourcc(b"uid ");
+    const OBJECT_NAME: u32 = fourcc(b"lnam");
+    const DEVICE_TRANSPORT: u32 = fourcc(b"tran");
     const ELEMENT_MAIN: u32 = 0;
     const PROCESS_OBJECT_LIST: u32 = fourcc(b"prs#");
     const PROCESS_PID: u32 = fourcc(b"ppid");
@@ -93,14 +100,56 @@ mod mac {
         unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned()
     }
 
-    /// How many input devices this process object uses.
-    fn input_devices(id: u32) -> u32 {
-        let addr = Address { selector: PROCESS_DEVICES, scope: SCOPE_INPUT, element: ELEMENT_MAIN };
+    fn count(id: u32, selector: u32, scope: u32) -> u32 {
+        let addr = Address { selector, scope, element: ELEMENT_MAIN };
         let mut size = 0u32;
         if unsafe { AudioObjectGetPropertyDataSize(id, &addr, 0, std::ptr::null(), &mut size) } != 0 {
             return 0;
         }
         size / 4
+    }
+
+    fn string(id: u32, selector: u32) -> String {
+        get::<CFTypeRef>(id, selector)
+            .map(|s| {
+                let out = cf_string(s);
+                if !s.is_null() {
+                    unsafe { CFRelease(s) };
+                }
+                out
+            })
+            .unwrap_or_default()
+    }
+
+    /// Every device with an input stream, the default input marked.
+    pub fn input_devices() -> Vec<crate::island::wake::device::InputDevice> {
+        let addr = Address { selector: HARDWARE_DEVICES, scope: SCOPE_GLOBAL, element: ELEMENT_MAIN };
+        let mut size = 0u32;
+        if unsafe { AudioObjectGetPropertyDataSize(SYSTEM_OBJECT, &addr, 0, std::ptr::null(), &mut size) } != 0 {
+            return Vec::new();
+        }
+        let mut ids = vec![0u32; size as usize / 4];
+        let mut got = (ids.len() * 4) as u32;
+        if unsafe { AudioObjectGetPropertyData(SYSTEM_OBJECT, &addr, 0, std::ptr::null(), &mut got, ids.as_mut_ptr().cast()) } != 0 {
+            return Vec::new();
+        }
+        ids.truncate(got as usize / 4);
+        let default = get::<u32>(SYSTEM_OBJECT, DEFAULT_INPUT).unwrap_or(0);
+        ids.into_iter()
+            .filter(|id| count(*id, DEVICE_STREAMS, SCOPE_INPUT) > 0)
+            .map(|id| crate::island::wake::device::InputDevice {
+                uid: string(id, DEVICE_UID),
+                name: string(id, OBJECT_NAME),
+                transport: get::<u32>(id, DEVICE_TRANSPORT).unwrap_or(0),
+                is_default: id == default,
+            })
+            .filter(|d| !d.uid.is_empty())
+            .collect()
+    }
+
+    /// How many input devices this process object uses.
+    fn process_inputs(id: u32) -> u32 {
+        count(id, PROCESS_DEVICES, SCOPE_INPUT)
     }
 
     /// The processes other than this one that record now: (pid, bundle
@@ -120,7 +169,7 @@ mod mac {
         let me = std::process::id() as i32;
         let mut out = Vec::new();
         for id in ids {
-            if get::<u32>(id, PROCESS_RUNNING_INPUT).unwrap_or(0) == 0 || input_devices(id) == 0 {
+            if get::<u32>(id, PROCESS_RUNNING_INPUT).unwrap_or(0) == 0 || process_inputs(id) == 0 {
                 continue;
             }
             let pid = get::<i32>(id, PROCESS_PID).unwrap_or(-1);
@@ -244,6 +293,18 @@ fn process_name(pid: i32) -> String {
     format!("{} (pid {pid})", String::from_utf8_lossy(&buf[..n as usize]))
 }
 
+/// The input devices (empty where they cannot be read).
+pub fn input_devices() -> Vec<super::device::InputDevice> {
+    #[cfg(target_os = "macos")]
+    {
+        mac::input_devices()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Vec::new()
+    }
+}
+
 pub fn locked() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -320,5 +381,17 @@ mod tests {
         println!("mic busy: {:?}", mic_busy());
         println!("front app: {:?}", mac::front_app());
         println!("locked: {}", locked());
+        for d in input_devices() {
+            println!("input: {:?} {:?} transport {}{}", d.name, d.uid, crate::island::wake::device::transport::name(d.transport), if d.is_default { " (default)" } else { "" });
+        }
+        let mic = crate::island::wake::device::choose(&input_devices());
+        println!("the listener uses: {mic:?}");
+        // cpal finds the chosen device by its CoreAudio UID and opens it.
+        if let Some(uid) = mic.uid() {
+            let rec = crate::island::audio::start_on(Some(uid.to_string()), std::sync::Arc::new(|_| {}));
+            println!("opened {uid} through cpal: {}", rec.is_ok());
+            assert!(rec.is_ok(), "{:?}", rec.err());
+        }
+        assert!(crate::island::audio::start_on(Some("no-such-device".into()), std::sync::Arc::new(|_| {})).is_err(), "an unknown UID is an error, not the default");
     }
 }

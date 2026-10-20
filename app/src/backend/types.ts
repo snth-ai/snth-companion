@@ -417,7 +417,7 @@ export interface IslandSettings {
 /** Why wake by name does not listen at all yet. */
 export type WakeNeed = "island" | "synth" | "mic" | "model" | "loading";
 /** Why it paused by itself. */
-export type WakePause = "app_paused" | "hold" | "locked" | "mic_busy";
+export type WakePause = "app_paused" | "hold" | "locked" | "mic_busy" | "bt_mic";
 /** What wake by name does now. "woke": the name was heard, the request
  * is being recorded (the island shows it as a hold). */
 export type WakeStatus =

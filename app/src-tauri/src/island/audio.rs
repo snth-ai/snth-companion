@@ -243,6 +243,13 @@ mod capture {
     /// Start recording from the default input. Err with a short reason
     /// when there is no microphone or it cannot be opened.
     pub fn start(on_level: Arc<dyn Fn(f32) + Send + Sync>) -> Result<Recording, String> {
+        start_on(None, on_level)
+    }
+
+    /// Start recording from the input with this CoreAudio UID (cpal's
+    /// device id), or the default input for None. Wake by name uses it to
+    /// stay off a Bluetooth headset's microphone.
+    pub fn start_on(uid: Option<String>, on_level: Arc<dyn Fn(f32) + Send + Sync>) -> Result<Recording, String> {
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
         let (done_tx, done_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
@@ -259,7 +266,11 @@ mod capture {
             .name("island-mic".into())
             .spawn(move || {
                 let host = cpal::default_host();
-                let Some(device) = host.default_input_device() else {
+                let device = match &uid {
+                    Some(uid) => host.input_devices().ok().and_then(|mut all| all.find(|d| d.id().is_ok_and(|id| id.id() == uid))),
+                    None => host.default_input_device(),
+                };
+                let Some(device) = device else {
                     let _ = ready_tx.send(Err("no_microphone".into()));
                     return;
                 };
@@ -362,6 +373,10 @@ mod capture {
         Err("unsupported".into())
     }
 
+    pub fn start_on(_uid: Option<String>, _on_level: Arc<dyn Fn(f32) + Send + Sync>) -> Result<Recording, String> {
+        Err("unsupported".into())
+    }
+
     impl Recording {
         pub fn tap(&self) -> Tap {
             Tap
@@ -373,7 +388,7 @@ mod capture {
     }
 }
 
-pub use capture::{start, Recording, Tap};
+pub use capture::{start, start_on, Recording, Tap};
 
 // --- the permission ---
 

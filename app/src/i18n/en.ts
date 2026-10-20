@@ -1173,6 +1173,7 @@ export const en = {
       hold: "Paused while you hold a key.",
       locked: "Paused: the screen is locked.",
       mic_busy: "Paused: another app uses the microphone (a call).",
+      bt_mic: "The microphone is in your headphones: listening all the time would ruin their sound.",
     } as Record<string, string>,
     wakeWaiting: {
       island: "Waiting: the island is off or no synth is linked.",
@@ -1231,6 +1232,7 @@ export const en = {
         hold: "Not listening for the name while you hold a key",
         locked: "Not listening for the name: the screen is locked",
         mic_busy: "Not listening for the name: the microphone is in use",
+        bt_mic: "Not listening for the name: the microphone is in your headphones",
       } as Record<string, string>,
       channel: {
         telegram: "Telegram",

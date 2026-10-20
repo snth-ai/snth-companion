@@ -21,11 +21,15 @@
 //!
 //! It pauses by itself (`pause.rs`, `system.rs`): while the app is paused,
 //! while a hold key is down, while the screen is locked, while another app
-//! records (a call). Whisper tiny and the voice detector are their own
+//! records (a call). It never opens a Bluetooth microphone (`device.rs`:
+//! that turns AirPods into a phone line): with a Bluetooth default it
+//! listens on the built-in microphone, and pauses where there is none.
+//! Whisper tiny and the voice detector are their own
 //! download (`FILES`, about 32 MB, in `wake/` of the app's data folder),
 //! fetched when the owner turns the mode on, and in memory only while it
 //! is on. Apple silicon only, like the hold's speech-to-text.
 
+pub mod device;
 pub mod listen;
 pub mod names;
 pub mod pause;
@@ -337,6 +341,8 @@ fn end(ctx: &Arc<Ctx>, seq: u64, send: bool) {
 struct Capture {
     /// None once it became a wake's hold.
     recording: Option<audio::Recording>,
+    /// The device it records from (None: the default input).
+    uid: Option<String>,
     tap: audio::Tap,
     /// The listener's index of the tap's first sample.
     off: usize,
@@ -392,6 +398,7 @@ fn run(ctx: &Arc<Ctx>) {
     let mut names = Names::default();
     let mut system = (false, false);
     let mut mic_granted = false;
+    let mut mic = device::Mic::Default;
     let mut system_at: Option<Instant> = None;
     let mut refreshed;
     let mut busy_with: Vec<String> = Vec::new();
@@ -422,6 +429,24 @@ fn run(ctx: &Arc<Ctx>) {
             busy_with = if busy { who } else { Vec::new() };
             system = (busy, system::locked());
             mic_granted = audio::permission() == audio::MicPermission::Granted;
+            // The default input changed, a device came or went.
+            let chosen = device::choose(&system::input_devices());
+            if chosen != mic {
+                match &chosen {
+                    device::Mic::Use { name, instead_of: Some(bt), .. } => {
+                        connect_core::logln!("island: wake: the default input is Bluetooth ({bt}); listening on {name}")
+                    }
+                    device::Mic::Use { name, uid, .. } => {
+                        let transport = system::input_devices().into_iter().find(|d| &d.uid == uid).map(|d| device::transport::name(d.transport)).unwrap_or_default();
+                        connect_core::logln!("island: wake: listening on {name} ({transport})")
+                    }
+                    device::Mic::BluetoothOnly { name } => {
+                        connect_core::logln!("island: wake: paused, the only microphone is Bluetooth ({name})")
+                    }
+                    device::Mic::Default => {}
+                }
+                mic = chosen;
+            }
             system_at = Some(Instant::now());
             refreshed = true;
         }
@@ -438,6 +463,7 @@ fn run(ctx: &Arc<Ctx>) {
             holding: !woke && ctx.island.hold.lock().unwrap().holding().is_some(),
             locked: system.1,
             mic_busy: system.0,
+            bt_only: matches!(mic, device::Mic::BluetoothOnly { .. }),
             woke,
         };
         // Whisper tiny is in memory only while the mode is on.
@@ -487,11 +513,18 @@ fn run(ctx: &Arc<Ctx>) {
             connect_core::logln!("island: wake: the microphone went quiet; opening it again");
             capture = None;
         }
+        // Another microphone was chosen: open that one (never during a
+        // wake, whose recording is the hold's now).
+        if capture.as_ref().is_some_and(|c| c.recording.is_some() && c.uid.as_deref() != mic.uid()) {
+            capture = None;
+            listener.reset();
+        }
         if capture.is_none() {
-            match audio::start(level_to_island(ctx)) {
+            let uid = mic.uid().map(String::from);
+            match audio::start_on(uid.clone(), level_to_island(ctx)) {
                 Ok(recording) => {
                     let tap = recording.tap();
-                    capture = Some(Capture { recording: Some(recording), tap, off: listener.now(), last_data: Instant::now() });
+                    capture = Some(Capture { recording: Some(recording), uid, tap, off: listener.now(), last_data: Instant::now() });
                 }
                 Err(e) => {
                     connect_core::logln!("island: wake: the microphone did not open: {e}");
