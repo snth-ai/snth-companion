@@ -14,7 +14,9 @@
 //        (the island window on a desktop; &notch=0 draws a Mac without a
 //         notch, &os=windows a Windows screen. The pointer over the desktop
 //         is the gaze; the strip under it plays a hold, a line of text, a
-//         request, an answer.)
+//         request, an answer. &full=1 starts in full screen: the island
+//         hides, and the pointer at the desktop's top edge brings the menu
+//         bar and the island back, as the shell does.)
 //
 // Nothing here touches the network or the computer.
 
@@ -219,6 +221,7 @@ export class MockIslandWindow {
       notice: null,
       approval: scenario === "approval" ? { ...APPROVAL, asked_at_ms: now, expires_at_ms: now + 55_000 } : null,
       hover: scenario === "hover" || scenario === "two",
+      hidden: false,
       hotkeys: defaultHotkeys(os),
       mic: scenario === "micdenied" ? "denied" : scenario === "asking" ? "not_asked" : "granted",
     };
@@ -258,6 +261,60 @@ export class MockIslandWindow {
     // Stills stay still: no notice expires while a reviewer looks.
     if (this.view.notice) this.view.notice.at_ms = now + 3_600_000;
     if (this.view.message && scenario !== "thinking") this.view.message.at_ms = scenario === "done" || scenario === "error" ? now + 3_600_000 : now;
+    if (params.get("full") === "1") this.setFullScreen(true);
+  }
+
+  // --- full screen, as the shell plays it (island/mod.rs, poll) ---
+
+  /** A full-screen app covers the screen. */
+  fullScreen = false;
+  /** Its menu bar is in (the pointer went to the top edge). */
+  barShown = false;
+  private pointerY = 999;
+  private barTimer = 0;
+  private fullTimer = 0;
+
+  setFullScreen(on: boolean) {
+    this.fullScreen = on;
+    this.barShown = false;
+    window.clearInterval(this.fullTimer);
+    // Busy ends by time (the summary, a notice): look again now and then.
+    if (on) this.fullTimer = window.setInterval(() => this.recompute(), 250);
+    this.recompute(true);
+  }
+
+  private busy(): boolean {
+    const v = this.view;
+    const now = Date.now();
+    const m = v.message;
+    const fresh = m ? (m.stage === "accepted" ? now - m.at_ms < 1500 : (m.stage === "done" || m.stage === "error") && now - m.at_ms < 6000) : false;
+    return Boolean(v.hold || v.text_open || v.sending || v.approval || fresh || (v.notice && now - v.notice.at_ms < 6000));
+  }
+
+  private recompute(force = false) {
+    const p = this.view.placement!;
+    // The bar comes a moment after the pointer reaches the edge and goes
+    // once it leaves the bar (measured on macOS: about 0.25 s).
+    if (this.fullScreen && !this.barShown && this.pointerY <= 2 && !this.barTimer) {
+      this.barTimer = window.setTimeout(() => {
+        this.barTimer = 0;
+        if (this.pointerY <= 2) {
+          this.barShown = true;
+          this.recompute(true);
+        }
+      }, 250);
+    }
+    if (this.barShown && this.pointerY > p.notch.h) {
+      this.barShown = false;
+      force = true;
+    }
+    const held = this.view.hover && !this.view.hidden;
+    const hidden = this.fullScreen && !this.barShown && !held && !this.busy();
+    if (hidden !== this.view.hidden || force) {
+      this.view.hidden = hidden;
+      if (hidden) this.view.hover = false;
+      this.changed();
+    }
   }
 
   subscribe(listener: (s: IslandSignal) => void) {
@@ -285,7 +342,9 @@ export class MockIslandWindow {
 
   /** The reviewer's pointer over the stage, in window coordinates. */
   pointer(x: number, y: number) {
-    if (!this.face) return;
+    this.pointerY = y;
+    if (this.fullScreen) this.recompute();
+    if (!this.face || this.view.hidden) return;
     let dx = (x - this.face.x) / 600;
     let dy = (y - this.face.y) / 600;
     const len = Math.hypot(dx, dy);
@@ -297,9 +356,11 @@ export class MockIslandWindow {
   }
 
   setHover(hover: boolean) {
+    if (this.view.hidden) hover = false;
     if (this.view.hover === hover) return;
     this.view.hover = hover;
     this.changed();
+    if (this.fullScreen) this.recompute();
   }
 
   // --- the review strip ---

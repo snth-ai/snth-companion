@@ -486,6 +486,11 @@ export interface IslandView {
   notice: IslandNotice | null;
   approval: ApprovalRequest | null;
   hover: boolean;
+  /** A full-screen app covers the screen and the menu bar is away: the
+   * island fades out and up, and the shell lets every click through. It
+   * comes back with the menu bar, and stays while the owner is busy with
+   * it (a hold, the line of text, a request, a fresh answer). */
+  hidden: boolean;
   hotkeys: Hotkeys;
   mic: MicPermission;
 }

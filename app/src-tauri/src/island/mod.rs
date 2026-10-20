@@ -14,6 +14,17 @@
 //! drives the computer the eyes follow the synth's pointer instead (when
 //! the synth told the driver where to put it).
 //!
+//! Full screen: while the island's screen shows a full-screen app the
+//! island hides (fades out and up) and lets every click through, and it
+//! comes back with the menu bar when the pointer reaches the top edge
+//! (`panel::cover` says when). It stays while the owner is busy with it
+//! (a hold, the line of text, a request, a send just made, a fresh
+//! answer, a notice): the owner sees that the key worked. The keys work
+//! the same while it is hidden. The screenshot's own invisibility
+//! (`panel::set_invisible`, the window's alpha) is a separate switch, so
+//! the two never undo each other: the island is seen only when neither
+//! hides it.
+//!
 //! The keys (`hold.rs`) are registered only while the island is on and
 //! the main synth is linked and the app is not paused: otherwise the
 //! combinations reach the other apps as usual. A hold records the voice
@@ -65,6 +76,15 @@ const GAZE_REACH: f64 = 600.0;
 const MESSAGE_FORGET: Duration = Duration::from_secs(20 * 60);
 /// A notice (offline, the microphone, a failed send) stays this long.
 const NOTICE_FOR: Duration = Duration::from_secs(6);
+/// The answer's summary stays this long (as the webview shows it).
+const SUMMARY_FOR: Duration = Duration::from_secs(6);
+/// The tick of "accepted" is seen for this long after a send.
+const ACCEPTED_FOR: Duration = Duration::from_millis(1500);
+/// How often the poller looks whether a full-screen app covers the
+/// screen. Faster while it does and the pointer is near the top, where
+/// the menu bar comes in, so the island comes in with it.
+const COVER_EVERY: Duration = Duration::from_millis(190);
+const COVER_FAST: Duration = Duration::from_millis(90);
 
 /// A debug build started with `SNTH_ISLAND_DEMO=1` shows the island
 /// without a linked synth, with no main window and no helper install: to
@@ -145,6 +165,9 @@ pub struct View {
     pub approval: Option<ApprovalDto>,
     /// The pointer is over the island (it opens up).
     pub hover: bool,
+    /// A full-screen app covers the screen and the menu bar is away: the
+    /// island fades out (and lets every click through).
+    pub hidden: bool,
     pub hotkeys: Hotkeys,
     pub mic: audio::MicPermission,
 }
@@ -167,6 +190,28 @@ struct Inner {
     notice: Option<(Notice, Instant)>,
     last_target: Option<(f64, f64)>,
     last_move: Option<Instant>,
+    /// The screen the island is on, as last placed.
+    screen: Option<geometry::ScreenInfo>,
+    /// What it showed at the last look, and when that was (None: look
+    /// now).
+    cover: geometry::Cover,
+    cover_at: Option<Instant>,
+    /// Out of the way of a full-screen app (before the owner's own
+    /// business, which keeps it shown: `busy`), and what the webview was
+    /// told last.
+    tucked: bool,
+    hidden: bool,
+}
+
+/// Something the owner started or must see is on the island: it stays
+/// even in full screen.
+fn busy(inner: &Inner, holding: bool, approval: bool) -> bool {
+    let message = inner.message.as_ref().is_some_and(|(m, at)| match m.stage.as_str() {
+        "accepted" => at.elapsed() < ACCEPTED_FOR,
+        "done" | "error" => at.elapsed() < SUMMARY_FOR,
+        _ => false,
+    });
+    holding || approval || inner.text_open || inner.sending || message || inner.notice.as_ref().is_some_and(|(_, at)| at.elapsed() < NOTICE_FOR)
 }
 
 struct Hold {
@@ -260,6 +305,8 @@ pub fn view(ctx: &Ctx) -> View {
         inner.notice = None;
     }
     let hold = island.hold.lock().unwrap().holding();
+    let approval = ctx.approvals.list().into_iter().next();
+    let hidden = inner.tucked && !busy(&inner, hold.is_some(), approval.is_some());
     View {
         os: std::env::consts::OS,
         lang: match ctx.lang() {
@@ -280,8 +327,9 @@ pub fn view(ctx: &Ctx) -> View {
         sending: inner.sending,
         message: inner.message.as_ref().map(|(m, _)| m.clone()),
         notice: inner.notice.as_ref().map(|(n, _)| n.clone()),
-        approval: ctx.approvals.list().into_iter().next(),
-        hover: inner.hover,
+        approval,
+        hover: inner.hover && !hidden,
+        hidden,
         hotkeys: settings.hotkeys,
         mic: audio::permission(),
     }
@@ -344,6 +392,13 @@ fn ensure_window(ctx: &Arc<Ctx>) {
                     }
                     let ctx3 = ctx2.clone();
                     panel::watch_screens(Box::new(move || relayout_main_thread(&ctx3)));
+                    let ctx4 = ctx2.clone();
+                    panel::watch_spaces(Box::new(move || {
+                        // The window list may lag the switch a little; the
+                        // poller keeps looking after this first look.
+                        ctx4.island.inner.lock().unwrap().cover_at = None;
+                        ctx4.island.wake.notify_one();
+                    }));
                 });
                 let mut inner = ctx.island.inner.lock().unwrap();
                 inner.created = true;
@@ -383,7 +438,14 @@ fn relayout_main_thread(ctx: &Arc<Ctx>) {
     let Some(w) = window(ctx) else { return };
     let Some(screen) = panel::screen_info(&w) else { return };
     let placement = geometry::place(&screen);
-    let changed = ctx.island.inner.lock().unwrap().placement != Some(placement);
+    let changed = {
+        let mut inner = ctx.island.inner.lock().unwrap();
+        if inner.screen.as_ref() != Some(&screen) {
+            inner.screen = Some(screen);
+            inner.cover_at = None;
+        }
+        inner.placement != Some(placement)
+    };
     if changed {
         connect_core::logln!(
             "island: placed at {:.0},{:.0} {:.0}x{:.0}, {} notch {:.0}x{:.0}",
@@ -866,7 +928,11 @@ async fn poll(ctx: Arc<Ctx>) {
             continue;
         }
         let moving = ctx.island.inner.lock().unwrap().last_move.is_some_and(|t| t.elapsed() < MOVING_FOR);
-        tokio::time::sleep(if moving { POLL_MOVING } else { POLL_RESTING }).await;
+        // A Space switch wakes it early (`watch_spaces`).
+        tokio::select! {
+            _ = tokio::time::sleep(if moving { POLL_MOVING } else { POLL_RESTING }) => {}
+            _ = ctx.island.wake.notified() => {}
+        }
         let Some(w) = window(&ctx) else { continue };
         let (placement, hit, face) = {
             let inner = ctx.island.inner.lock().unwrap();
@@ -876,12 +942,41 @@ async fn poll(ctx: Arc<Ctx>) {
         let tl = (placement.window.x, placement.window.y);
         let Some(cursor) = panel::cursor_local(&w, tl) else { continue };
 
-        // Clicks: only the shape takes them; the line of text keeps them.
+        // Full screen: look at the screen again when it is time.
+        let look = {
+            let inner = ctx.island.inner.lock().unwrap();
+            let near_top = cursor.1 < placement.window.h;
+            let every = if inner.cover.covered && near_top { COVER_FAST } else { COVER_EVERY };
+            inner.cover_at.is_none_or(|t| t.elapsed() >= every).then(|| inner.screen.clone()).flatten()
+        };
+        if let Some(screen) = look {
+            let cover = panel::cover(&screen).unwrap_or_default();
+            let mut inner = ctx.island.inner.lock().unwrap();
+            inner.cover = cover;
+            inner.cover_at = Some(Instant::now());
+        }
+        let holding = ctx.island.hold.lock().unwrap().holding().is_some();
+        let approval = !ctx.approvals.is_empty();
+
+        // Clicks: only the shape takes them; the line of text keeps them;
+        // a hidden island takes none.
         let inside = hit.is_some_and(|r| r.contains(cursor.0, cursor.1));
         let mut changed_view = false;
-        {
+        let (hidden, appeared) = {
             let mut inner = ctx.island.inner.lock().unwrap();
-            let want_ignore = !(inside || inner.text_open);
+            // Shown with the menu bar, it stays while the pointer is on it
+            // (the bar itself goes once the pointer leaves the bar).
+            let held = inside && !inner.hidden;
+            let tucked = inner.cover.covered && !inner.cover.bar && !held;
+            let hidden = tucked && !busy(&inner, holding, approval);
+            inner.tucked = tucked;
+            let appeared = inner.hidden && !hidden;
+            if inner.hidden != hidden {
+                inner.hidden = hidden;
+                changed_view = true;
+            }
+            let inside = inside && !hidden;
+            let want_ignore = hidden || !(inside || inner.text_open);
             if inner.ignoring != Some(want_ignore) {
                 let _ = w.set_ignore_cursor_events(want_ignore);
                 inner.ignoring = Some(want_ignore);
@@ -890,7 +985,8 @@ async fn poll(ctx: Arc<Ctx>) {
                 inner.hover = inside;
                 changed_view = true;
             }
-        }
+            (hidden, appeared)
+        };
         if changed_view {
             emit_view(&ctx);
         }
@@ -914,7 +1010,10 @@ async fn poll(ctx: Arc<Ctx>) {
             }
             moved
         };
-        if moved {
+        // Hidden: the pointer still sets the pace (the menu bar comes in
+        // when it reaches the top), but there are no eyes to move; they
+        // look at it again the moment the island is back.
+        if !hidden && (moved || appeared) {
             let (gx, gy) = geometry::gaze(face, target, GAZE_REACH);
             let _ = w.emit_to(WINDOW, GAZE_EVENT, serde_json::json!({"x": gx, "y": gy, "agent": driving_point.is_some()}));
         }

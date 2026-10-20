@@ -31,12 +31,30 @@
 //!
 //! The pointer: macOS `CGEventGetLocation` of a fresh event (any thread,
 //! global points, top-left origin), Windows `GetCursorPos`.
+//!
+//! Full screen (`cover`): the island hides while the screen it is on
+//! shows a full-screen app, and comes back with the menu bar. macOS: the
+//! window list (`CGWindowListCopyWindowInfo`, on-screen windows only, any
+//! thread, about 0.3 ms). Measured on macOS 26: in a normal Space the
+//! system's menu bar is a window of "Window Server" at layer 24 across
+//! the top of the screen; in a full-screen Space it is not in the list at
+//! all until the pointer reaches the top edge, then it slides in from
+//! above (first at y -50, then 0, about 0.25 s after the pointer got
+//! there) and leaves the list again when the pointer goes down. The
+//! full-screen app's window is a layer-0 window as large as the screen
+//! (below the notch on a Mac with one). Only regular apps count: an
+//! accessory app's overlay may cover the screen in every Space (one
+//! did, on the Mac this was measured on). Space switches and app
+//! activations (`NSWorkspace` notifications) ask for a fresh look at
+//! once. Windows: the foreground window has no caption and covers the
+//! primary monitor (a full-screen video, a game); there is no menu bar to
+//! follow.
 
 use tauri::WebviewWindow;
 
 #[cfg(not(target_os = "macos"))]
 use super::geometry::Rect;
-use super::geometry::{Placement, ScreenInfo};
+use super::geometry::{Cover, Placement, ScreenInfo};
 
 #[cfg(target_os = "macos")]
 mod mac {
@@ -50,13 +68,19 @@ mod mac {
     use objc2::{msg_send, sel};
     use objc2_foundation::{NSEdgeInsets, NSPoint, NSRect, NSSize};
 
-    use super::super::geometry::{Rect, ScreenInfo};
+    use super::super::geometry::{self, Cover, Rect, ScreenInfo};
 
     const NS_NONACTIVATING_PANEL: usize = 1 << 7;
     const NS_MAIN_MENU_WINDOW_LEVEL: isize = 24;
     const LEVEL: isize = NS_MAIN_MENU_WINDOW_LEVEL + 3;
     // canJoinAllSpaces | stationary | ignoresCycle | fullScreenAuxiliary
     const BEHAVIOR: usize = (1 << 0) | (1 << 4) | (1 << 6) | (1 << 8);
+
+    // kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements
+    const LIST_ON_SCREEN: u32 = (1 << 0) | (1 << 4);
+    // kCGMainMenuWindowLevel: the system's menu bar.
+    const MENU_BAR_LAYER: isize = 24;
+    const NS_APPLICATION_ACTIVATION_POLICY_REGULAR: isize = 0;
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -65,12 +89,32 @@ mod mac {
         y: f64,
     }
 
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CGSize {
+        width: f64,
+        height: f64,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CGRect {
+        origin: CGPoint,
+        size: CGSize,
+    }
+
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGEventCreate(source: *const std::ffi::c_void) -> *mut std::ffi::c_void;
         fn CGEventGetLocation(event: *mut std::ffi::c_void) -> CGPoint;
         fn CGGetDisplaysWithPoint(point: CGPoint, max: u32, displays: *mut u32, count: *mut u32) -> i32;
         fn CGGetActiveDisplayList(max: u32, displays: *mut u32, count: *mut u32) -> i32;
+        fn CGWindowListCopyWindowInfo(option: u32, relative_to: u32) -> *const std::ffi::c_void;
+        fn CGRectMakeWithDictionaryRepresentation(dict: *const AnyObject, rect: *mut CGRect) -> bool;
+        static kCGWindowLayer: &'static AnyObject;
+        static kCGWindowBounds: &'static AnyObject;
+        static kCGWindowOwnerPID: &'static AnyObject;
+        static kCGWindowOwnerName: &'static AnyObject;
     }
     #[link(name = "CoreFoundation", kind = "framework")]
     extern "C" {
@@ -79,6 +123,8 @@ mod mac {
     #[link(name = "AppKit", kind = "framework")]
     extern "C" {
         static NSApplicationDidChangeScreenParametersNotification: &'static AnyObject;
+        static NSWorkspaceActiveSpaceDidChangeNotification: &'static AnyObject;
+        static NSWorkspaceDidActivateApplicationNotification: &'static AnyObject;
     }
 
     fn guarded<R>(what: &str, call: impl FnOnce() -> R) -> Option<R> {
@@ -283,33 +329,123 @@ mod mac {
         }
     }
 
+    /// Run `changed` on the main thread for every `name` posted to this
+    /// notification centre. The observer lives as long as the app.
+    fn observe(center: &AnyObject, name: &AnyObject, changed: std::rc::Rc<dyn Fn() + 'static>) {
+        let Some(queue) = AnyClass::get(c"NSOperationQueue") else { return };
+        let queue: *mut AnyObject = unsafe { msg_send![class_object(queue), mainQueue] };
+        let Some(queue) = (unsafe { queue.as_ref() }) else { return };
+        let block = RcBlock::new(move |_note: *mut AnyObject| changed());
+        let token: *mut AnyObject = unsafe {
+            msg_send![center, addObserverForName: name, object: std::ptr::null::<AnyObject>(), queue: queue, usingBlock: &*block]
+        };
+        // Kept for the life of the app.
+        if !token.is_null() {
+            let _: *mut AnyObject = unsafe { msg_send![&*token, retain] };
+        }
+    }
+
     /// Call `changed` (on the main thread) whenever screens or their
     /// resolution change. The observer lives as long as the app.
     pub fn watch_screens(changed: Box<dyn Fn() + 'static>) {
         guarded("watching the screens", || {
             let Some(center) = AnyClass::get(c"NSNotificationCenter") else { return };
-            let Some(queue) = AnyClass::get(c"NSOperationQueue") else { return };
             let center: *mut AnyObject = unsafe { msg_send![class_object(center), defaultCenter] };
-            let queue: *mut AnyObject = unsafe { msg_send![class_object(queue), mainQueue] };
-            let (Some(center), Some(queue)) = (unsafe { center.as_ref() }, unsafe { queue.as_ref() }) else { return };
-            let block = RcBlock::new(move |_note: *mut AnyObject| changed());
+            let Some(center) = (unsafe { center.as_ref() }) else { return };
             let name = unsafe { NSApplicationDidChangeScreenParametersNotification };
-            let token: *mut AnyObject = unsafe {
-                msg_send![center, addObserverForName: name, object: std::ptr::null::<AnyObject>(), queue: queue, usingBlock: &*block]
-            };
-            // Kept for the life of the app.
-            if !token.is_null() {
-                let _: *mut AnyObject = unsafe { msg_send![&*token, retain] };
-            }
+            observe(center, name, changed.into());
         });
+    }
+
+    /// Call `changed` (on the main thread) when another Space shows or
+    /// another app comes to the front: a full-screen app may have come
+    /// or gone. These are posted to the workspace's own centre.
+    pub fn watch_spaces(changed: Box<dyn Fn() + 'static>) {
+        guarded("watching the Spaces", || {
+            let Some(workspace) = AnyClass::get(c"NSWorkspace") else { return };
+            let workspace: *mut AnyObject = unsafe { msg_send![class_object(workspace), sharedWorkspace] };
+            let Some(workspace) = (unsafe { workspace.as_ref() }) else { return };
+            let center: *mut AnyObject = unsafe { msg_send![workspace, notificationCenter] };
+            let Some(center) = (unsafe { center.as_ref() }) else { return };
+            let changed: std::rc::Rc<dyn Fn() + 'static> = changed.into();
+            observe(center, unsafe { NSWorkspaceActiveSpaceDidChangeNotification }, changed.clone());
+            observe(center, unsafe { NSWorkspaceDidActivateApplicationNotification }, changed);
+        });
+    }
+
+    fn integer(dict: &AnyObject, key: &AnyObject) -> Option<isize> {
+        let n: *mut AnyObject = unsafe { msg_send![dict, objectForKey: key] };
+        let n = unsafe { n.as_ref()? };
+        Some(unsafe { msg_send![n, integerValue] })
+    }
+
+    /// A window's bounds, already in top-left global points.
+    fn bounds(dict: &AnyObject) -> Option<Rect> {
+        let b: *mut AnyObject = unsafe { msg_send![dict, objectForKey: kCGWindowBounds] };
+        let b = unsafe { b.as_ref()? };
+        let mut r = CGRect { origin: CGPoint { x: 0.0, y: 0.0 }, size: CGSize { width: 0.0, height: 0.0 } };
+        unsafe { CGRectMakeWithDictionaryRepresentation(b, &mut r) }.then_some(Rect { x: r.origin.x, y: r.origin.y, w: r.size.width, h: r.size.height })
+    }
+
+    fn owned_by_window_server(dict: &AnyObject) -> bool {
+        let name: *mut AnyObject = unsafe { msg_send![dict, objectForKey: kCGWindowOwnerName] };
+        let Some(name) = (unsafe { name.as_ref() }) else { return false };
+        let utf8: *const std::ffi::c_char = unsafe { msg_send![name, UTF8String] };
+        !utf8.is_null() && unsafe { std::ffi::CStr::from_ptr(utf8) }.to_bytes() == b"Window Server"
+    }
+
+    /// A regular app (in the Dock, can go full screen), not an accessory
+    /// app's overlay.
+    fn regular_app(pid: i32) -> bool {
+        let Some(class) = AnyClass::get(c"NSRunningApplication") else { return false };
+        let app: *mut AnyObject = unsafe { msg_send![class_object(class), runningApplicationWithProcessIdentifier: pid] };
+        let Some(app) = (unsafe { app.as_ref() }) else { return false };
+        let policy: isize = unsafe { msg_send![app, activationPolicy] };
+        policy == NS_APPLICATION_ACTIVATION_POLICY_REGULAR
+    }
+
+    /// What the screen shows now (see the module's notes). Any thread.
+    pub fn cover(screen: &ScreenInfo) -> Option<Cover> {
+        let list = unsafe { CGWindowListCopyWindowInfo(LIST_ON_SCREEN, 0) };
+        if list.is_null() {
+            return None;
+        }
+        let found = guarded("reading the window list", || {
+            // A CFArray of CFDictionaries is an NSArray of NSDictionaries.
+            let list = unsafe { &*(list as *const AnyObject) };
+            let count: usize = unsafe { msg_send![list, count] };
+            let mut cover = Cover::default();
+            for i in 0..count {
+                let w: *mut AnyObject = unsafe { msg_send![list, objectAtIndex: i] };
+                let Some(w) = (unsafe { w.as_ref() }) else { continue };
+                let Some(layer) = integer(w, unsafe { kCGWindowLayer }) else { continue };
+                if layer != 0 && layer != MENU_BAR_LAYER {
+                    continue;
+                }
+                let Some(r) = bounds(w) else { continue };
+                if layer == MENU_BAR_LAYER {
+                    if !cover.bar && geometry::bar_on_screen(screen, r) && owned_by_window_server(w) {
+                        cover.bar = true;
+                    }
+                } else if !cover.covered && geometry::fills_screen(screen, r) {
+                    let pid = integer(w, unsafe { kCGWindowOwnerPID }).unwrap_or(0) as i32;
+                    cover.covered = pid > 0 && regular_app(pid);
+                }
+            }
+            cover
+        });
+        unsafe { CFRelease(list) };
+        found
     }
 }
 
 #[cfg(windows)]
 mod win {
-    use windows_sys::Win32::Foundation::{HWND, POINT};
+    use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetCursorPos, GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        GetCursorPos, GetDesktopWindow, GetForegroundWindow, GetShellWindow, GetWindowLongPtrW, GetWindowRect, SetWindowLongPtrW, GWL_EXSTYLE, GWL_STYLE,
+        WS_CAPTION, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     };
 
     pub fn set_noactivate(hwnd: isize, on: bool) {
@@ -326,6 +462,35 @@ mod win {
     pub fn cursor() -> Option<(f64, f64)> {
         let mut p = POINT { x: 0, y: 0 };
         (unsafe { GetCursorPos(&mut p) } != 0).then(|| (f64::from(p.x), f64::from(p.y)))
+    }
+
+    /// The foreground window fills the primary monitor (where the island
+    /// is) and has no caption: a full-screen video, a game, a slide show.
+    /// A maximized window keeps its caption; the desktop and the shell
+    /// are not apps. Any thread.
+    pub fn full_screen() -> bool {
+        unsafe {
+            let fg = GetForegroundWindow();
+            if fg.is_null() || fg == GetDesktopWindow() || fg == GetShellWindow() {
+                return false;
+            }
+            let style = GetWindowLongPtrW(fg, GWL_STYLE) as u32;
+            if style & WS_CAPTION == WS_CAPTION {
+                return false;
+            }
+            let monitor = MonitorFromWindow(fg, MONITOR_DEFAULTTONULL);
+            if monitor.is_null() || monitor != MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) {
+                return false;
+            }
+            let mut info: MONITORINFO = std::mem::zeroed();
+            info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+            let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            if GetMonitorInfoW(monitor, &mut info) == 0 || GetWindowRect(fg, &mut r) == 0 {
+                return false;
+            }
+            let m = info.rcMonitor;
+            r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
+        }
     }
 }
 
@@ -494,4 +659,33 @@ pub fn watch_screens(changed: Box<dyn Fn() + 'static>) {
     mac::watch_screens(changed);
     #[cfg(not(target_os = "macos"))]
     let _ = changed;
+}
+
+/// Call `changed` on the main thread when another Space shows or another
+/// app comes to the front (macOS). Elsewhere the poller's own look is
+/// enough.
+pub fn watch_spaces(changed: Box<dyn Fn() + 'static>) {
+    #[cfg(target_os = "macos")]
+    mac::watch_spaces(changed);
+    #[cfg(not(target_os = "macos"))]
+    let _ = changed;
+}
+
+/// Does the island's screen show a full-screen app now, and the menu bar
+/// on it? None: the system did not say. Any thread.
+pub fn cover(screen: &ScreenInfo) -> Option<Cover> {
+    #[cfg(target_os = "macos")]
+    {
+        mac::cover(screen)
+    }
+    #[cfg(windows)]
+    {
+        let _ = screen;
+        Some(Cover { covered: win::full_screen(), bar: false })
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = screen;
+        None
+    }
 }

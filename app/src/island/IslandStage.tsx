@@ -3,7 +3,7 @@
 // over the desktop is the gaze; the strip under it plays the island's
 // moments. None of this ships in the app.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { mockBackend } from "../backend";
 import { IslandApp } from "./IslandApp";
 
@@ -43,6 +43,10 @@ export function IslandStage() {
   const win = mockBackend.islandWin;
   const p = win.view.placement!;
   const [pointer, setPointer] = useState<{ x: number; y: number } | null>(null);
+  // Full screen and its menu bar live in the mock window; follow them.
+  const [, setTick] = useState(0);
+  useEffect(() => win.subscribe(() => setTick((t) => t + 1)), [win]);
+  const barAway = win.fullScreen && !win.barShown;
   const desktopW = 1512;
   const frameLeft = desktopW / 2 - p.window.w / 2;
   const mac = win.view.os === "macos";
@@ -50,7 +54,7 @@ export function IslandStage() {
   return (
     <div className="isl-stage">
       <div
-        className={`isl-desktop${mac ? "" : " win"}`}
+        className={`isl-desktop${mac ? "" : " win"}${win.fullScreen ? " full" : ""}`}
         style={{ width: desktopW }}
         onMouseMove={(e) => {
           const box = e.currentTarget.getBoundingClientRect();
@@ -63,7 +67,7 @@ export function IslandStage() {
         onMouseLeave={() => win.setHover(false)}
       >
         {mac ? (
-          <div className="isl-menubar" style={{ height: p.notch.h }}>
+          <div className={`isl-menubar${barAway ? " away" : ""}`} style={{ height: p.notch.h }}>
             <span>Finder</span>
             <span>File</span>
             <span>Edit</span>
@@ -75,7 +79,13 @@ export function IslandStage() {
         <div className="isl-frame" style={{ left: frameLeft, width: p.window.w, height: p.window.h }}>
           <IslandApp />
         </div>
-        {pointer ? null : <div className="isl-stage-hint">Move the pointer over the desktop: the eyes follow it. Hover the island to open it.</div>}
+        {pointer ? null : (
+          <div className="isl-stage-hint">
+            {win.fullScreen
+              ? "Full screen: the island is away. Move the pointer to the very top edge: the menu bar and the island come in."
+              : "Move the pointer over the desktop: the eyes follow it. Hover the island to open it."}
+          </div>
+        )}
       </div>
 
       <div className="mock-note">Mock island: not the real app. The frame is the island window (transparent in the app).</div>
@@ -110,6 +120,9 @@ export function IslandStage() {
         </button>
         <button type="button" className="btn small" onClick={() => win.toggleOffline()}>
           offline / online
+        </button>
+        <button type="button" className="btn small" aria-pressed={win.fullScreen} onClick={() => win.setFullScreen(!win.fullScreen)}>
+          full screen
         </button>
       </div>
       <div className="mock-bar">

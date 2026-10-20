@@ -8,6 +8,10 @@
 // The shell places the window and lets clicks through everywhere but the
 // shape; this page says where the shape is and where the face is
 // (`islandLayout`) every time they change.
+//
+// In full screen the shell hides the island (`view.hidden`) until the menu
+// bar comes in: the whole island fades out and slides up, and back, as the
+// bar does (about 0.2 s).
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { quickAnswer } from "../approval/ApprovalView";
@@ -130,6 +134,7 @@ export function IslandApp() {
   const [gaze, setGaze] = useState<{ x: number; y: number } | null>(null);
   const [level, setLevel] = useState(0);
   const [text, setText] = useState("");
+  const rootRef = useRef<HTMLDivElement>(null);
   const shapeRef = useRef<HTMLDivElement>(null);
   const faceRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -198,14 +203,19 @@ export function IslandApp() {
   // (after every render, and at the end of each size animation).
   const last = useRef("");
   const report = () => {
-    const shape = shapeRef.current?.getBoundingClientRect();
-    const face = faceRef.current?.getBoundingClientRect();
+    const base = rootRef.current?.getBoundingClientRect();
+    const box = shapeRef.current?.getBoundingClientRect();
+    const fbox = faceRef.current?.getBoundingClientRect();
     // Mid-growth the face is neither here nor there: report where it ends.
-    if (!shape || !face || !settled) return;
-    const key = [shape.x, shape.y, shape.width, shape.height, face.x, face.y].map(Math.round).join(",");
+    if (!base || !box || !fbox || !settled) return;
+    // Against the root, which sits at the window's corner: the slide in
+    // and out of full screen moves the root, not the island in it.
+    const shape = { x: box.x - base.x, y: box.y - base.y, w: box.width, h: box.height };
+    const face = { x: fbox.x - base.x + fbox.width / 2, y: fbox.y - base.y + fbox.height / 2 };
+    const key = [shape.x, shape.y, shape.w, shape.h, face.x, face.y].map(Math.round).join(",");
     if (key === last.current) return;
     last.current = key;
-    void backend.islandLayout({ x: shape.x, y: shape.y, w: shape.width, h: shape.height }, face.x + face.width / 2, face.y + face.height / 2).catch(() => undefined);
+    void backend.islandLayout(shape, face.x, face.y).catch(() => undefined);
   };
   const reportRef = useRef(report);
   reportRef.current = report;
@@ -274,7 +284,12 @@ export function IslandApp() {
   const faceTop = ((notchH - small) / 2) * (1 - opening) + (notchH + 2) * opening;
 
   return (
-    <div className={`isl-root${open ? " open" : ""}`}>
+    <div
+      ref={rootRef}
+      className={`isl-root${open ? " open" : ""}${view.hidden ? " hidden" : ""}`}
+      style={{ ["--hide-y" as string]: `${-(p.pill.h + 8)}px` }}
+      aria-hidden={view.hidden}
+    >
       <div
         ref={shapeRef}
         className={`isl-shape state-${state}${p.real_notch ? " notch" : ""}`}

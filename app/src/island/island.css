@@ -23,6 +23,16 @@ html.island #root {
   position: relative;
   width: 100%;
   height: 100%;
+  /* Full screen: out and back with the menu bar, which slides about as
+     long (measured 0.2-0.25 s on macOS 26). */
+  transition:
+    opacity 0.2s ease-out,
+    transform 0.2s ease-out;
+}
+.isl-root.hidden {
+  opacity: 0;
+  transform: translateY(var(--hide-y, -40px));
+  pointer-events: none;
 }
 
 .isl-shape {
@@ -340,6 +350,13 @@ html.island #root {
   .isl-shape {
     transition-duration: 0.01s;
   }
+  /* Out of full screen's way by fading only. */
+  .isl-root {
+    transition: opacity 0.2s linear;
+  }
+  .isl-root.hidden {
+    transform: none;
+  }
   .isl-head,
   .isl-summary,
   .isl-task,
@@ -396,6 +413,17 @@ html.island #root:has(.isl-stage) {
 }
 .isl-menubar-right {
   margin-left: auto;
+}
+.isl-menubar {
+  transition: transform 0.2s ease-out;
+}
+.isl-menubar.away {
+  transform: translateY(-100%);
+}
+.isl-desktop.full {
+  background:
+    radial-gradient(700px 360px at 50% 60%, #2b3a55 0%, transparent 70%),
+    linear-gradient(180deg, #0b0d12, #151a24);
 }
 .isl-hw-notch {
   position: absolute;
