@@ -49,6 +49,11 @@ pub trait Decoder {
     /// when it could not run (its model did not load, it failed).
     fn vad(&mut self, audio: &[f32]) -> Option<Vec<Span>>;
 
+    /// Where the stream may cut a hold into pieces (vad.rs).
+    fn cuts(&self) -> vad::Cuts {
+        vad::Cuts::default()
+    }
+
     /// Where the speech is: the voice detector, else the loudness
     /// detector.
     fn speech(&mut self, audio: &[f32]) -> Vec<Span> {

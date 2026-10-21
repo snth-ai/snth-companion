@@ -609,6 +609,16 @@ fn the_tone_switch_is_on_by_default_and_in_an_old_file() {
     assert!(!off.stt_tone);
 }
 
+#[test]
+fn the_engine_is_whisper_by_default_and_in_an_old_file() {
+    assert_eq!(IslandSettings::default().stt_engine, SttEngine::Whisper);
+    let old: IslandSettings = serde_json::from_value(json!({"enabled": true, "stt": "device"})).unwrap();
+    assert_eq!(old.stt_engine, SttEngine::Whisper);
+    let p: IslandSettings = serde_json::from_value(json!({"stt_engine": "parakeet"})).unwrap();
+    assert_eq!(p.stt_engine, SttEngine::Parakeet);
+    assert_eq!(serde_json::to_value(&p).unwrap()["stt_engine"], "parakeet");
+}
+
 #[tokio::test]
 async fn the_tone_goes_only_to_a_synth_that_takes_it() {
     let (core, mut q) = linked(&[("new", WITH_TONE), ("stt", WITH_STT)]);

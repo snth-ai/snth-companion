@@ -609,6 +609,30 @@ talks to `<platform>/api/app/v1/*` only. There is no override in the UI.
     after the update for owners with the island on) shows only on an idle
     island; accepting it starts the download and shows its progress
     there.
+  - Second on-device engine: NVIDIA Parakeet TDT 0.6B v3 (CC-BY-4.0,
+    credited in the engine choice), `stt/parakeet.rs`. The owner picks it
+    under "on this computer": "Whisper: better with English words" (the
+    default) or "Parakeet: faster" (`IslandSettings.stt_engine`, serde
+    default whisper). Model: istupakov's int8 ONNX export
+    (`istupakov/parakeet-tdt-0.6b-v3-onnx` at 8f23f0c, encoder, decoder +
+    joint, vocab.txt, each with a sha256) plus its own copy of the Silero
+    VAD, 671 MB in `<data dir>/stt/parakeet/`, the same download rules
+    (choosing it fetches it, never silently; until it is here the voice
+    goes as audio). It runs on the CPU through the `ort` already there for
+    the tone (the CoreML provider splits the encoder into hundreds of
+    partitions and takes 4 GB). The NeMo log-mel features (with our own
+    FFT and slaney filters; the repo's nemo128.onnx is not used) and TDT
+    greedy decoding are a port of onnx-asr. One engine is loaded at a time
+    (`Stt::switch` unloads the other); the stream cuts Parakeet's holds
+    only at pauses of 0.6 s or more and at most every 25 s (`Decoder::cuts`).
+    Each decode logs `island: stt: parakeet decoded X s in Y s`. On an M1
+    Air: cold load 1.2 to 1.6 s, a 10.4 s clip in 0.33 to 0.45 s (whisper:
+    1.0 s with the language known, 1.2 to 1.8 s without), footprint 1.1 to
+    1.2 GB loaded (whisper 0.65 GB). The proof of the port
+    (`stt_parakeet_matches_the_reference`, files in /tmp/parakeet-bench):
+    on the float model the text matches onnx-asr on all 108 clips; the
+    int8 model's text moves with float noise of 1e-5 (in Python too), its
+    word error rate matches.
   - Wake by name (`src-tauri/src/island/wake/`, TZ `tz-wake-word.md` in
     the synth's repo; off by default, «Откликаться на имя» on the Island
     screen, `IslandSettings.wake` + `wake_phrase`). Apple silicon only
@@ -945,7 +969,8 @@ then split off), so it waits for the release manager.
   the real model through the speech thread on generated Russian and
   English clips fed in real time (`cargo test -p snth-connect --release --
   --ignored stt_real --nocapture --test-threads 1`, files in
-  /tmp/whisper-test). Not done: a real microphone hold in the app, the
+  /tmp/whisper-test; `STT_ENGINE=parakeet` runs the same on Parakeet, its
+  files in /tmp/parakeet-app/pk). Not done: a real microphone hold in the app, the
   download from Hugging Face end to end in the app, the offer on a real
   island, a Mac on macOS 12, a signed and notarized build with whisper.cpp
   in it.

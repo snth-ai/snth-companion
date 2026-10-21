@@ -271,6 +271,18 @@ pub enum SttMode {
     Device,
 }
 
+/// Which on-device engine recognizes the speech (with `SttMode::Device`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SttEngine {
+    /// whisper large-v3-turbo: keeps English words in Latin letters. The
+    /// default, and in a settings file written before the choice existed.
+    #[default]
+    Whisper,
+    /// NVIDIA Parakeet TDT 0.6B v3: much faster, better on short commands.
+    Parakeet,
+}
+
 /// The synth's offer to recognize speech on this computer, shown once on
 /// the island. Pending on a fresh install and in a settings file written
 /// before the offer existed, so an owner who has the island on already
@@ -336,6 +348,9 @@ pub struct IslandSettings {
     pub stt: SttMode,
     #[serde(default)]
     pub stt_offer: SttOffer,
+    /// The on-device engine (its own model download).
+    #[serde(default)]
+    pub stt_engine: SttEngine,
     /// Wake by name (tz-wake-word.md): the island listens for the main
     /// synth's name and takes what follows as a hold. Off by default.
     #[serde(default)]
@@ -363,6 +378,7 @@ impl Default for IslandSettings {
             hotkeys: Hotkeys::default(),
             stt: SttMode::default(),
             stt_offer: SttOffer::default(),
+            stt_engine: SttEngine::default(),
             wake: false,
             wake_phrase: String::new(),
             stt_tone: true,

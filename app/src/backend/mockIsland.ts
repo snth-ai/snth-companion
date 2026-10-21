@@ -56,6 +56,7 @@ import type {
   IslandView,
   LinkBrief,
   SttCard,
+  SttEngine,
   SttMode,
   SttModelStatus,
   UiState,
@@ -64,6 +65,9 @@ import type {
 
 /** The two model files, as the app pins them (stt/model.rs). */
 export const STT_SIZE = 574_041_195 + 885_098;
+/** Parakeet's files: the encoder, the decoder, the tokens, the voice
+ * detector. */
+export const PARAKEET_SIZE = 652_183_999 + 18_202_004 + 93_939 + 885_098;
 /** Wake by name's files (wake/mod.rs): the voice detector, whisper tiny. */
 export const WAKE_SIZE = 885_098 + 32_152_673;
 
@@ -150,6 +154,7 @@ export function stagedIslandState(os: string, links: LinkBrief[]): IslandState {
       hotkeys: defaultHotkeys(os),
       stt: stt ? "device" : "synth",
       stt_offer: stt ? "accepted" : "pending",
+      stt_engine: scenario === "sttparakeet" ? "parakeet" : "whisper",
       wake: wakeOn,
       wake_phrase: "",
       stt_tone: true,
@@ -158,7 +163,15 @@ export function stagedIslandState(os: string, links: LinkBrief[]): IslandState {
     faces: scenario === "off" ? {} : { mia: MIA_FACE },
     supported,
     device_stt: deviceStt,
-    stt: { available: os === "macos" && scenario !== "sttintel", model, size: STT_SIZE },
+    stt: {
+      available: os === "macos" && scenario !== "sttintel",
+      model: scenario === "sttparakeet" ? { state: "ready" } : model,
+      size: scenario === "sttparakeet" ? PARAKEET_SIZE : STT_SIZE,
+      engines: {
+        whisper: { model, size: STT_SIZE },
+        parakeet: { model: scenario === "sttparakeet" ? { state: "ready" } : { state: "missing" }, size: PARAKEET_SIZE },
+      },
+    },
     wake: {
       ...wakeStatus,
       available: os === "macos" && scenario !== "sttintel" && scenario !== "wakeintel",
@@ -232,15 +245,36 @@ export class MockIslandScreen {
 
   // --- speech recognition ---
 
-  private sttTimer = 0;
+  private sttTimers: Record<SttEngine, number> = { whisper: 0, parakeet: 0 };
+
+  /** The chosen engine's model is the one `model` shows. */
+  private sttMirror() {
+    const stt = this.state().island.stt;
+    const chosen = stt.engines[this.state().island.settings.stt_engine];
+    stt.model = chosen.model;
+    stt.size = chosen.size;
+  }
+
+  private sttChanged(): Promise<UiState> {
+    this.sttMirror();
+    return this.changed();
+  }
 
   sttSet(mode: SttMode): Promise<UiState> {
     const isl = this.state().island;
     if (mode === "device" && !isl.stt.available) return Promise.reject("unsupported");
     isl.settings.stt = mode;
     if (isl.settings.stt_offer === "pending" || isl.settings.stt_offer === "shown") isl.settings.stt_offer = mode === "device" ? "accepted" : "declined";
-    if (mode === "device") return this.sttDownload().catch(() => this.changed());
-    return this.changed();
+    if (mode === "device") return this.sttDownload().catch(() => this.sttChanged());
+    return this.sttChanged();
+  }
+
+  sttEngineSet(engine: SttEngine): Promise<UiState> {
+    const isl = this.state().island;
+    if (!isl.stt.available) return Promise.reject("unsupported");
+    isl.settings.stt_engine = engine;
+    if (isl.settings.stt === "device") return this.sttDownload(engine).catch(() => this.sttChanged());
+    return this.sttChanged();
   }
 
   sttToneSet(on: boolean): Promise<UiState> {
@@ -249,44 +283,49 @@ export class MockIslandScreen {
   }
 
   /** A pretend download: about 6 s to the end, then the check. */
-  sttDownload(): Promise<UiState> {
+  sttDownload(engine?: SttEngine): Promise<UiState> {
     const isl = this.state().island;
-    if (isl.stt.model.state === "ready" || isl.stt.model.state === "downloading") return this.changed();
+    const e = engine ?? isl.settings.stt_engine;
+    const slot = isl.stt.engines[e];
+    if (slot.model.state === "ready" || slot.model.state === "downloading") return this.sttChanged();
     if (params.get("sttnospace") === "1") {
-      isl.stt.model = { state: "failed", code: "no_space", detail: `${STT_SIZE + 300 * 1024 * 1024} ${412 * 1024 * 1024}` };
-      void this.changed();
+      slot.model = { state: "failed", code: "no_space", detail: `${slot.size + 300 * 1024 * 1024} ${412 * 1024 * 1024}` };
+      void this.sttChanged();
       return Promise.reject("no_space");
     }
-    isl.stt.model = { state: "downloading", done: 0, total: STT_SIZE };
-    window.clearInterval(this.sttTimer);
-    this.sttTimer = window.setInterval(() => {
-      const m = isl.stt.model;
-      if (m.state !== "downloading") return window.clearInterval(this.sttTimer);
-      const done = Math.min(m.total, m.done + STT_SIZE / 25);
+    slot.model = { state: "downloading", done: 0, total: slot.size };
+    window.clearInterval(this.sttTimers[e]);
+    this.sttTimers[e] = window.setInterval(() => {
+      const m = slot.model;
+      if (m.state !== "downloading") return window.clearInterval(this.sttTimers[e]);
+      const done = Math.min(m.total, m.done + slot.size / 25);
       if (done >= m.total) {
-        window.clearInterval(this.sttTimer);
-        isl.stt.model = { state: "verifying" };
+        window.clearInterval(this.sttTimers[e]);
+        slot.model = { state: "verifying" };
         window.setTimeout(() => {
-          isl.stt.model = { state: "ready" };
-          void this.changed();
+          slot.model = { state: "ready" };
+          void this.sttChanged();
         }, 800);
-      } else isl.stt.model = { state: "downloading", done, total: m.total };
-      void this.changed();
+      } else slot.model = { state: "downloading", done, total: m.total };
+      void this.sttChanged();
     }, 250);
-    return this.changed();
+    return this.sttChanged();
   }
 
-  sttCancel(): Promise<UiState> {
-    window.clearInterval(this.sttTimer);
-    this.state().island.stt.model = { state: "missing" };
-    return this.changed();
-  }
-
-  sttDelete(): Promise<UiState> {
+  sttCancel(engine?: SttEngine): Promise<UiState> {
     const isl = this.state().island;
-    isl.stt.model = { state: "missing" };
-    isl.settings.stt = "synth";
-    return this.changed();
+    const e = engine ?? isl.settings.stt_engine;
+    window.clearInterval(this.sttTimers[e]);
+    isl.stt.engines[e].model = { state: "missing" };
+    return this.sttChanged();
+  }
+
+  sttDelete(engine?: SttEngine): Promise<UiState> {
+    const isl = this.state().island;
+    const e = engine ?? isl.settings.stt_engine;
+    isl.stt.engines[e].model = { state: "missing" };
+    if (e === isl.settings.stt_engine) isl.settings.stt = "synth";
+    return this.sttChanged();
   }
 
   // --- wake by name ---
