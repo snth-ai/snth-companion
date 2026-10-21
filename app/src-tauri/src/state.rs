@@ -178,42 +178,71 @@ pub struct IslandDto {
 }
 
 /// On-device speech-to-text on the Island screen (the switch itself is
-/// in the settings: `stt`, `stt_offer`).
+/// in the settings: `stt`, `stt_offer`, `stt_engine`).
 #[derive(Debug, Clone, Serialize)]
 pub struct SttDto {
     /// The engine is in this build (Apple silicon).
     pub available: bool,
+    /// The chosen engine's model (with the tone's, see `stt_dto`).
     pub model: crate::island::stt::model::Status,
     /// The download, in bytes.
     pub size: u64,
+    /// Each engine's model, the chosen one as `model`.
+    pub engines: SttEngines,
 }
 
-/// The models' status as Settings shows it: the speech model's, with the
+#[derive(Debug, Clone, Serialize)]
+pub struct SttEngines {
+    pub whisper: SttEngineDto,
+    pub parakeet: SttEngineDto,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SttEngineDto {
+    pub model: crate::island::stt::model::Status,
+    pub size: u64,
+}
+
+/// The models' status as Settings shows it: the chosen engine's, with the
 /// tone's emotion model counted in while the tone switch is on (its
 /// download continues the speech model's progress; a tone model that is
 /// missing or failed leaves the speech model's status alone, since the
-/// text works without it).
+/// text works without it). The other engine's model is shown as it is.
 fn stt_dto(ctx: &Ctx) -> SttDto {
     use crate::island::stt::model::{self, Status};
+    use connect_core::island::SttEngine;
     let s = ctx.core.island();
-    let stt = ctx.island.stt.models.status();
-    let stt_size = model::total_size();
-    let tone_on = s.stt_tone && ctx.island.tone.available();
-    if !tone_on {
-        return SttDto { available: crate::island::stt::available(), model: stt, size: stt_size };
-    }
-    let tone = ctx.island.tone.models.status();
-    let tone_size = model::tone_size();
-    let size = stt_size + tone_size;
-    let model = match (stt, tone) {
-        (Status::Downloading { done, .. }, Status::Ready) => Status::Downloading { done: done + tone_size, total: size },
-        (Status::Downloading { done, .. }, _) => Status::Downloading { done, total: size },
-        (Status::Ready, Status::Downloading { done, .. }) => Status::Downloading { done: stt_size + done, total: size },
-        (Status::Ready, Status::Verifying) => Status::Verifying,
-        (other, _) => other,
+    let raw = |e: SttEngine| {
+        let m = ctx.island.stt.models_of(e);
+        SttEngineDto { model: m.status(), size: m.size() }
     };
-    let size = if ctx.island.tone.models.ready() || matches!(model, Status::Downloading { .. }) { size } else { stt_size };
-    SttDto { available: crate::island::stt::available(), model, size }
+    let chosen = {
+        let SttEngineDto { model: stt, size: stt_size } = raw(s.stt_engine);
+        let tone_on = s.stt_tone && ctx.island.tone.available();
+        if !tone_on {
+            SttEngineDto { model: stt, size: stt_size }
+        } else {
+            let tone = ctx.island.tone.models.status();
+            let tone_size = model::tone_size();
+            let size = stt_size + tone_size;
+            let model = match (stt, tone) {
+                (Status::Downloading { done, .. }, Status::Ready) => Status::Downloading { done: done + tone_size, total: size },
+                (Status::Downloading { done, .. }, _) => Status::Downloading { done, total: size },
+                (Status::Ready, Status::Downloading { done, .. }) => Status::Downloading { done: stt_size + done, total: size },
+                (Status::Ready, Status::Verifying) => Status::Verifying,
+                (other, _) => other,
+            };
+            let size = if ctx.island.tone.models.ready() || matches!(model, Status::Downloading { .. }) { size } else { stt_size };
+            SttEngineDto { model, size }
+        }
+    };
+    let pick = |e: SttEngine| if e == s.stt_engine { chosen.clone() } else { raw(e) };
+    SttDto {
+        available: crate::island::stt::available(),
+        model: chosen.model.clone(),
+        size: chosen.size,
+        engines: SttEngines { whisper: pick(SttEngine::Whisper), parakeet: pick(SttEngine::Parakeet) },
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

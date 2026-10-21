@@ -57,7 +57,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use connect_core::island::{self as core_island, Audio, HotkeyKind, Hotkeys, IslandEvent, Mode, OwnerMessage, SttMode};
+use connect_core::island::{self as core_island, Audio, HotkeyKind, Hotkeys, IslandEvent, Mode, OwnerMessage, SttEngine, SttMode};
 use connect_core::{CoreEvent, LinkState};
 use serde::Serialize;
 use serde_json::Value;
@@ -403,9 +403,9 @@ pub fn view(ctx: &Ctx) -> View {
     let takes_text = main.as_ref().is_some_and(|m| m.state() == LinkState::Linked && core_island::supports_device_stt(m));
     let offer = stt::offer_due(&settings, stt::available(), takes_text, idle);
     let stt_card = if offer {
-        Some(SttCard::Offer { size: stt::model::total_size() })
+        Some(SttCard::Offer { size: island.stt.models_of(settings.stt_engine).size() })
     } else if inner.stt_follow && idle {
-        follow_card(&mut inner, &island.stt.models.status())
+        follow_card(&mut inner, &island.stt.models_of(settings.stt_engine).status())
     } else {
         None
     };
@@ -912,7 +912,7 @@ fn start_hold(ctx: &Arc<Ctx>, kind: HotkeyKind, synth_id: String) {
 fn stt_route(ctx: &Arc<Ctx>) -> stt::Route {
     let mode = ctx.core.island().stt;
     let takes_text = ctx.core.island_main().is_some_and(|m| core_island::supports_device_stt(&m));
-    stt::route(mode, stt::available(), ctx.island.stt.models.ready(), takes_text)
+    stt::route(mode, stt::available(), stt_files(ctx).ready(), takes_text)
 }
 
 /// The tone side of a hold that records now, when its speech is
@@ -1283,6 +1283,13 @@ pub async fn ask_design(ctx: &Arc<Ctx>, synth_id: &str) -> Result<(), String> {
 
 // --- on-device speech-to-text: the switch, the model, the offer ---
 
+/// The chosen engine's files (the speech thread takes the choice too).
+pub fn stt_files(ctx: &Ctx) -> Arc<stt::model::Models> {
+    let e = ctx.core.island().stt_engine;
+    ctx.island.stt.select(e);
+    ctx.island.stt.models_of(e).clone()
+}
+
 /// The model's status changed: the island and the main window hear of it.
 fn stt_changed(ctx: &Arc<Ctx>) -> Arc<dyn Fn() + Send + Sync> {
     let ctx = ctx.clone();
@@ -1292,11 +1299,12 @@ fn stt_changed(ctx: &Arc<Ctx>) -> Arc<dyn Fn() + Send + Sync> {
             emit_view(&ctx);
             crate::state::emit_state(&ctx);
             // The speech model is here: the tone's model follows it.
-            if ctx.island.stt.models.ready() {
+            let ready = stt_files(&ctx).ready();
+            if ready {
                 tone_download(&ctx, false);
             }
             // "Ready" leaves the island by itself.
-            if ctx.island.stt.models.ready() && ctx.island.inner.lock().unwrap().stt_follow {
+            if ready && ctx.island.inner.lock().unwrap().stt_follow {
                 tokio::time::sleep(STT_READY_FOR + Duration::from_millis(200)).await;
                 emit_view(&ctx);
             }
@@ -1304,15 +1312,38 @@ fn stt_changed(ctx: &Arc<Ctx>) -> Arc<dyn Fn() + Send + Sync> {
     })
 }
 
-/// Fetch the model (the owner asked: the switch, the offer, "download").
-/// Err("no_space") when the disk is short; the status says it too.
-pub fn stt_download(ctx: &Arc<Ctx>) -> Result<(), String> {
+/// Fetch an engine's model, the chosen one when None (the owner asked:
+/// the switch, the engine choice, the offer, "download"). Err("no_space")
+/// when the disk is short; the status says it too.
+pub fn stt_download(ctx: &Arc<Ctx>, engine: Option<SttEngine>) -> Result<(), String> {
     if !stt::available() {
         return Err("unsupported".into());
     }
-    let r = ctx.island.stt.models.download(stt_changed(ctx));
-    tone_download(ctx, true);
+    let chosen = ctx.core.island().stt_engine;
+    let e = engine.unwrap_or(chosen);
+    let r = ctx.island.stt.models_of(e).download(stt_changed(ctx));
+    if e == chosen {
+        tone_download(ctx, true);
+    }
     r
+}
+
+/// The engine choice in Settings. With speech recognized here, the
+/// chosen engine's model is fetched if it is not here (the owner asked),
+/// and the other engine is unloaded.
+pub fn stt_engine_set(ctx: &Arc<Ctx>, engine: SttEngine) -> Result<(), String> {
+    if !stt::available() {
+        return Err("unsupported".into());
+    }
+    ctx.core.set_island(|i| i.stt_engine = engine);
+    ctx.island.stt.switch(engine);
+    connect_core::logln!("island: stt: engine {} chosen", stt::engine_name(engine));
+    if ctx.core.island().stt == SttMode::Device {
+        let _ = stt_download(ctx, Some(engine));
+        ctx.island.stt.warm();
+    }
+    emit_view(ctx);
+    Ok(())
 }
 
 /// Fetch the tone's emotion model when the switch is on, speech is
@@ -1320,7 +1351,7 @@ pub fn stt_download(ctx: &Arc<Ctx>) -> Result<(), String> {
 /// `asked`: the owner asked now, so a recent failure is tried again.
 fn tone_download(ctx: &Arc<Ctx>, asked: bool) {
     let s = ctx.core.island();
-    if !s.stt_tone || s.stt != SttMode::Device || !ctx.island.stt.models.ready() {
+    if !s.stt_tone || s.stt != SttMode::Device || !ctx.island.stt.models_of(s.stt_engine).ready() {
         return;
     }
     let ctx2 = ctx.clone();
@@ -1358,7 +1389,7 @@ pub fn stt_set(ctx: &Arc<Ctx>, mode: SttMode) -> Result<(), String> {
     if mode == SttMode::Device {
         // A full disk shows in the model's status; the switch stays on and
         // the voice goes as audio until the model is here.
-        let _ = stt_download(ctx);
+        let _ = stt_download(ctx, None);
         ctx.island.stt.warm();
     }
     emit_view(ctx);
@@ -1382,12 +1413,13 @@ pub fn stt_offer_answer(ctx: &Arc<Ctx>, accept: bool) -> Result<(), String> {
     });
     connect_core::logln!("island: the speech-to-text offer was {}", if accept { "accepted" } else { "declined" });
     if accept {
+        let ready = stt_files(ctx).ready();
         {
             let mut inner = ctx.island.inner.lock().unwrap();
-            inner.stt_follow = !ctx.island.stt.models.ready();
+            inner.stt_follow = !ready;
             inner.stt_ready_at = None;
         }
-        let _ = stt_download(ctx);
+        let _ = stt_download(ctx, None);
     }
     emit_view(ctx);
     Ok(())
@@ -1399,13 +1431,22 @@ pub fn stt_card_hide(ctx: &Arc<Ctx>) {
     emit_view(ctx);
 }
 
-/// "Delete the model": the files go, and the speech goes to the synth.
-pub fn stt_delete(ctx: &Arc<Ctx>) -> Result<(), String> {
-    ctx.island.tone.unload();
-    let tone = ctx.island.tone.models.delete();
-    let result = ctx.island.stt.models.delete().and(tone);
-    ctx.core.set_island(|i| i.stt = SttMode::Synth);
-    ctx.island.inner.lock().unwrap().stt_follow = false;
+/// "Delete the model" of an engine (the chosen one when None): its files
+/// go. The chosen engine's: the speech goes to the synth. The tone's model
+/// goes with the last speech model.
+pub fn stt_delete(ctx: &Arc<Ctx>, engine: Option<SttEngine>) -> Result<(), String> {
+    let chosen = ctx.core.island().stt_engine;
+    let e = engine.unwrap_or(chosen);
+    let mut result = ctx.island.stt.models_of(e).delete();
+    let other = if e == SttEngine::Whisper { SttEngine::Parakeet } else { SttEngine::Whisper };
+    if !ctx.island.stt.models_of(other).ready() {
+        ctx.island.tone.unload();
+        result = result.and(ctx.island.tone.models.delete());
+    }
+    if e == chosen {
+        ctx.core.set_island(|i| i.stt = SttMode::Synth);
+        ctx.island.inner.lock().unwrap().stt_follow = false;
+    }
     emit_view(ctx);
     result
 }

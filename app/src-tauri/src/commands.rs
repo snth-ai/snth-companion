@@ -1104,6 +1104,26 @@ pub async fn island_stt_set(ctx: Cx<'_>, mode: String) -> Result<UiState, String
     Ok(build_state(&ctx).await)
 }
 
+/// The engine an "engine" argument names: "whisper", "parakeet", or none
+/// for the chosen one. Err "bad_engine".
+fn stt_engine_arg(engine: Option<String>) -> Result<Option<connect_core::island::SttEngine>, String> {
+    match engine.as_deref() {
+        None | Some("") => Ok(None),
+        Some("whisper") => Ok(Some(connect_core::island::SttEngine::Whisper)),
+        Some("parakeet") => Ok(Some(connect_core::island::SttEngine::Parakeet)),
+        Some(_) => Err("bad_engine".into()),
+    }
+}
+
+/// The on-device engine: "whisper" or "parakeet". Err: "unsupported",
+/// "bad_engine".
+#[tauri::command]
+pub async fn island_stt_engine_set(ctx: Cx<'_>, engine: String) -> Result<UiState, String> {
+    let engine = stt_engine_arg(Some(engine))?.ok_or("bad_engine")?;
+    crate::island::stt_engine_set(&ctx, engine)?;
+    Ok(build_state(&ctx).await)
+}
+
 /// The tone of voice estimated on this computer (with speech recognized
 /// here): on or off.
 #[tauri::command]
@@ -1112,28 +1132,32 @@ pub async fn island_stt_tone_set(ctx: Cx<'_>, on: bool) -> Result<UiState, Strin
     Ok(build_state(&ctx).await)
 }
 
-/// Fetch the speech-to-text model (again, after a failure). Err:
-/// "no_space", "unsupported".
+/// Fetch an engine's model (the chosen one without `engine`), again after
+/// a failure. Err: "no_space", "unsupported", "bad_engine".
 #[tauri::command]
-pub async fn island_stt_download(ctx: Cx<'_>) -> Result<UiState, String> {
-    let result = crate::island::stt_download(&ctx);
+pub async fn island_stt_download(ctx: Cx<'_>, engine: Option<String>) -> Result<UiState, String> {
+    let result = crate::island::stt_download(&ctx, stt_engine_arg(engine)?);
     let state = build_state(&ctx).await;
     result.map(|_| state)
 }
 
 /// Stop the model's download (it resumes from there next time).
 #[tauri::command]
-pub async fn island_stt_cancel(ctx: Cx<'_>) -> Result<UiState, String> {
-    ctx.island.stt.models.cancel();
+pub async fn island_stt_cancel(ctx: Cx<'_>, engine: Option<String>) -> Result<UiState, String> {
+    match stt_engine_arg(engine)? {
+        Some(e) => ctx.island.stt.models_of(e).cancel(),
+        None => crate::island::stt_files(&ctx).cancel(),
+    }
     ctx.island.tone.models.cancel();
     Ok(build_state(&ctx).await)
 }
 
 /// Delete the model; the speech goes to the synth again.
 #[tauri::command]
-pub async fn island_stt_delete(ctx: Cx<'_>) -> Result<UiState, String> {
+pub async fn island_stt_delete(ctx: Cx<'_>, engine: Option<String>) -> Result<UiState, String> {
+    let engine = stt_engine_arg(engine)?;
     let ctx2 = ctx.inner().clone();
-    tokio::task::spawn_blocking(move || crate::island::stt_delete(&ctx2)).await.map_err(|e| e.to_string())??;
+    tokio::task::spawn_blocking(move || crate::island::stt_delete(&ctx2, engine)).await.map_err(|e| e.to_string())??;
     Ok(build_state(&ctx).await)
 }
 

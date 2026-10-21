@@ -79,6 +79,7 @@ pub const PARAKEET_VOCAB: ModelFile = ModelFile {
 /// The small ones first.
 pub const PARAKEET_FILES: [&ModelFile; 4] = [&VAD, &PARAKEET_VOCAB, &PARAKEET_JOINT, &PARAKEET_ENCODER];
 
+#[cfg(test)]
 pub fn parakeet_size() -> u64 {
     PARAKEET_FILES.iter().map(|f| f.size).sum()
 }
@@ -103,6 +104,7 @@ const TRIES: u32 = 4;
 /// Progress reaches the UI at most this often.
 const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 
+#[cfg(test)]
 pub fn total_size() -> u64 {
     FILES.iter().map(|f| f.size).sum()
 }

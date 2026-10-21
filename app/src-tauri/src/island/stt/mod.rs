@@ -11,6 +11,9 @@
 //! - `model.rs`: the model files (download, check, removal).
 //! - `engine.rs`: whisper.cpp with Metal. Apple silicon only; elsewhere
 //!   the switch is shown as unavailable and the voice goes as audio.
+//! - `parakeet.rs`: NVIDIA Parakeet TDT 0.6B v3 by ONNX Runtime on the CPU,
+//!   the owner's other choice (`SttEngine`), with its own model files.
+//!   One engine is loaded at a time: choosing the other unloads it.
 //! - `stream.rs`: one hold, recognized piece by piece while it runs.
 //! - `vad.rs`, `filter.rs`: where the speech is, what whisper invents.
 //! - `release.rs`: what a released hold sends (a hold is never lost).
@@ -33,6 +36,7 @@
 
 pub mod filter;
 pub mod model;
+pub mod parakeet;
 pub mod release;
 pub mod stream;
 pub mod tone;
@@ -46,7 +50,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use connect_core::island::{IslandSettings, SttMode};
+use connect_core::island::{IslandSettings, SttEngine, SttMode};
 
 pub use release::{decide, AtRelease, EngineState, Release};
 pub use stream::{Decoder, Heard, Vad};
@@ -100,8 +104,16 @@ pub fn offer_due(s: &IslandSettings, available: bool, synth_takes_text: bool, id
 pub type Source = Box<dyn FnMut(usize) -> Vec<i16> + Send>;
 /// The live text, as it grows.
 pub type Live = Box<dyn Fn(String) + Send>;
-/// Loads the engine (the model, the voice detector) on the speech thread.
-pub type Loader = Arc<dyn Fn(&Path, &Path) -> Result<Box<dyn Decoder>, String> + Send + Sync>;
+/// Loads an engine from its model files on the speech thread.
+pub type Loader = Arc<dyn Fn(SttEngine, &model::Models) -> Result<Box<dyn Decoder>, String> + Send + Sync>;
+
+/// The engine's name in the log.
+pub fn engine_name(e: SttEngine) -> &'static str {
+    match e {
+        SttEngine::Whisper => "whisper",
+        SttEngine::Parakeet => "parakeet",
+    }
+}
 /// Called when the engine's state changes (the island shows "loading").
 pub type Notify = Arc<dyn Fn() + Send + Sync>;
 
@@ -110,11 +122,21 @@ pub type Notify = Arc<dyn Fn() + Send + Sync>;
 struct Shared {
     state: AtomicU8,
     notify: Mutex<Option<Notify>>,
+    /// The chosen engine (0 whisper, 1 parakeet).
+    kind: AtomicU8,
 }
 
 impl Shared {
     fn get(&self) -> EngineState {
         EngineState::from_u8(self.state.load(Ordering::Acquire))
+    }
+
+    fn kind(&self) -> SttEngine {
+        if self.kind.load(Ordering::Acquire) == 1 {
+            SttEngine::Parakeet
+        } else {
+            SttEngine::Whisper
+        }
     }
 
     fn set(&self, s: EngineState) {
@@ -209,7 +231,10 @@ impl Drop for Session {
 }
 
 pub struct Stt {
+    /// whisper's files.
     pub models: Arc<model::Models>,
+    /// Parakeet's files.
+    pub parakeet: Arc<model::Models>,
     tx: Mutex<Option<mpsc::Sender<Cmd>>>,
     shared: Arc<Shared>,
     /// None where the engine does not exist.
@@ -221,11 +246,45 @@ pub struct Stt {
 
 impl Stt {
     pub fn new(data_dir: &Path) -> Stt {
-        Stt::with_loader(Arc::new(model::Models::new(data_dir.join("stt"))), engine_loader())
+        let dir = data_dir.join("stt");
+        let parakeet = Arc::new(model::Models::with_files(dir.join("parakeet"), &model::PARAKEET_FILES));
+        Stt::with_loader(Arc::new(model::Models::new(dir)), parakeet, engine_loader())
     }
 
-    fn with_loader(models: Arc<model::Models>, loader: Option<Loader>) -> Stt {
-        Stt { models, tx: Mutex::new(None), shared: Arc::new(Shared::default()), loader, revived: AtomicBool::new(false) }
+    fn with_loader(models: Arc<model::Models>, parakeet: Arc<model::Models>, loader: Option<Loader>) -> Stt {
+        Stt { models, parakeet, tx: Mutex::new(None), shared: Arc::new(Shared::default()), loader, revived: AtomicBool::new(false) }
+    }
+
+    /// The chosen engine.
+    pub fn kind(&self) -> SttEngine {
+        self.shared.kind()
+    }
+
+    /// The files of an engine.
+    pub fn models_of(&self, e: SttEngine) -> &Arc<model::Models> {
+        match e {
+            SttEngine::Whisper => &self.models,
+            SttEngine::Parakeet => &self.parakeet,
+        }
+    }
+
+    /// The files of the chosen engine.
+    pub fn active(&self) -> &Arc<model::Models> {
+        self.models_of(self.kind())
+    }
+
+    /// Take the owner's choice (from the settings). True when it changed.
+    pub fn select(&self, e: SttEngine) -> bool {
+        let v = u8::from(e == SttEngine::Parakeet);
+        self.shared.kind.swap(v, Ordering::AcqRel) != v
+    }
+
+    /// The owner chose another engine: the loaded one goes now, and the
+    /// chosen one loads when its files are here.
+    pub fn switch(&self, e: SttEngine) {
+        if self.select(e) && self.tx.lock().unwrap().is_some() {
+            let _ = self.send(Cmd::Warm);
+        }
     }
 
     /// Where the engine is now.
@@ -267,7 +326,7 @@ impl Stt {
     fn spawn(&self) -> Option<mpsc::Sender<Cmd>> {
         let loader = self.loader.clone()?;
         let (tx, rx) = mpsc::channel();
-        let models = self.models.clone();
+        let models = [self.models.clone(), self.parakeet.clone()];
         let shared = self.shared.clone();
         shared.set(EngineState::Unloaded);
         let spawned = std::thread::Builder::new().name("island-stt".into()).spawn(move || run(rx, models, loader, shared));
@@ -283,7 +342,7 @@ impl Stt {
     /// Load the model ahead of a hold (nothing when it is loaded, or
     /// cannot be).
     pub fn warm(&self) {
-        if self.loader.is_some() && self.models.ready() {
+        if self.loader.is_some() && self.active().ready() {
             let _ = self.send(Cmd::Warm);
         }
     }
@@ -294,7 +353,7 @@ impl Stt {
         if self.loader.is_none() {
             return Err("speech-to-text is not on this system");
         }
-        if !self.models.ready() {
+        if !self.active().ready() {
             return Err("the model is not downloaded yet");
         }
         // The thread had died since the last hold and the warm-up at the
@@ -317,7 +376,15 @@ impl Stt {
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn engine_loader() -> Option<Loader> {
-    Some(Arc::new(|model: &Path, vad: &Path| engine::Engine::load(model, vad).map(|e| Box::new(e) as Box<dyn Decoder>)))
+    use model::{PARAKEET_ENCODER, PARAKEET_JOINT, PARAKEET_VOCAB, VAD};
+    Some(Arc::new(|kind: SttEngine, m: &model::Models| match kind {
+        SttEngine::Whisper => {
+            let (model, vad) = m.paths();
+            engine::Engine::load(&model, &vad).map(|e| Box::new(e) as Box<dyn Decoder>)
+        }
+        SttEngine::Parakeet => parakeet::Engine::load(&m.path(&PARAKEET_ENCODER), &m.path(&PARAKEET_JOINT), &m.path(&PARAKEET_VOCAB), &m.path(&VAD))
+            .map(|e| Box::new(e) as Box<dyn Decoder>),
+    }))
 }
 
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
@@ -331,7 +398,7 @@ fn to_f32(pcm: &[i16]) -> Vec<f32> {
 
 /// The speech thread. A panic ends it (the next hold starts another);
 /// the engine state says "gone" and the log says why.
-fn run(rx: mpsc::Receiver<Cmd>, models: Arc<model::Models>, loader: Loader, shared: Arc<Shared>) {
+fn run(rx: mpsc::Receiver<Cmd>, models: [Arc<model::Models>; 2], loader: Loader, shared: Arc<Shared>) {
     let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| serve(rx, &models, &loader, &shared)));
     if let Err(p) = ran {
         let what = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_default();
@@ -340,9 +407,10 @@ fn run(rx: mpsc::Receiver<Cmd>, models: Arc<model::Models>, loader: Loader, shar
     shared.set(EngineState::Gone);
 }
 
-/// Load on demand, run holds, unload when idle.
-fn serve(rx: mpsc::Receiver<Cmd>, models: &model::Models, loader: &Loader, shared: &Shared) {
-    let mut engine: Option<Box<dyn Decoder>> = None;
+/// Load on demand, run holds, unload when idle. One engine at a time:
+/// another choice unloads the loaded one first.
+fn serve(rx: mpsc::Receiver<Cmd>, models: &[Arc<model::Models>; 2], loader: &Loader, shared: &Shared) {
+    let mut engine: Option<(SttEngine, Box<dyn Decoder>)> = None;
     let mut last_use = Instant::now();
     loop {
         let cmd = if engine.is_some() {
@@ -362,27 +430,33 @@ fn serve(rx: mpsc::Receiver<Cmd>, models: &model::Models, loader: &Loader, share
                 Err(_) => return,
             }
         };
+        let want = shared.kind();
+        let files = &models[usize::from(want == SttEngine::Parakeet)];
+        if let Some((had, _)) = engine.as_ref().filter(|(k, _)| *k != want) {
+            connect_core::logln!("island: stt: {} unloaded, {} chosen", engine_name(*had), engine_name(want));
+            engine = None;
+            shared.set(EngineState::Unloaded);
+        }
         // The files may have been deleted since.
-        if !models.ready() {
+        if !files.ready() {
             engine = None;
             shared.set(EngineState::Unloaded);
         } else if engine.is_none() {
             shared.set(EngineState::Loading);
-            let (model, vad) = models.paths();
-            match loader(&model, &vad) {
+            match loader(want, files) {
                 Ok(e) => {
-                    engine = Some(e);
+                    engine = Some((want, e));
                     shared.set(EngineState::Ready);
                 }
                 Err(e) => {
-                    connect_core::logln!("island: speech-to-text did not load: {e}");
+                    connect_core::logln!("island: speech-to-text ({}) did not load: {e}", engine_name(want));
                     shared.set(EngineState::Failed);
                 }
             }
         }
         if let Cmd::Hold(job) = cmd {
             match engine.as_mut() {
-                Some(e) => run_hold(e.as_mut(), job),
+                Some((k, e)) => run_hold(e.as_mut(), job, engine_name(*k)),
                 None => refuse(job, shared.get()),
             }
         }
@@ -398,8 +472,9 @@ fn refuse(job: Job, state: EngineState) {
 }
 
 /// One hold: a step about once a second until the key is let go.
-fn run_hold(engine: &mut dyn Decoder, mut job: Job) {
+fn run_hold(engine: &mut dyn Decoder, mut job: Job, name: &str) {
     let mut s = stream::Streamer::new();
+    s.cuts = engine.cuts();
     let mut broken: Option<String> = None;
     loop {
         // The release gave up while this hold waited (a cold load).
@@ -436,7 +511,7 @@ fn run_hold(engine: &mut dyn Decoder, mut job: Job) {
                         let tail = s.pending();
                         let r = s.finish(engine);
                         connect_core::logln!(
-                            "island: speech-to-text final piece of {:.1} s in {} ms{} ({:.1} s in all, language {})",
+                            "island: speech-to-text ({name}) final piece of {:.1} s in {} ms{} ({:.1} s in all, language {})",
                             tail as f32 / vad::RATE as f32,
                             t.elapsed().as_millis(),
                             if s.reused { ", the preview" } else { "" },
@@ -540,7 +615,7 @@ mod tests {
 
     fn fake_loader(f: Fake) -> Loader {
         let loads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        Arc::new(move |_: &Path, _: &Path| {
+        Arc::new(move |_: SttEngine, _: &model::Models| {
             std::thread::sleep(f.load);
             if f.fail_load {
                 return Err("load: the model file is broken".into());
@@ -553,9 +628,10 @@ mod tests {
     /// An app that starts with the model not downloaded yet.
     fn fresh_app(f: Fake) -> Stt {
         let dir = std::env::temp_dir().join(format!("snth-stt-test-{}-{}", std::process::id(), rand_suffix()));
-        let models = Arc::new(model::Models::new(dir));
+        let models = Arc::new(model::Models::new(dir.clone()));
         assert!(!models.ready());
-        Stt::with_loader(models, Some(fake_loader(f)))
+        let parakeet = Arc::new(model::Models::with_files(dir.join("parakeet"), &model::PARAKEET_FILES));
+        Stt::with_loader(models, parakeet, Some(fake_loader(f)))
     }
 
     fn rand_suffix() -> u64 {
@@ -701,9 +777,45 @@ mod tests {
     }
 
     #[test]
+    fn one_engine_is_loaded_at_a_time_and_each_needs_its_own_files() {
+        let loaded = Arc::new(Mutex::new(Vec::new()));
+        let seen = loaded.clone();
+        let loader: Loader = Arc::new(move |k: SttEngine, _: &model::Models| {
+            seen.lock().unwrap().push(k);
+            Ok(Box::new(FakeEngine { no_vad: false, panic_on_decode: false }) as Box<dyn Decoder>)
+        });
+        let dir = std::env::temp_dir().join(format!("snth-stt-test-engines-{}-{}", std::process::id(), rand_suffix()));
+        let parakeet = Arc::new(model::Models::with_files(dir.join("parakeet"), &model::PARAKEET_FILES));
+        let stt = Stt::with_loader(Arc::new(model::Models::new(dir)), parakeet, Some(loader));
+        assert_eq!(stt.kind(), SttEngine::Whisper, "whisper by default");
+        stt.models.pretend(model::Status::Ready);
+        stt.warm();
+        wait_for(&stt, EngineState::Ready);
+        // Parakeet chosen while its files are missing: whisper is unloaded
+        // and the voice goes as audio, as before any download.
+        stt.switch(SttEngine::Parakeet);
+        wait_for(&stt, EngineState::Unloaded);
+        assert!(!stt.active().ready());
+        assert_eq!(hold(&stt, pcm(1.0, &[(0.2, 0.8)]), false).0, Release::Audio("the model is not downloaded yet".into()));
+        // Its files are here: the next hold loads it and goes as text.
+        stt.parakeet.pretend(model::Status::Ready);
+        assert_eq!(hold(&stt, pcm(1.5, &[(0.2, 1.2)]), false).0, Release::Text("слово".into()));
+        // Back to whisper.
+        stt.switch(SttEngine::Whisper);
+        let t = Instant::now();
+        while loaded.lock().unwrap().len() < 3 {
+            assert!(t.elapsed() < Duration::from_secs(20), "whisper was never loaded again");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        wait_for(&stt, EngineState::Ready);
+        assert_eq!(*loaded.lock().unwrap(), vec![SttEngine::Whisper, SttEngine::Parakeet, SttEngine::Whisper]);
+        assert!(!stt.select(SttEngine::Whisper), "the same choice is no change");
+    }
+
+    #[test]
     fn without_the_engine_every_hold_goes_as_audio() {
         let dir = std::env::temp_dir().join("snth-stt-test-none");
-        let stt = Stt::with_loader(Arc::new(model::Models::new(dir)), None);
+        let stt = Stt::with_loader(Arc::new(model::Models::new(dir.clone())), Arc::new(model::Models::with_files(dir.join("parakeet"), &model::PARAKEET_FILES)), None);
         stt.models.pretend(model::Status::Ready);
         assert_eq!(hold(&stt, pcm(1.0, &[]), false).0, Release::Audio("speech-to-text is not on this system".into()));
     }
@@ -807,7 +919,8 @@ mod tests {
         }
         let models = Arc::new(model::Models::new(dir.clone()));
         assert!(models.ready());
-        (dir, Stt::with_loader(models, engine_loader()))
+        let parakeet = Arc::new(model::Models::with_files(dir.join("parakeet"), &model::PARAKEET_FILES));
+        (dir, Stt::with_loader(models, parakeet, engine_loader()))
     }
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
