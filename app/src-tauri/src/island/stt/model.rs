@@ -49,6 +49,40 @@ pub const VAD: ModelFile = ModelFile {
 /// The small one first: the progress is about the big one anyway.
 pub const FILES: [&ModelFile; 2] = [&VAD, &WHISPER];
 
+/// NVIDIA Parakeet TDT 0.6B v3 (CC-BY-4.0), istupakov's ONNX export, int8
+/// (istupakov/parakeet-tdt-0.6b-v3-onnx at 8f23f0c): the second engine
+/// (parakeet.rs). Its own folder (`stt/parakeet/`) with its own copy of
+/// the voice detector, so either engine's files go without the other's.
+/// The mel preprocessor and config.json of that repository are not
+/// needed: the features are computed in parakeet.rs.
+pub const PARAKEET_ENCODER: ModelFile = ModelFile {
+    name: "encoder-model.int8.onnx",
+    url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/encoder-model.int8.onnx",
+    sha256: "6139d2fa7e1b086097b277c7149725edbab89cc7c7ae64b23c741be4055aff09",
+    size: 652_183_999,
+};
+
+pub const PARAKEET_JOINT: ModelFile = ModelFile {
+    name: "decoder_joint-model.int8.onnx",
+    url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/decoder_joint-model.int8.onnx",
+    sha256: "eea7483ee3d1a30375daedc8ed83e3960c91b098812127a0d99d1c8977667a70",
+    size: 18_202_004,
+};
+
+pub const PARAKEET_VOCAB: ModelFile = ModelFile {
+    name: "vocab.txt",
+    url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/vocab.txt",
+    sha256: "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d",
+    size: 93_939,
+};
+
+/// The small ones first.
+pub const PARAKEET_FILES: [&ModelFile; 4] = [&VAD, &PARAKEET_VOCAB, &PARAKEET_JOINT, &PARAKEET_ENCODER];
+
+pub fn parakeet_size() -> u64 {
+    PARAKEET_FILES.iter().map(|f| f.size).sum()
+}
+
 /// emotion2vec+ base (emotion2vec/emotion2vec_plus_base, FunASR Model
 /// License 1.1), our ONNX export with int8 matrix products (tone/emotion.rs).
 /// The tone of voice; fetched after the speech model, only while the tone
@@ -441,7 +475,7 @@ mod tests {
 
     #[test]
     fn the_files_are_pinned() {
-        for f in FILES.iter().chain(TONE_FILES.iter()) {
+        for f in FILES.iter().chain(TONE_FILES.iter()).chain(PARAKEET_FILES.iter()) {
             // Hugging Face at a revision, or a release asset of ours (a
             // tag of its own, never re-uploaded).
             assert!(
@@ -457,6 +491,7 @@ mod tests {
         }
         assert!((540..600).contains(&(total_size() / 1_000_000)), "about 550 MB");
         assert!((100..130).contains(&(tone_size() / 1_000_000)), "about 118 MB");
+        assert!((660..680).contains(&(parakeet_size() / 1_000_000)), "about 671 MB");
         assert_eq!(Models::with_files(PathBuf::from("/nonexistent"), &TONE_FILES).size(), tone_size());
     }
 
@@ -506,6 +541,19 @@ mod tests {
         if cfg!(unix) {
             assert!(free_space(&std::env::temp_dir()).unwrap() > 0);
         }
+    }
+
+    /// The real download of Parakeet's vocabulary (a plain file behind a
+    /// relative redirect, unlike the LFS ones).
+    /// `cargo test -p snth-connect -- --ignored stt_parakeet_vocab_download`.
+    #[test]
+    #[ignore]
+    fn stt_parakeet_vocab_download() {
+        let d = tmp("pk-net");
+        let m = Models::with_files(d.clone(), &PARAKEET_FILES);
+        m.fetch_one(&PARAKEET_VOCAB, 0, PARAKEET_VOCAB.size, &|| {}).unwrap_or_else(|_| panic!("download failed"));
+        assert_eq!(sha256_of(&part(&d, &PARAKEET_VOCAB), &AtomicBool::new(false)).unwrap(), PARAKEET_VOCAB.sha256);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// The real download of the small file, resumed from a part. Network:

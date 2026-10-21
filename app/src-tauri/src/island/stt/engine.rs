@@ -44,6 +44,43 @@ fn max_tokens(samples: usize) -> i32 {
     (samples * 12 / RATE) as i32 + 24
 }
 
+/// whisper.cpp's Silero voice detector, on its own (the Parakeet engine
+/// uses it too). None when it does not load: the energy detector stands in.
+pub(super) fn load_vad(vad_model: &Path) -> Option<WhisperVadContext> {
+    whisper_rs::install_logging_hooks();
+    vad_model.to_str().and_then(|p| {
+        let mut params = WhisperVadContextParams::new();
+        params.set_n_threads(1);
+        params.set_use_gpu(false);
+        match WhisperVadContext::new(p, params) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                connect_core::logln!("island: the voice detector did not load ({e}); using loudness");
+                None
+            }
+        }
+    })
+}
+
+/// Where the speech is, by Silero.
+pub(super) fn silero(vad: &mut WhisperVadContext, audio: &[f32]) -> Option<Vec<Span>> {
+    let mut params = WhisperVadParams::new();
+    params.set_threshold(0.5);
+    params.set_min_speech_duration(150);
+    // Short, so the pauses at commas show (the stream may cut there).
+    params.set_min_silence_duration(100);
+    params.set_speech_pad(30);
+    let segments = vad.segments_from_samples(params, audio).ok()?;
+    let cs = |t: f32| ((t.max(0.0) * RATE as f32 / 100.0) as usize).min(audio.len());
+    Some(
+        (0..segments.num_segments())
+            .filter_map(|i| segments.get_segment(i))
+            .map(|s| (cs(s.start), cs(s.end)))
+            .filter(|(a, b)| b > a)
+            .collect(),
+    )
+}
+
 pub struct Engine {
     _ctx: WhisperContext,
     state: WhisperState,
@@ -69,18 +106,7 @@ impl Engine {
         let path = model.to_str().ok_or("the model path is not UTF-8")?;
         let ctx = WhisperContext::new_with_params(path, WhisperContextParameters::default()).map_err(|e| format!("load: {e}"))?;
         let state = ctx.create_state().map_err(|e| format!("state: {e}"))?;
-        let vad = vad_model.to_str().and_then(|p| {
-            let mut params = WhisperVadContextParams::new();
-            params.set_n_threads(1);
-            params.set_use_gpu(false);
-            match WhisperVadContext::new(p, params) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    connect_core::logln!("island: the voice detector did not load ({e}); using loudness");
-                    None
-                }
-            }
-        });
+        let vad = load_vad(vad_model);
         let mut engine = Engine { _ctx: ctx, state, vad };
         let loaded = started.elapsed();
         let _ = engine.decode(&vec![0.0; RATE / 2], Some("en"), None);
@@ -90,25 +116,6 @@ impl Engine {
             started.elapsed().as_millis()
         );
         Ok(engine)
-    }
-
-    fn silero(&mut self, audio: &[f32]) -> Option<Vec<Span>> {
-        let vad = self.vad.as_mut()?;
-        let mut params = WhisperVadParams::new();
-        params.set_threshold(0.5);
-        params.set_min_speech_duration(150);
-        // Short, so the pauses at commas show (the stream may cut there).
-        params.set_min_silence_duration(100);
-        params.set_speech_pad(30);
-        let segments = vad.segments_from_samples(params, audio).ok()?;
-        let cs = |t: f32| ((t.max(0.0) * RATE as f32 / 100.0) as usize).min(audio.len());
-        Some(
-            (0..segments.num_segments())
-                .filter_map(|i| segments.get_segment(i))
-                .map(|s| (cs(s.start), cs(s.end)))
-                .filter(|(a, b)| b > a)
-                .collect(),
-        )
     }
 
     /// The piece's language, from whisper's odds (`pick_lang`). The same
@@ -169,7 +176,7 @@ impl Decoder for Engine {
     }
 
     fn vad(&mut self, audio: &[f32]) -> Option<Vec<Span>> {
-        self.silero(audio)
+        silero(self.vad.as_mut()?, audio)
     }
 }
 
