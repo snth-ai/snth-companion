@@ -396,6 +396,10 @@ export type MicPermission = "granted" | "denied" | "not_asked" | "unknown";
 /** Who turns the owner's voice into text: the synth (the default, it
  * hears the tone of voice too) or this computer (faster). */
 export type SttMode = "synth" | "device";
+/** The on-device engine: whisper (the default, keeps English words in
+ * Latin letters) or NVIDIA Parakeet (much faster). Each has its own
+ * model. */
+export type SttEngine = "whisper" | "parakeet";
 /** The synth's one-time offer of on-device speech-to-text. */
 export type SttOffer = "pending" | "shown" | "accepted" | "declined";
 
@@ -408,6 +412,8 @@ export interface IslandSettings {
   hotkeys: Hotkeys;
   stt: SttMode;
   stt_offer: SttOffer;
+  /** The on-device engine: whisper by default. */
+  stt_engine: SttEngine;
   /** Wake by name: off by default. */
   wake: boolean;
   /** The owner's extra wake phrase; "" = the name alone. */
@@ -456,9 +462,12 @@ export type SttModelStatus =
 export interface SttState {
   /** The engine is in this build (a Mac with Apple silicon). */
   available: boolean;
+  /** The chosen engine's model (with the tone's model counted in). */
   model: SttModelStatus;
   /** The download, in bytes. */
   size: number;
+  /** Each engine's model; the chosen one is `model`. */
+  engines: Record<SttEngine, { model: SttModelStatus; size: number }>;
 }
 
 /** The speech-to-text card on the island: the synth's offer, then the
@@ -849,11 +858,16 @@ export interface Backend {
   /** The tone of voice estimated on this computer, on or off. On fetches
    * its model (after the speech model) when it is not here. */
   islandSttToneSet(on: boolean): Promise<UiState>;
-  /** Fetch the model (again). Err: no_space, unsupported. */
-  islandSttDownload(): Promise<UiState>;
-  islandSttCancel(): Promise<UiState>;
-  /** Delete the model; the speech goes to the synth again. */
-  islandSttDelete(): Promise<UiState>;
+  /** The on-device engine. With speech recognized here, fetches its
+   * model when it is not here. Err: unsupported. */
+  islandSttEngineSet(engine: SttEngine): Promise<UiState>;
+  /** Fetch an engine's model (the chosen one by default), again. Err:
+   * no_space, unsupported. */
+  islandSttDownload(engine?: SttEngine): Promise<UiState>;
+  islandSttCancel(engine?: SttEngine): Promise<UiState>;
+  /** Delete an engine's model (the chosen one by default); for the
+   * chosen one, the speech goes to the synth again. */
+  islandSttDelete(engine?: SttEngine): Promise<UiState>;
   /** Wake by name on or off. Err: unsupported. On fetches its model. */
   islandWakeSet(on: boolean): Promise<UiState>;
   islandWakePhrase(phrase: string): Promise<UiState>;

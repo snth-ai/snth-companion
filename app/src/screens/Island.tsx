@@ -8,7 +8,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { backend } from "../backend";
-import type { FaceConfig, HotkeyKind, SttMode, UiState } from "../backend/types";
+import type { FaceConfig, HotkeyKind, SttEngine, SttMode, UiState } from "../backend/types";
 import { FaceEditor } from "../island/faceApi";
 import { acceleratorFromEvent, formatBytes, shortcutKeys } from "../lib/format";
 import { linkName, useStore } from "../lib/store";
@@ -124,16 +124,15 @@ function HotkeyRow(props: { kind: HotkeyKind; name: string }) {
   );
 }
 
-/** Speech recognition: through the synth or on this computer, and the
- * model the second one needs. */
+/** Speech recognition: through the synth or on this computer, the
+ * engine on this computer, and the model each engine needs. */
 function SttSection(props: { name: string; takesText: boolean }) {
   const { state, s, lang, act } = useStore();
   const t = s.island;
   const isl = state.island;
   const stt = isl.stt;
   const mode = isl.settings.stt;
-  const model = stt.model;
-  const size = formatBytes(stt.size, s, lang);
+  const chosen: SttEngine = isl.settings.stt_engine ?? "whisper";
   const [problem, setProblem] = useState<string | null>(null);
   const run = (work: () => Promise<UiState>) => {
     setProblem(null);
@@ -152,27 +151,66 @@ function SttSection(props: { name: string; takesText: boolean }) {
     );
   }
 
-  let status: string;
-  switch (model.state) {
-    case "downloading": {
-      const pct = Math.min(100, Math.floor((model.done * 100) / Math.max(1, model.total)));
-      status = t.sttDownloading(pct, formatBytes(model.done, s, lang), formatBytes(model.total, s, lang));
-      break;
+  const engines: SttEngine[] = ["whisper", "parakeet"];
+  const slot = (e: SttEngine) => stt.engines?.[e] ?? { model: e === chosen ? stt.model : ({ state: "missing" } as const), size: stt.size };
+
+  /** One engine's model: its status and what can be done with it. */
+  const modelRow = (e: SttEngine) => {
+    const { model, size: bytes } = slot(e);
+    const size = formatBytes(bytes, s, lang);
+    let status: string;
+    switch (model.state) {
+      case "downloading": {
+        const pct = Math.min(100, Math.floor((model.done * 100) / Math.max(1, model.total)));
+        status = t.sttDownloading(pct, formatBytes(model.done, s, lang), formatBytes(model.total, s, lang));
+        break;
+      }
+      case "verifying":
+        status = t.sttVerifying;
+        break;
+      case "ready":
+        status = t.sttReady(size);
+        break;
+      case "failed": {
+        const [need, free] = model.detail.split(" ").map((n) => formatBytes(Number(n) || 0, s, lang));
+        status = (t.sttFailed[model.code] ?? t.sttFailed.io!)(need ?? "", free ?? "");
+        break;
+      }
+      default:
+        status = mode === "device" && e === chosen ? t.sttMissingOn(size) : t.sttMissing(size);
     }
-    case "verifying":
-      status = t.sttVerifying;
-      break;
-    case "ready":
-      status = t.sttReady(size);
-      break;
-    case "failed": {
-      const [need, free] = model.detail.split(" ").map((n) => formatBytes(Number(n) || 0, s, lang));
-      status = (t.sttFailed[model.code] ?? t.sttFailed.io!)(need ?? "", free ?? "");
-      break;
-    }
-    default:
-      status = mode === "device" ? t.sttMissingOn(size) : t.sttMissing(size);
-  }
+    return (
+      <div className="group" key={e}>
+        <Row title={t.sttModelOf[e]} desc={<span className={model.state === "failed" ? "error-text" : undefined}>{status}</span>}>
+          {model.state === "downloading" ? (
+            <button type="button" className="btn small" onClick={() => run(() => backend.islandSttCancel(e))}>
+              {t.sttCancel}
+            </button>
+          ) : null}
+          {model.state === "missing" ? (
+            <button type="button" className="btn small" onClick={() => run(() => backend.islandSttDownload(e))}>
+              {t.sttDownload}
+            </button>
+          ) : null}
+          {model.state === "failed" ? (
+            <button type="button" className="btn small" onClick={() => run(() => backend.islandSttDownload(e))}>
+              {t.sttRetry}
+            </button>
+          ) : null}
+          {model.state === "ready" ? (
+            <button type="button" className="btn small quiet" onClick={() => run(() => backend.islandSttDelete(e))}>
+              {t.sttDelete}
+            </button>
+          ) : null}
+        </Row>
+        {model.state === "downloading" ? (
+          <div className="stt-progress" aria-hidden="true">
+            <i style={{ width: `${Math.min(100, (model.done * 100) / Math.max(1, model.total))}%` }} />
+          </div>
+        ) : null}
+      </div>
+    );
+  };
 
   return (
     <Section title={t.stt} note={t.sttNote}>
@@ -187,6 +225,17 @@ function SttSection(props: { name: string; takesText: boolean }) {
       />
       {mode === "device" && !props.takesText ? <Notice kind="warn">{t.sttSynthOld(props.name)}</Notice> : null}
       {mode === "device" ? (
+        <ChoiceList<SttEngine>
+          label={t.sttEngine}
+          value={chosen}
+          options={[
+            { value: "whisper", title: t.sttWhisper, desc: t.sttWhisperDesc },
+            { value: "parakeet", title: t.sttParakeet, desc: t.sttParakeetDesc },
+          ]}
+          onChange={(next) => run(() => backend.islandSttEngineSet(next))}
+        />
+      ) : null}
+      {mode === "device" ? (
         <div className="group">
           <SwitchRow
             title={t.sttTone}
@@ -196,37 +245,7 @@ function SttSection(props: { name: string; takesText: boolean }) {
           />
         </div>
       ) : null}
-      {mode === "device" || model.state !== "missing" ? (
-        <div className="group">
-          <Row title={t.sttModel} desc={<span className={model.state === "failed" ? "error-text" : undefined}>{status}</span>}>
-            {model.state === "downloading" ? (
-              <button type="button" className="btn small" onClick={() => run(() => backend.islandSttCancel())}>
-                {t.sttCancel}
-              </button>
-            ) : null}
-            {model.state === "missing" ? (
-              <button type="button" className="btn small" onClick={() => run(() => backend.islandSttDownload())}>
-                {t.sttDownload}
-              </button>
-            ) : null}
-            {model.state === "failed" ? (
-              <button type="button" className="btn small" onClick={() => run(() => backend.islandSttDownload())}>
-                {t.sttRetry}
-              </button>
-            ) : null}
-            {model.state === "ready" ? (
-              <button type="button" className="btn small quiet" onClick={() => run(() => backend.islandSttDelete())}>
-                {t.sttDelete}
-              </button>
-            ) : null}
-          </Row>
-          {model.state === "downloading" ? (
-            <div className="stt-progress" aria-hidden="true">
-              <i style={{ width: `${Math.min(100, (model.done * 100) / Math.max(1, model.total))}%` }} />
-            </div>
-          ) : null}
-        </div>
-      ) : null}
+      {engines.filter((e) => (mode === "device" && e === chosen) || slot(e).model.state !== "missing").map(modelRow)}
       {problem ? (
         <div className="error-text" role="alert">
           {problem}

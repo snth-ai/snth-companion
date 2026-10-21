@@ -107,6 +107,7 @@ import type {
   UpdateStatus,
   FaceConfig,
   HotkeyKind,
+  SttEngine,
   SttMode,
   IslandRect,
   IslandSignal,
@@ -2041,16 +2042,20 @@ class MockBackend implements Backend {
     return this.islandScreen.sttToneSet(on);
   }
 
-  islandSttDownload() {
-    return this.islandScreen.sttDownload();
+  islandSttEngineSet(engine: SttEngine) {
+    return this.islandScreen.sttEngineSet(engine);
   }
 
-  islandSttCancel() {
-    return this.islandScreen.sttCancel();
+  islandSttDownload(engine?: SttEngine) {
+    return this.islandScreen.sttDownload(engine);
   }
 
-  islandSttDelete() {
-    return this.islandScreen.sttDelete();
+  islandSttCancel(engine?: SttEngine) {
+    return this.islandScreen.sttCancel(engine);
+  }
+
+  islandSttDelete(engine?: SttEngine) {
+    return this.islandScreen.sttDelete(engine);
   }
 
   islandWakeSet(on: boolean) {
