@@ -976,16 +976,14 @@ mod tests {
         println!("unloaded: now {} MB", rss_now_mb());
     }
 
-    /// The resident size now (ps) and the physical footprint (what
-    /// Activity Monitor calls Memory, GPU buffers included), in MB.
+    /// The physical footprint now (what Activity Monitor calls Memory,
+    /// GPU buffers included), in MB.
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     fn rss_now_mb() -> String {
-        let out = std::process::Command::new("ps").args(["-o", "rss=", "-p", &std::process::id().to_string()]).output().unwrap();
-        let rss = String::from_utf8_lossy(&out.stdout).trim().parse::<u64>().unwrap_or(0) / 1024;
         let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
         let ok = unsafe { libc::proc_pid_rusage(std::process::id() as i32, libc::RUSAGE_INFO_V2, &mut info as *mut _ as *mut libc::rusage_info_t) } == 0;
         let fp = if ok { info.ri_phys_footprint / 1024 / 1024 } else { 0 };
-        format!("rss {rss} footprint {fp}")
+        format!("footprint {fp}")
     }
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
