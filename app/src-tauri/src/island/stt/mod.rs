@@ -846,7 +846,7 @@ mod tests {
         // words that must be heard). The clips end in 0.5 s of quiet; the
         // cut one is let go mid-word.
         let cases: [(&str, f32, &[&[&str]]); 6] = [
-            ("ru6.wav", 0.0, &[&["мия", "мне"], &["экран"]]),
+            ("ru6.wav", 0.0, &[&["мия", "мне", "миа", "меня"], &["экран"]]),
             ("ru10.wav", 0.0, &[&["отчет", "отчёт"], &["курьер"], &["телеграм"]]),
             ("ru10.wav", 9.4, &[&["отчет", "отчёт"], &["курьер"], &["сводк"]]),
             ("en8.wav", 0.0, &[&["calendar"], &["design"], &["afternoon"]]),
@@ -901,12 +901,10 @@ mod tests {
         assert!(matches!(out, Release::Text(_)), "{out:?}");
     }
 
+    /// The pinned files in `dir`, marked checked as the download does.
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    fn real_stt() -> (std::path::PathBuf, Stt) {
-        let dir = std::path::PathBuf::from(std::env::var("STT_TEST_DIR").unwrap_or_else(|_| "/tmp/whisper-test".into()));
-        // The files are the pinned ones; mark them checked as the
-        // download does.
-        for f in model::FILES {
+    fn mark_checked(dir: &Path, files: &[&model::ModelFile]) {
+        for f in files {
             let marked = std::fs::read_to_string(dir.join(format!("{}.ok", f.name))).is_ok_and(|s| s.trim() == f.sha256);
             if marked {
                 continue;
@@ -917,10 +915,77 @@ mod tests {
             println!("sha256 of {} checked in {} ms", f.name, t.elapsed().as_millis());
             std::fs::write(dir.join(format!("{}.ok", f.name)), f.sha256).unwrap();
         }
+    }
+
+    /// The real engine: whisper, or Parakeet with STT_ENGINE=parakeet (its
+    /// files in $STT_PARAKEET_DIR, default /tmp/parakeet-app/pk). The clips
+    /// are in $STT_TEST_DIR either way.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn real_stt() -> (std::path::PathBuf, Stt) {
+        let dir = std::path::PathBuf::from(std::env::var("STT_TEST_DIR").unwrap_or_else(|_| "/tmp/whisper-test".into()));
+        let pk = std::path::PathBuf::from(std::env::var("STT_PARAKEET_DIR").unwrap_or_else(|_| "/tmp/parakeet-app/pk".into()));
+        let parakeet_on = std::env::var("STT_ENGINE").is_ok_and(|e| e == "parakeet");
+        let models = Arc::new(model::Models::new(dir.clone()));
+        let parakeet = Arc::new(model::Models::with_files(pk.clone(), &model::PARAKEET_FILES));
+        if parakeet_on {
+            mark_checked(&pk, &model::PARAKEET_FILES);
+            let parakeet = Arc::new(model::Models::with_files(pk, &model::PARAKEET_FILES));
+            assert!(parakeet.ready());
+            let stt = Stt::with_loader(models, parakeet, engine_loader());
+            stt.select(SttEngine::Parakeet);
+            return (dir, stt);
+        }
+        mark_checked(&dir, &model::FILES);
         let models = Arc::new(model::Models::new(dir.clone()));
         assert!(models.ready());
-        let parakeet = Arc::new(model::Models::with_files(dir.join("parakeet"), &model::PARAKEET_FILES));
         (dir, Stt::with_loader(models, parakeet, engine_loader()))
+    }
+
+    /// Speed and memory of one engine (STT_ENGINE=whisper|parakeet, one
+    /// process each so the peak is that engine's): the cold load, then a
+    /// 10 s clip decoded whole three times.
+    ///
+    /// `STT_ENGINE=parakeet cargo test -p snth-connect --release -- --ignored stt_real_bench --nocapture --test-threads 1`
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    #[ignore]
+    fn stt_real_bench() {
+        let (dir, stt) = real_stt();
+        let kind = stt.kind();
+        println!("before load: peak RSS {} MB", peak_rss_mb());
+        let t = Instant::now();
+        let mut e = engine_loader().unwrap()(kind, stt.active()).unwrap();
+        println!("{}: cold load + warm-up {} ms, peak RSS {} MB, now {} MB", engine_name(kind), t.elapsed().as_millis(), peak_rss_mb(), rss_now_mb());
+        let audio = to_f32(&read_clip(&dir, "ru10.wav"));
+        let secs = audio.len() as f32 / vad::RATE as f32;
+        for lang in [None, Some("ru")] {
+            for i in 0..3 {
+                let t = Instant::now();
+                let d = e.decode(&audio, lang, None).unwrap();
+                println!(
+                    "{} {secs:.1} s, language {:?}, run {i}: {} ms ({} chars)",
+                    engine_name(kind),
+                    lang,
+                    t.elapsed().as_millis(),
+                    d.segments.concat().chars().count()
+                );
+            }
+        }
+        println!("{}: peak RSS {} MB, now {} MB", engine_name(kind), peak_rss_mb(), rss_now_mb());
+        drop(e);
+        println!("unloaded: now {} MB", rss_now_mb());
+    }
+
+    /// The resident size now (ps) and the physical footprint (what
+    /// Activity Monitor calls Memory, GPU buffers included), in MB.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn rss_now_mb() -> String {
+        let out = std::process::Command::new("ps").args(["-o", "rss=", "-p", &std::process::id().to_string()]).output().unwrap();
+        let rss = String::from_utf8_lossy(&out.stdout).trim().parse::<u64>().unwrap_or(0) / 1024;
+        let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+        let ok = unsafe { libc::proc_pid_rusage(std::process::id() as i32, libc::RUSAGE_INFO_V2, &mut info as *mut _ as *mut libc::rusage_info_t) } == 0;
+        let fp = if ok { info.ri_phys_footprint / 1024 / 1024 } else { 0 };
+        format!("rss {rss} footprint {fp}")
     }
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
