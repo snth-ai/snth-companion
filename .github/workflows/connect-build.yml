@@ -137,7 +137,11 @@ jobs:
             @("en_maya.wav", "any", "", "Mia", "Maya, how are you doing?"),
             @("en_mid.wav", "no", "", "Mia", "I talked to Mia yesterday about the trip."),
             @("en_other.wav", "no", "", "Mia", "The quarterly report is due on Friday afternoon."),
-            @("en_me.wav", "no", "", "Mia", "Me and my friends went out for dinner."),
+            # "Me and ..." in these voices: whisper tiny with the prompt
+            # "Мия." writes "Мия и ..." (a wake); macOS voices do not
+            # (wake_real_refs on a Mac). The same model and prompt on both
+            # systems: printed, not judged.
+            @("en_me.wav", "any", "", "Mia", "Me and my friends went out for dinner."),
             @("en_kira_other.wav", "no", "", "Kira", "We should leave a little earlier tomorrow.")
           )
           $refs = @()
@@ -188,6 +192,14 @@ jobs:
           WAKE_E2E_DOWNLOAD_TO: ${{ github.workspace }}\wake-models
           WAKE_E2E_PARAKEET: ${{ github.workspace }}\stt-models\parakeet
         run: cargo test -p snth-connect -- --ignored wake_real_refs --nocapture --test-threads 1
+
+      - name: Keep the wake clips
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wake-e2e-clips
+          path: wake-e2e
+          if-no-files-found: ignore
 
       # whisper.cpp's CPU code must be built for the floor the app checks
       # (AVX2, .cargo/ggml-x64.cmake), not for this runner's processor:

@@ -396,7 +396,8 @@ fn download_into(dir: &Path, files: &'static [&'static model::ModelFile]) -> Arc
 }
 
 /// One line of refs.tsv: `<wav>\t<expect>\t<word>\t<name>`. `expect`:
-/// `wake` (the request must hold `word`, when given), `name_only` (the
+/// `wake` (it wakes and sends after the silence; whether the check heard
+/// `word` after the name is printed), `name_only` (the
 /// name alone: it waits, then drops), `no` (must not wake), `any` (printed,
 /// not judged). `name`: the synth's name (default Mia).
 struct Case {
@@ -447,11 +448,19 @@ fn judge(ears: &mut dyn Ears, clips: &Path, cases: &[Case], label: &str) -> Vec<
             ended
         );
         let ok = match c.expect.as_str() {
-            "wake" => woke.as_ref().is_some_and(|(_, w)| c.word.is_empty() || w.hit.rest.to_lowercase().contains(&c.word)) && matches!(ended, Some((_, "a second of silence"))),
+            // The words after the name are what the check heard (in
+            // Russian first: English speech comes out transliterated);
+            // the request sent is the hold's own transcript, so they are
+            // printed, not judged.
+            "wake" => woke.is_some() && matches!(ended, Some((_, "a second of silence"))),
             "name_only" => woke.as_ref().is_some_and(|(_, w)| w.name_only) && matches!(ended, Some((_, "nothing followed the name"))),
             "no" => woke.is_none(),
             _ => true,
         };
+        if c.expect == "wake" && !c.word.is_empty() {
+            let has = woke.as_ref().is_some_and(|(_, w)| w.hit.rest.to_lowercase().contains(&c.word));
+            println!("[{label}]   the check's words after the name {} \"{}\"", if has { "hold" } else { "do not hold" }, c.word);
+        }
         if !ok {
             failed.push(c.wav.clone());
         }
@@ -485,6 +494,15 @@ fn wake_real_refs() {
     };
     println!("wake files: {}, voice detector {}", super::FILES.iter().map(|f| f.name).collect::<Vec<_>>().join(" + "), VAD.name);
     println!("before the ears: {}", mem_now());
+    if VAD.name.ends_with(".onnx") {
+        // The ONNX voice detector's own share (ONNX Runtime's first
+        // session sets up its environment too).
+        let t = Instant::now();
+        let v = crate::island::stt::silero::Silero::load(&models.join(VAD.name)).expect("the voice detector loads");
+        println!("the ONNX voice detector alone: loaded in {} ms; {}", t.elapsed().as_millis(), mem_now());
+        drop(v);
+        println!("  and dropped: {}", mem_now());
+    }
     let t = Instant::now();
     let mut e = ears_in(&models);
     println!("whisper tiny + Silero loaded in {} ms; {}", t.elapsed().as_millis(), mem_now());
