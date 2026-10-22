@@ -1082,6 +1082,27 @@ export const en = {
     outdated: (n: string) => `${n} needs an update before the island can talk to them.`,
     keys: "Keys",
     keysNote: "A tap shorter than a third of a second sends nothing.",
+    position: "Where it sits",
+    positionDesc: (spot: string, isDefault: boolean) => `${spot}${isDefault ? " (the default)" : ""}`,
+    positionNote: (windows: boolean): string =>
+      windows
+        ? "The island keeps clear of the taskbar wherever it is. The default is the bottom center, just above the taskbar."
+        : "At the top center the island merges with the notch. Anywhere else it is a small floating pill that keeps clear of the menu bar and the Dock, and steps aside for full-screen apps.",
+    positionPicker: "Island position",
+    positionIsDefault: "The default here.",
+    positionDefaultIs: (spot: string) => `The default here: ${spot.toLowerCase()}.`,
+    positionScreenMiddle: "The middle of the screen is not a spot",
+    positionReset: "Back to the default",
+    spot: {
+      "top-left": "Top left",
+      "top-center": "Top center",
+      "top-right": "Top right",
+      "middle-left": "Left side, middle",
+      "middle-right": "Right side, middle",
+      "bottom-left": "Bottom left",
+      "bottom-center": "Bottom center",
+      "bottom-right": "Bottom right",
+    } as Record<string, string>,
     keysInactive: (n: string) => `The keys work while ${n} is online and SNTH Connect is not paused. Until then they do nothing here and other apps get them.`,
     key: {
       voice: "Hold to talk",

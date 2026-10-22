@@ -619,6 +619,40 @@ fn the_engine_is_whisper_by_default_and_in_an_old_file() {
     assert_eq!(serde_json::to_value(&p).unwrap()["stt_engine"], "parakeet");
 }
 
+#[test]
+fn the_island_position_is_the_system_default_until_the_owner_chooses() {
+    // A fresh install and a file written before the choice existed.
+    assert_eq!(IslandSettings::default().position, IslandPosition::default());
+    let old: IslandSettings = serde_json::from_value(json!({"enabled": true, "stt": "device"})).unwrap();
+    assert_eq!(old.position, IslandPosition { vertical: None, horizontal: None });
+    // The default writes nothing, so an older app reads the file as it was.
+    let saved = serde_json::to_value(&old).unwrap();
+    assert_eq!(saved["position"], json!({}));
+    // A chosen spot round-trips; "centre" is read as "center"; one axis alone is fine.
+    let p: IslandSettings = serde_json::from_value(json!({"position": {"vertical": "bottom", "horizontal": "right"}})).unwrap();
+    assert_eq!(p.position.vertical, Some(IslandVertical::Bottom));
+    assert_eq!(p.position.horizontal, Some(IslandHorizontal::Right));
+    assert_eq!(serde_json::to_value(&p).unwrap()["position"], json!({"vertical": "bottom", "horizontal": "right"}));
+    let c: IslandSettings = serde_json::from_value(json!({"position": {"horizontal": "centre"}})).unwrap();
+    assert_eq!(c.position, IslandPosition { vertical: None, horizontal: Some(IslandHorizontal::Center) });
+    // What the command takes.
+    assert_eq!(IslandPosition::parse_vertical("top"), Ok(Some(IslandVertical::Top)));
+    assert_eq!(IslandPosition::parse_vertical("default"), Ok(None));
+    assert_eq!(IslandPosition::parse_vertical(""), Ok(None));
+    assert_eq!(IslandPosition::parse_vertical("middle"), Ok(Some(IslandVertical::Middle)));
+    assert!(IslandPosition::parse_vertical("centre").is_err());
+    // The middle of the screen is not a spot; the middle of a side is.
+    let mid = |h| IslandPosition { vertical: Some(IslandVertical::Middle), horizontal: h };
+    assert!(mid(None).is_screen_middle());
+    assert!(mid(Some(IslandHorizontal::Center)).is_screen_middle());
+    assert!(!mid(Some(IslandHorizontal::Left)).is_screen_middle());
+    assert!(!mid(Some(IslandHorizontal::Right)).is_screen_middle());
+    assert!(!IslandPosition::default().is_screen_middle());
+    assert_eq!(IslandPosition::parse_horizontal("left"), Ok(Some(IslandHorizontal::Left)));
+    assert_eq!(IslandPosition::parse_horizontal("centre"), Ok(Some(IslandHorizontal::Center)));
+    assert!(IslandPosition::parse_horizontal("up").is_err());
+}
+
 #[tokio::test]
 async fn the_tone_goes_only_to_a_synth_that_takes_it() {
     let (core, mut q) = linked(&[("new", WITH_TONE), ("stt", WITH_STT)]);

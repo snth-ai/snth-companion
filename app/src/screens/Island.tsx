@@ -8,7 +8,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { backend } from "../backend";
-import type { FaceConfig, HotkeyKind, SttEngine, SttMode, UiState } from "../backend/types";
+import type { FaceConfig, HotkeyKind, IslandAlign, IslandEdge, SttEngine, SttMode, UiState } from "../backend/types";
 import { FaceEditor } from "../island/faceApi";
 import { sttEngines } from "../island/sttView";
 import { acceleratorFromEvent, formatBytes, shortcutKeys } from "../lib/format";
@@ -17,6 +17,88 @@ import { ChoiceList, Keys, Notice, Row, Section, SwitchRow } from "../ui/control
 import { IconX } from "../ui/icons";
 
 const KINDS: HotkeyKind[] = ["voice", "screen_voice", "text"];
+
+/** The picker's grid, row by row; null = the middle of the screen, not
+ * a spot. */
+const SPOTS: ([IslandEdge, IslandAlign] | null)[] = [
+  ["top", "left"],
+  ["top", "center"],
+  ["top", "right"],
+  ["middle", "left"],
+  null,
+  ["middle", "right"],
+  ["bottom", "left"],
+  ["bottom", "center"],
+  ["bottom", "right"],
+];
+
+/** Where the island sits: a small screen with its eight spots (the
+ * middle of the screen is not one). The system's default spot is saved
+ * as "default" on both axes, so it keeps the system's own rules (a
+ * Windows taskbar on the top edge takes the island with it). */
+function PositionSection() {
+  const { state, s, act } = useStore();
+  const t = s.island;
+  const windows = state.app.os === "windows";
+  const pos = state.island.settings.position ?? {};
+  const defV: IslandEdge = windows ? "bottom" : "top";
+  let v: IslandEdge = pos.vertical ?? defV;
+  let h: IslandAlign = pos.horizontal ?? "center";
+  // Bad data (the middle of the screen) is the default, as the shell
+  // places it.
+  if (v === "middle" && h === "center") {
+    v = defV;
+    h = "center";
+  }
+  const isDefault = v === defV && h === "center";
+  const choose = (cv: IslandEdge, ch: IslandAlign) => {
+    if (cv === v && ch === h) return;
+    const toDefault = cv === defV && ch === "center";
+    void act(() =>
+      backend.islandSet(null, null, toDefault ? { vertical: "default", horizontal: "default" } : { vertical: cv, horizontal: ch }),
+    );
+  };
+  return (
+    <Section title={t.position} note={t.positionNote(windows)}>
+      <div className="group">
+        <div className="row island-pos">
+          <div className="row-text">
+            <div className="row-title">{t.spot[`${v}-${h}`]}</div>
+            <div className="row-desc">{isDefault ? t.positionIsDefault : t.positionDefaultIs(t.spot[`${defV}-center`] ?? "")}</div>
+            {isDefault ? null : (
+              <button type="button" className="btn small island-pos-reset" onClick={() => choose(defV, "center")}>
+                {t.positionReset}
+              </button>
+            )}
+          </div>
+          <div className={`island-pos-screen${windows ? " win" : " mac"}`} role="radiogroup" aria-label={t.positionPicker}>
+            {SPOTS.map((spot, i) => {
+              if (!spot) return <span key={i} className="island-pos-none" title={t.positionScreenMiddle} aria-hidden="true" />;
+              const [sv, sh] = spot;
+              const key = `${sv}-${sh}`;
+              const on = sv === v && sh === h;
+              const label = t.positionDesc(t.spot[key] ?? key, sv === defV && sh === "center");
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  role="radio"
+                  aria-checked={on}
+                  aria-label={label}
+                  title={label}
+                  className={`island-pos-spot v-${sv} h-${sh}${on ? " on" : ""}${sv === defV && sh === "center" ? " def" : ""}`}
+                  onClick={() => choose(sv, sh)}
+                >
+                  <i />
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    </Section>
+  );
+}
 
 function HotkeyRow(props: { kind: HotkeyKind; name: string }) {
   const { state, s, set } = useStore();
@@ -531,6 +613,8 @@ export function Island() {
               ) : null}
 
               {main && !supported && links.length < 2 ? <Notice kind="warn">{t.outdated(name)}</Notice> : null}
+
+              <PositionSection />
 
               <Section title={t.keys} note={t.keysNote}>
                 {!isl.keys_active ? <Notice kind="info">{t.keysInactive(name)}</Notice> : null}

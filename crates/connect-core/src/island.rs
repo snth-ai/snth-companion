@@ -332,6 +332,71 @@ impl SttOffer {
     }
 }
 
+/// Which screen edge the island keeps to (the owner's choice), or the
+/// middle of a side edge (with `Left` or `Right` only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IslandVertical {
+    Top,
+    Middle,
+    Bottom,
+}
+
+/// Where along that edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IslandHorizontal {
+    Left,
+    #[serde(alias = "centre")]
+    Center,
+    Right,
+}
+
+/// Where the island sits on the screen: eight spots (the middle of the
+/// screen is not one). None on an axis is this system's default (macOS:
+/// top centre, merged with the notch; Windows: bottom centre above the
+/// taskbar, under a taskbar on the top edge), and so is a settings file
+/// written before the choice existed. Middle with the centre (bad data)
+/// is the default as a whole (the app's `geometry::Spot`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct IslandPosition {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertical: Option<IslandVertical>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horizontal: Option<IslandHorizontal>,
+}
+
+impl IslandPosition {
+    /// "top", "middle", "bottom" or "" / "default" (this system's
+    /// default).
+    pub fn parse_vertical(s: &str) -> Result<Option<IslandVertical>, String> {
+        match s {
+            "" | "default" => Ok(None),
+            "top" => Ok(Some(IslandVertical::Top)),
+            "middle" => Ok(Some(IslandVertical::Middle)),
+            "bottom" => Ok(Some(IslandVertical::Bottom)),
+            _ => Err("bad_position".into()),
+        }
+    }
+
+    /// "left", "center" ("centre"), "right" or "" / "default".
+    pub fn parse_horizontal(s: &str) -> Result<Option<IslandHorizontal>, String> {
+        match s {
+            "" | "default" => Ok(None),
+            "left" => Ok(Some(IslandHorizontal::Left)),
+            "center" | "centre" => Ok(Some(IslandHorizontal::Center)),
+            "right" => Ok(Some(IslandHorizontal::Right)),
+            _ => Err("bad_position".into()),
+        }
+    }
+
+    /// The middle of the screen, which is not a spot: middle with the
+    /// centre, the default centre included.
+    pub fn is_screen_middle(&self) -> bool {
+        self.vertical == Some(IslandVertical::Middle) && matches!(self.horizontal, None | Some(IslandHorizontal::Center))
+    }
+}
+
 /// The owner's island. Off on a fresh install and in a settings file
 /// written before the island existed (a test feature for now).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -366,6 +431,10 @@ pub struct IslandSettings {
     /// file written before the switch existed.
     #[serde(default = "yes")]
     pub stt_tone: bool,
+    /// Where the island sits (`IslandPosition`): this system's default
+    /// unless the owner chose a spot.
+    #[serde(default)]
+    pub position: IslandPosition,
 }
 
 fn yes() -> bool {
@@ -384,6 +453,7 @@ impl Default for IslandSettings {
             wake: false,
             wake_phrase: String::new(),
             stt_tone: true,
+            position: IslandPosition::default(),
         }
     }
 }

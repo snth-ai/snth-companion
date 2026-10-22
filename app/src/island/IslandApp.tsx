@@ -34,6 +34,17 @@
 // hold, the buttons) is a card that grows away from the edge, upwards
 // at the bottom. The shape reported to the shell is the drawn shape, so
 // the rest of the window stays click-through whichever way it grows.
+//
+// The owner's spot (Settings, `IslandPosition`): every spot but the macOS
+// default (the notch) is this floating pill, on macOS too. At the left
+// or the right (`placement.align`) the shape is anchored to the pill's
+// side edge and grows inwards, never past the window (which the shell
+// keeps on the screen); at the right the row is mirrored (the face at the
+// right end, the glyph's slot at the left), so the face stays where the
+// pill is. In the middle of a side (`placement.edge` "middle") the shape
+// is centred on the pill vertically (kept inside the window), the row at
+// its top, the card under it, and the face keeps to the pill's height in
+// a column at the pill's side (the card makes room for it).
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { quickAnswer } from "../approval/ApprovalView";
@@ -431,18 +442,24 @@ export function IslandApp() {
     view && (view.hover || view.approval || view.text_open || view.hold || summaryShown || noticeShown || transcriptShown || card),
   );
 
-  // Floating (Windows): the pill keeps to an edge and grows away from it.
+  // Floating (Windows, and the owner's other spots): the pill keeps to an
+  // edge and grows away from it, from its side at the left and the right.
   const placed = view?.placement ?? null;
   const floating = Boolean(placed?.floating);
   const atBottom = floating && placed?.edge === "bottom";
+  const middle = floating && placed?.edge === "middle";
+  const align = floating ? (placed?.align ?? "center") : "center";
   const winW = placed?.window.w ?? 480;
   const pillW = placed?.pill.w ?? 0;
+  // The width the open island may take from the pill's side inwards.
+  const room =
+    align === "left" ? winW - (placed?.pill.x ?? 0) - 4 : align === "right" ? (placed?.pill.x ?? 0) + pillW - 4 : winW - 8;
   const wakeNow: WakeStatus = view?.wake ?? { state: "off" };
   const wakeDot = state === "idle" && !open && (wakeNow.state === "listening" || wakeNow.state === "paused");
   const slot = floating && (glyphShows(state, Boolean(view?.sending)) || wakeDot);
   // Open: only the row (listening, the line of text) widens sideways; a
   // card (anything in the body) is wider.
-  const openWTarget = floating ? Math.min(bodyH > 0 ? FLOAT_CARD_W : FLOAT_WIDE_W, winW - 8) : Math.min(OPEN_W, winW - 8);
+  const openWTarget = floating ? Math.min(bodyH > 0 ? FLOAT_CARD_W : FLOAT_WIDE_W, room) : Math.min(OPEN_W, winW - 8);
   const closedWTarget = pillW + (slot ? FLOAT_SLOT : 0);
   const motion = useMotion(open, bodyH, openWTarget, closedWTarget, floating);
   const settled = !motion.moving;
@@ -670,37 +687,63 @@ export function IslandApp() {
     // A free-standing pill at the edge (see the notes at the top): the
     // row with the face stays at the edge, the card grows away from it.
     const closedH = p.pill.h;
+    const mirror = align === "right";
     const rowH = closedH + (FLOAT_ROW - closedH) * k;
-    const room = atBottom ? p.pill.y + p.pill.h : p.window.h - p.pill.y;
-    const fHeight = Math.max(0, Math.min(room - 2, rowH + motion.body * k));
     const fWidth = motion.closedW + (openW - motion.closedW) * k;
-    const fLeft = Math.max(0, Math.min(p.window.w - fWidth, p.pill.x + p.pill.w / 2 - fWidth / 2));
-    const fTop = atBottom ? p.pill.y + p.pill.h - fHeight : p.pill.y;
+    // Anchored to the pill's side edge (left, right) or centred on it.
+    const anchored = align === "left" ? p.pill.x : align === "right" ? p.pill.x + p.pill.w - fWidth : p.pill.x + p.pill.w / 2 - fWidth / 2;
+    const fLeft = Math.max(0, Math.min(p.window.w - fWidth, anchored));
+    const pillMid = p.pill.y + p.pill.h / 2;
+    let fHeight: number;
+    let fTop: number;
+    if (middle) {
+      // Centred on the pill, kept inside the window.
+      fHeight = Math.max(0, Math.min(p.window.h - 4, rowH + motion.body * k));
+      fTop = Math.max(2, Math.min(p.window.h - 2 - fHeight, pillMid - fHeight / 2));
+    } else {
+      const space = atBottom ? p.pill.y + p.pill.h : p.window.h - p.pill.y;
+      fHeight = Math.max(0, Math.min(space - 2, rowH + motion.body * k));
+      fTop = atBottom ? p.pill.y + p.pill.h - fHeight : p.pill.y;
+    }
     const rowTop = atBottom ? fHeight - rowH : 0;
     const fRadius = Math.max(0, Math.min(fHeight / 2, 18));
     const fSmall = Math.max(22, Math.min(closedH + 2, 36));
     const fFaceSize = fSmall + (FLOAT_ROW + 2 - fSmall) * k;
-    // Closed: centred in the pill (left of the glyph's slot); open: at
-    // the row's start.
+    const fFaceW = faceWidth(fFaceSize);
+    // Closed: centred in the pill (beside the glyph's slot); open: at the
+    // row's start, the pill's side (the right end when mirrored).
     const closedFaceLeft = (p.pill.w - faceWidth(fSmall)) / 2;
-    const fFaceLeft = closedFaceLeft + (8 - closedFaceLeft) * k;
-    const fFaceTop = rowTop + (rowH - fFaceSize) / 2;
-    const cardW = Math.min(FLOAT_CARD_W, p.window.w - 8);
+    const faceInset = closedFaceLeft + (8 - closedFaceLeft) * k;
+    const fFaceLeft = mirror ? fWidth - fFaceW - faceInset : faceInset;
+    // In the middle the face keeps to the pill's height; elsewhere it is
+    // in the row.
+    const fFaceTop = middle
+      ? Math.max(0, Math.min(fHeight - fFaceSize, pillMid - fTop - fFaceSize / 2))
+      : rowTop + (rowH - fFaceSize) / 2;
+    // The row beside the face, the slot at the other end.
+    const besideFace = faceInset + fFaceW + 4;
+    const slotSide = slot ? FLOAT_SLOT + 4 : 12;
+    const rowSides = mirror ? { left: slotSide, right: besideFace } : { left: besideFace, right: slotSide };
+    const cardW = Math.min(FLOAT_CARD_W, room);
+    const cardLeft = align === "left" ? 0 : align === "right" ? fWidth - cardW : (fWidth - cardW) / 2;
+    // The middle's face column: the card keeps clear of it.
+    const padSide = !middle ? undefined : mirror ? { paddingRight: fFaceW + 12 } : { paddingLeft: fFaceW + 12 };
     const hasBody = open && [liveNode, wakeNoteNode, detail, noticeNode, cardNode, approvalNode, buttonsNode].some(Boolean);
     // Out of a full-screen app's way: off the window, past the edge it
-    // keeps to.
-    const hideY = atBottom ? p.window.h - p.pill.y + 8 : -(p.pill.y + p.pill.h + 8);
+    // keeps to (sideways in the middle of a side).
+    const hideY = middle ? 0 : atBottom ? p.window.h - p.pill.y + 8 : -(p.pill.y + p.pill.h + 8);
+    const hideX = !middle ? 0 : mirror ? p.window.w - p.pill.x + 8 : -(p.pill.x + p.pill.w + 8);
 
     return (
       <div
         ref={rootRef}
-        className={`isl-root${open ? " open" : ""}${view.hidden ? " hidden" : ""}`}
-        style={{ ["--hide-y" as string]: `${hideY}px` }}
+        className={`isl-root${open ? " open" : ""}${view.hidden ? " hidden" : ""}${middle ? " isl-side" : ""}`}
+        style={middle ? { ["--hide-x" as string]: `${hideX}px` } : { ["--hide-y" as string]: `${hideY}px` }}
         aria-hidden={view.hidden}
       >
         <div
           ref={shapeRef}
-          className={`isl-shape float ${atBottom ? "edge-bottom" : "edge-top"} state-${state}`}
+          className={`isl-shape float ${middle ? "edge-middle" : atBottom ? "edge-bottom" : "edge-top"} align-${align} state-${state}`}
           style={{ ["--accent" as string]: accent, left: fLeft, top: fTop, width: fWidth, height: fHeight, borderRadius: fRadius }}
           onClick={woke ? () => void backend.islandWakeCancel() : undefined}
         >
@@ -709,9 +752,9 @@ export function IslandApp() {
             {/* Laid out at the card's own width whatever the shape's width
                 on the way, so its height is measured once, not as the
                 text rewraps while the pill widens. */}
-            <div ref={bodyRef} className="isl-fbody" style={{ width: cardW, marginLeft: (fWidth - cardW) / 2 }} aria-hidden={!open}>
+            <div ref={bodyRef} className="isl-fbody" style={{ width: cardW, marginLeft: cardLeft }} aria-hidden={!open}>
               {hasBody ? (
-                <div className="isl-fpad">
+                <div className="isl-fpad" style={padSide}>
                   {liveNode}
                   {wakeNoteNode}
                   {detail}
@@ -729,7 +772,7 @@ export function IslandApp() {
           </div>
 
           {open ? (
-            <div className="isl-frow" style={{ top: rowTop, height: rowH, left: fFaceLeft + faceWidth(fFaceSize) + 4, right: slot ? FLOAT_SLOT + 4 : 12 }}>
+            <div className={`isl-frow${mirror ? " mirror" : ""}`} style={{ top: rowTop, height: rowH, ...rowSides }}>
               {inputNode ? (
                 <div className="isl-finput">{inputNode}</div>
               ) : (
@@ -746,7 +789,7 @@ export function IslandApp() {
           ) : null}
 
           {slot ? (
-            <div className="isl-fslot" style={{ top: rowTop, height: rowH, width: FLOAT_SLOT }}>
+            <div className={`isl-fslot${mirror ? " mirror" : ""}`} style={{ top: rowTop, height: rowH, width: FLOAT_SLOT }}>
               <Glyph state={state} sending={view.sending} />
               {wakeDotNode}
             </div>

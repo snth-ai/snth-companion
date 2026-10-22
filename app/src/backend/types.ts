@@ -421,6 +421,9 @@ export interface IslandSettings {
   /** With speech recognized here: estimate the tone of voice here too
    * (on by default). */
   stt_tone: boolean;
+  /** Where the island sits; {} = this system's default. Missing from an
+   * older shell: the default. */
+  position?: IslandPosition;
 }
 
 /** Why wake by name does not listen at all yet. */
@@ -529,12 +532,35 @@ export interface IslandPlacement {
   /** A real notch (the shape merges with it) or one drawn as if. */
   real_notch: boolean;
   /** The screen edge the island keeps to; the open island grows away
-   * from it. macOS: always top. Windows: bottom (above the taskbar), top
-   * under a taskbar on the top edge. Missing from an older shell: top. */
-  edge?: "top" | "bottom";
-  /** A free-standing pill with every corner rounded (Windows), not a
-   * shape flush with the screen's top edge. */
+   * from it. macOS default: top (the notch). Windows default: bottom
+   * (above the taskbar), top under a taskbar on the top edge. "middle":
+   * the middle of a side edge, the open island centred on the pill. The
+   * owner's spot may say otherwise (`IslandPosition`). Missing from an
+   * older shell: top. */
+  edge?: IslandEdge;
+  /** A free-standing pill with every corner rounded (Windows, and every
+   * spot but the notch on macOS), not a shape flush with the screen's
+   * top edge. */
   floating?: boolean;
+  /** The side the open island is anchored to: its side edge lines up
+   * with the pill's and it grows inwards. Missing: center. */
+  align?: IslandAlign;
+}
+
+export type IslandEdge = "top" | "middle" | "bottom";
+/** What the picker sends: a spot, or "default" on an axis. */
+export interface IslandPositionChoice {
+  vertical: IslandEdge | "default";
+  horizontal: IslandAlign | "default";
+}
+export type IslandAlign = "left" | "center" | "right";
+
+/** Where the owner put the island; an axis left out is this system's
+ * default (macOS top center, Windows bottom center). Middle with center
+ * is not a spot. */
+export interface IslandPosition {
+  vertical?: IslandEdge;
+  horizontal?: IslandAlign;
 }
 
 export interface IslandSynth {
@@ -855,7 +881,9 @@ export interface Backend {
   openExternal(target: ExternalTarget): Promise<void>;
 
   // --- the island: the Island screen ---
-  islandSet(enabled: boolean | null, mainSynth: string | null): Promise<UiState>;
+  /** `position`: the owner's spot, each axis "default" for this
+   * system's own. Err: unsupported, unknown_synth, bad_position. */
+  islandSet(enabled: boolean | null, mainSynth: string | null, position?: IslandPositionChoice): Promise<UiState>;
   /** Err: bad_shortcut, conflict:<voice|screen_voice|text|stop>, shortcut_unavailable. */
   islandHotkeySet(which: HotkeyKind, accelerator: string): Promise<UiState>;
   islandHotkeyReset(which: HotkeyKind): Promise<UiState>;

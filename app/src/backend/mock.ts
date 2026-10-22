@@ -74,6 +74,7 @@
 // Nothing here touches the network, the disk or the real computer.
 
 import type {
+  IslandPositionChoice,
   AccountState,
   AccountSynth,
   LinkBrief,
@@ -2018,8 +2019,8 @@ class MockBackend implements Backend {
 
   // --- the island ---
 
-  islandSet(enabled: boolean | null, mainSynth: string | null) {
-    return this.islandScreen.set(enabled, mainSynth);
+  islandSet(enabled: boolean | null, mainSynth: string | null, position?: IslandPositionChoice) {
+    return this.islandScreen.set(enabled, mainSynth, position);
   }
 
   islandHotkeySet(which: HotkeyKind, accelerator: string) {

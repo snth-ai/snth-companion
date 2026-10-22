@@ -1964,3 +1964,103 @@ details.more .more-body {
 .section .notice + .group {
   margin-top: 10px;
 }
+
+/* Island: where it sits. A small screen with its eight spots (the middle
+   is not one): the menu bar on top (macOS) or the taskbar at the bottom
+   (Windows), a pill at each spot, the chosen one in the accent. */
+.island-pos {
+  align-items: center;
+}
+.island-pos-reset {
+  margin-top: 8px;
+}
+.island-pos-screen {
+  position: relative;
+  flex: none;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(3, 1fr);
+  width: 150px;
+  height: 96px;
+  box-sizing: border-box;
+  padding: 9px 4px 4px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 9px;
+  background: var(--sunken);
+}
+.island-pos-screen.win {
+  padding: 4px 4px 11px;
+}
+/* The menu bar, or the taskbar. */
+.island-pos-screen::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 6px;
+  border-radius: 7px 7px 0 0;
+  background: var(--border);
+}
+.island-pos-screen.win::before {
+  top: auto;
+  bottom: 0;
+  height: 8px;
+  border-radius: 0 0 7px 7px;
+}
+.island-pos-spot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+.island-pos-spot.h-left {
+  justify-content: flex-start;
+  padding-left: 4px;
+}
+.island-pos-spot.h-right {
+  justify-content: flex-end;
+  padding-right: 4px;
+}
+.island-pos-spot.v-top {
+  align-items: flex-start;
+  padding-top: 3px;
+}
+.island-pos-spot.v-bottom {
+  align-items: flex-end;
+  padding-bottom: 3px;
+}
+.island-pos-spot i {
+  display: block;
+  width: 20px;
+  height: 7px;
+  border-radius: 4px;
+  background: var(--border-strong);
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+/* The system's default spot: a ring, so it reads as "the usual place". */
+.island-pos-spot.def:not(.on) i {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--text-3);
+}
+.island-pos-spot:hover i {
+  background: var(--text-3);
+}
+.island-pos-spot.on i {
+  background: var(--accent);
+  transform: scale(1.15);
+}
+.island-pos-spot:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .island-pos-spot i {
+    transition: none;
+  }
+}

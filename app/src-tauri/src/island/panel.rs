@@ -22,7 +22,13 @@
 //! macOS 12 and later, asked with `respondsToSelector:` first. The screen
 //! is the one with the menu bar; a change of screens or resolution
 //! (`NSApplicationDidChangeScreenParametersNotification`) places the
-//! island again.
+//! island again. Its `visibleFrame` (the screen less the menu bar and a
+//! Dock that is not hidden) is the usable area for the spots other than
+//! the default top centre (`geometry::place`, the owner's `Spot`). Nothing
+//! promises that notification for the Dock moving, resizing or hiding, so
+//! while the island floats (any spot but the notch) the poller in
+//! `mod.rs` also asks for the placement again every `REPLACE_EVERY`; the
+//! notch placement never polls.
 //!
 //! Windows: an always-on-top tool window (no taskbar button, no Alt-Tab)
 //! with `WS_EX_NOACTIVATE`, so a click does not take the focus; the line
@@ -267,7 +273,10 @@ mod mac {
                     }
                 }
             }
-            Some(ScreenInfo { frame: top_left(frame), notch, bar_h, work: None })
+            // The visible frame (the screen less the menu bar and a Dock
+            // that is not hidden, wherever it is): where the floating
+            // spots go. The default spot (the notch) does not use it.
+            Some(ScreenInfo { frame: top_left(frame), notch, bar_h, work: Some(top_left(visible)), menu_bar: true })
         })
         .flatten()
     }
@@ -554,7 +563,7 @@ pub fn screen_info(window: &WebviewWindow) -> Option<ScreenInfo> {
         };
         #[cfg(not(windows))]
         let work = None;
-        Some(ScreenInfo { frame, notch: None, bar_h: 0.0, work })
+        Some(ScreenInfo { frame, notch: None, bar_h: 0.0, work, menu_bar: false })
     }
 }
 
