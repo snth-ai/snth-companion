@@ -352,7 +352,7 @@ fn mem_now() -> String {
 /// language gets the first one's text).
 struct ParakeetEars {
     engine: crate::island::stt::parakeet::Engine,
-    last: Option<(usize, String)>,
+    last: Option<(u64, String)>,
     decodes: Vec<u128>,
 }
 
@@ -364,15 +364,17 @@ impl Ears for ParakeetEars {
 
     fn hear(&mut self, audio: &[f32], _lang: &str, _prompt: &str) -> Result<String, String> {
         use crate::island::stt::stream::Decoder;
-        if let Some((n, text)) = &self.last {
-            if *n == audio.len() {
+        // The same audio (the second language): the same text.
+        let key = audio.iter().fold(audio.len() as u64, |h, s| h.rotate_left(5) ^ u64::from(s.to_bits()));
+        if let Some((k, text)) = &self.last {
+            if *k == key {
                 return Ok(text.clone());
             }
         }
         let t = Instant::now();
         let text = self.engine.decode(audio, None, None)?.segments.join(" ");
         self.decodes.push(t.elapsed().as_millis());
-        self.last = Some((audio.len(), text.clone()));
+        self.last = Some((key, text.clone()));
         Ok(text)
     }
 }
