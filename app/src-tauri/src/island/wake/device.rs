@@ -12,6 +12,15 @@
 //! here, apart from CoreAudio, so it can be tested. The listener asks
 //! again once a second and opens the microphone afresh when the answer
 //! changes (the default input changed, a device came or went).
+//!
+//! Windows has no transport codes of its own: `windows_transport` turns
+//! the bus Windows names for the device under an input
+//! (`PKEY_Device_EnumeratorName`) into CoreAudio's codes, so `choose`
+//! decides the same way there. A headset's microphone on Windows is the
+//! hands-free endpoint (BTHHFENUM), opening which switches the headset to
+//! call audio exactly as on a Mac; a laptop's own microphone sits on
+//! HDAUDIO or INTELAUDIO (Intel Smart Sound), a desktop's jack on
+//! HDAUDIO, a USB microphone on USB.
 
 /// CoreAudio's `kAudioDeviceTransportType*` values (four-char codes).
 pub mod transport {
@@ -28,12 +37,44 @@ pub mod transport {
     pub const BLUETOOTH_LE: u32 = fourcc(b"blea");
     pub const CONTINUITY_WIRED: u32 = fourcc(b"ccwd");
     pub const CONTINUITY_WIRELESS: u32 = fourcc(b"ccwl");
+    pub const PCI: u32 = fourcc(b"pci ");
 
     pub fn name(t: u32) -> String {
         if t == UNKNOWN {
             return "unknown".into();
         }
         t.to_be_bytes().iter().map(|b| *b as char).collect::<String>().trim().to_string()
+    }
+}
+
+/// The transport code of a Windows input from the bus of its device
+/// (`PKEY_Device_EnumeratorName`) and its name. Bluetooth is every bus
+/// whose name starts with BTH (BTHENUM, BTHHFENUM: classic headsets,
+/// BTHLE*: LE Audio), and, when the bus could not be read, a name that
+/// says "Hands-Free" or "Bluetooth": a Bluetooth microphone is the one
+/// thing never to open. An unknown bus is UNKNOWN: used when it is the
+/// default, never as a stand-in.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn windows_transport(bus: &str, name: &str) -> u32 {
+    let bus = bus.trim().to_ascii_uppercase();
+    let low = name.to_lowercase();
+    if bus.starts_with("BTHLE") {
+        return transport::BLUETOOTH_LE;
+    }
+    if bus.starts_with("BTH") || low.contains("hands-free") || (bus.is_empty() && low.contains("bluetooth")) {
+        return transport::BLUETOOTH;
+    }
+    match bus.as_str() {
+        "USB" => transport::USB,
+        // The board's codec (HD Audio), Intel Smart Sound's and AMD's
+        // audio co-processor's digital microphones, a laptop's array on
+        // ACPI.
+        "HDAUDIO" | "INTELAUDIO" | "ACP" | "AMDACP" | "ACPI" => transport::BUILT_IN,
+        // A sound card.
+        "PCI" => transport::PCI,
+        // Software: a virtual cable, a streaming app's microphone.
+        "SW" | "SWD" | "ROOT" | "MMDEVAPI" => transport::VIRTUAL,
+        _ => transport::UNKNOWN,
     }
 }
 
@@ -171,6 +212,57 @@ mod tests {
     fn an_unreadable_list_falls_back_to_the_default() {
         assert_eq!(choose(&[]), Mic::Default);
         assert_eq!(choose(&[dev("builtin", BUILT_IN, false)]), Mic::Default, "no default known");
+    }
+
+    #[test]
+    fn windows_buses_map_to_the_transports() {
+        // A classic headset: its microphone is the hands-free endpoint.
+        assert_eq!(windows_transport("BTHHFENUM", "Headset (WH-1000XM4 Hands-Free AG Audio)"), BLUETOOTH);
+        assert_eq!(windows_transport("BTHENUM", "Headset (AirPods Pro)"), BLUETOOTH);
+        assert_eq!(windows_transport("BTHLEDEVICE", "Headset (Galaxy Buds2 Pro)"), BLUETOOTH_LE);
+        assert_eq!(windows_transport("bthenum", "x"), BLUETOOTH, "case does not matter");
+        // The bus unread: the name still gives a headset away.
+        assert_eq!(windows_transport("", "Headset (Jabra Evolve2 Hands-Free AG Audio)"), BLUETOOTH);
+        assert_eq!(windows_transport("", "Microphone (Bluetooth Audio)"), BLUETOOTH);
+        assert_eq!(windows_transport("", "Microphone Array"), UNKNOWN);
+        // Wired.
+        assert_eq!(windows_transport("HDAUDIO", "Microphone Array (Realtek(R) Audio)"), BUILT_IN);
+        assert_eq!(windows_transport("INTELAUDIO", "Microphone Array (Intel® Smart Sound Technology for Digital Microphones)"), BUILT_IN);
+        assert_eq!(windows_transport("USB", "Microphone (Yeti Stereo Microphone)"), USB);
+        assert_eq!(windows_transport("PCI", "Line In (Sound Blaster)"), PCI);
+        // Software.
+        assert_eq!(windows_transport("ROOT", "CABLE Output (VB-Audio Virtual Cable)"), VIRTUAL);
+        assert_eq!(windows_transport("SWD", "Steam Streaming Microphone"), VIRTUAL);
+        assert_eq!(windows_transport("SOMETHINGNEW", "Mic"), UNKNOWN);
+    }
+
+    #[test]
+    fn a_windows_laptop_with_a_headset_listens_on_its_own_microphone() {
+        // As system::input_devices lists a laptop with AirPods connected
+        // and the hands-free microphone made the default.
+        let win = |uid: &str, bus: &str, name: &str, is_default: bool| InputDevice { uid: uid.into(), name: name.into(), transport: windows_transport(bus, name), is_default };
+        let devices = [
+            win("{0.0.1.00000000}.{aa}", "BTHHFENUM", "Headset (AirPods Pro Hands-Free AG Audio)", true),
+            win("{0.0.1.00000000}.{bb}", "INTELAUDIO", "Microphone Array (Intel® Smart Sound Technology for Digital Microphones)", false),
+            win("{0.0.1.00000000}.{cc}", "ROOT", "CABLE Output (VB-Audio Virtual Cable)", false),
+        ];
+        assert_eq!(
+            choose(&devices),
+            Mic::Use {
+                uid: "{0.0.1.00000000}.{bb}".into(),
+                name: "Microphone Array (Intel® Smart Sound Technology for Digital Microphones)".into(),
+                instead_of: Some("Headset (AirPods Pro Hands-Free AG Audio)".into())
+            }
+        );
+        // A desktop with only the headset (and a virtual cable): pause.
+        assert_eq!(choose(&[devices[0].clone(), devices[2].clone()]), Mic::BluetoothOnly { name: "Headset (AirPods Pro Hands-Free AG Audio)".into() });
+        // A USB microphone stands in before a sound card's line in.
+        let devices = [
+            win("bt", "BTHENUM", "Headset", true),
+            win("pci", "PCI", "Line In", false),
+            win("usb", "USB", "Yeti", false),
+        ];
+        assert_eq!(uses(&choose(&devices)), Some("usb"));
     }
 
     #[test]

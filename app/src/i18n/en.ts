@@ -1172,6 +1172,9 @@ export const en = {
     wakePhrasePlaceholder: "Hey buddy",
     wakeMicLine:
       "While this is on, the microphone stays on and macOS shows its orange dot, which cannot be hidden. Listening pauses by itself during calls, while the screen is locked and while you hold a key. Nothing leaves this computer until you say the name.",
+    wakeMicLineWin:
+      "While this is on, the microphone stays on and Windows shows its microphone icon in the taskbar. Listening pauses by itself during calls, while the screen is locked and while you hold a key, and never uses a Bluetooth headset's microphone. Nothing leaves this computer until you say the name.",
+    wakeWaitingMicWin: "Waiting: Windows does not let apps use the microphone. Turn it on in Settings > Privacy & security > Microphone.",
     wakeNow: "Now",
     wakeStatus: {
       off: "Off.",

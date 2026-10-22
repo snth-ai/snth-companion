@@ -115,12 +115,17 @@ fn main() {
 ///  - `device_stt`: ONNX Runtime (`ort`) is in the build, so Parakeet, the
 ///    ONNX voice detector and the tone of voice run here: Apple-silicon
 ///    Macs and Windows x64.
-///  - `whisper_stt`: whisper.cpp (`whisper-rs`) is in the build too, so
-///    the whisper engine and its voice detector exist: Apple-silicon Macs
-///    only.
+///  - `whisper_stt`: the whisper HOLD engine and whisper.cpp's voice
+///    detector exist: Apple-silicon Macs only (whisper.cpp with Metal).
+///  - `wake_whisper`: whisper.cpp (`whisper-rs`) is in the build, so wake
+///    by name's ears (whisper tiny, on the CPU) run: Apple-silicon Macs
+///    and Windows x64. On Windows whisper.cpp is built for the CPU only
+///    (no Metal, AVX2 as the floor: .cargo/ggml-x64.cmake) and the
+///    voice detector of wake by name is the ONNX one (stt/silero.rs).
 fn stt_cfgs() {
     println!("cargo:rustc-check-cfg=cfg(device_stt)");
     println!("cargo:rustc-check-cfg=cfg(whisper_stt)");
+    println!("cargo:rustc-check-cfg=cfg(wake_whisper)");
     let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let mac_arm = os == "macos" && arch == "aarch64";
@@ -130,6 +135,9 @@ fn stt_cfgs() {
     }
     if mac_arm {
         println!("cargo:rustc-cfg=whisper_stt");
+    }
+    if mac_arm || windows_x64 {
+        println!("cargo:rustc-cfg=wake_whisper");
     }
 }
 

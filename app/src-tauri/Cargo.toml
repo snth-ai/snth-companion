@@ -61,7 +61,17 @@ libc = "0.2"
 # an app without a console. Already in the build (connect-host uses it).
 # The island (island/panel.rs): the pointer's position, a window that is
 # never activated and stays out of screenshots.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
+# Wake by name (island/wake/system.rs): the microphone's consent store in
+# the registry (another app records), the session's lock state and the
+# input desktop, the running programs, the memory of the process (its
+# test).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_System_Registry", "Win32_System_RemoteDesktop", "Win32_System_Diagnostics_ToolHelp", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_System_StationsAndDesktops"] }
+# Wake by name (island/wake/system.rs): the input devices through the
+# MMDevice API, with the bus each sits on (a Bluetooth microphone is never
+# opened). The same crate and version cpal's WASAPI host uses, so nothing
+# new is built: COM calls are what the `windows` crate is for (windows-sys
+# has no interfaces).
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Shell_PropertiesSystem"] }
 
 # The island's microphone (island/audio.rs): CoreAudio on macOS, WASAPI on
 # Windows. Not on Linux, where the island is not shown (and ALSA would
@@ -89,6 +99,15 @@ objc2-foundation = "0.3"
 # 0.16 needs 1.88.
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 whisper-rs = { version = "=0.15.1", features = ["metal"] }
+
+# Wake by name on Windows x64 (island/wake/ears.rs, build.rs: cfg
+# `wake_whisper`): whisper tiny on whisper.cpp, CPU only, the same pinned
+# line as the Mac's. Built from source by cmake with MSVC; bindgen finds
+# the runner's LLVM (or falls back to the bundled bindings). The CPU floor
+# is AVX2 (.cargo/ggml-x64.cmake), checked at run time before the mode is
+# offered (wake::available).
+[target.'cfg(all(windows, target_arch = "x86_64"))'.dependencies]
+whisper-rs = { version = "=0.15.1" }
 
 # ONNX Runtime, on the CPU: the Parakeet engine (island/stt/parakeet.rs),
 # the ONNX voice detector (island/stt/silero.rs, Windows) and the tone of

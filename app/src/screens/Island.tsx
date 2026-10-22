@@ -262,10 +262,12 @@ function SttSection(props: { name: string; takesText: boolean }) {
   );
 }
 
-/** Wake by name (Apple silicon only; hidden elsewhere). */
+/** Wake by name (Apple silicon and Windows x64 with AVX2; hidden
+ * elsewhere). */
 function WakeSection(props: { name: string }) {
   const { state, s, lang, act } = useStore();
   const t = s.island;
+  const win = state.app.os === "windows";
   const isl = state.island;
   const wake = isl.wake;
   const on = isl.settings.wake;
@@ -315,13 +317,14 @@ function WakeSection(props: { name: string }) {
   let now: string;
   if (wake.state === "paused") now = t.wakePaused[wake.reason] ?? "";
   else if (wake.state === "waiting") {
-    const w = t.wakeWaiting[wake.need];
+    // Windows asks nothing up front: a refusal is its privacy settings.
+    const w = win && wake.need === "mic" ? t.wakeWaitingMicWin : t.wakeWaiting[wake.need];
     now = typeof w === "function" ? w(props.name) : (w ?? "");
   } else now = t.wakeStatus[wake.state] ?? "";
   if (wake.wakes > 0 && (wake.state === "listening" || wake.state === "paused")) now = `${now} ${t.wakeCount(wake.wakes, wake.dropped)}`;
 
   return (
-    <Section title={t.wake} note={t.wakeMicLine}>
+    <Section title={t.wake} note={win ? t.wakeMicLineWin : t.wakeMicLine}>
       <div className="group">
         <SwitchRow title={t.wakeSwitch} desc={t.wakeDesc(said)} checked={on} onChange={(next) => run(() => backend.islandWakeSet(next))} />
         {on ? (

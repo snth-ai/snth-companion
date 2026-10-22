@@ -27,16 +27,9 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextPar
 use super::stream::{pick_lang, Decoded, Decoder, ABORTED};
 use super::vad::{Span, RATE};
 
-/// The smallest encoder size (in 20 ms frames, a multiple of 64, at
-/// least 192 = 3.8 s) that holds this many samples with 0.16 s of room;
-/// 0 (whisper's own 30 s windows) past 29 s.
-pub fn audio_ctx(samples: usize) -> i32 {
-    if samples >= RATE * 29 {
-        return 0;
-    }
-    let need = (samples * 50 / RATE) as i32 + 8;
-    ((need + 63) / 64 * 64).clamp(192, 1500)
-}
+/// whisper's encoder size for a piece (vad.rs: wake by name's ears on
+/// Windows use it too, where this engine is not in the build).
+pub use super::vad::audio_ctx;
 
 /// Tokens one piece may take: generous for speech (Russian runs at about
 /// 6 tokens a second), small enough that a loop stops early.

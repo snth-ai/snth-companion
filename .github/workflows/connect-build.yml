@@ -1,5 +1,6 @@
 # Check for SNTH Connect (app/) on every push to a connect/* branch: core
-# tests, the island's tests and on-device speech-to-text on real models,
+# tests, the island's tests, on-device speech-to-text and wake by name on
+# real models,
 # self-tests on a real Windows machine (the computer-control path,
 # the owner's apps: toast, clipboard, open, and the browser link: helper,
 # named pipe, registry), then a Windows installer as a workflow artifact. No release, no signing.
@@ -56,6 +57,11 @@ jobs:
       - name: Island tests
         run: cargo test -p snth-connect "island::"
 
+      # What wake by name's Windows calls say on the runner (another app
+      # recording, the lock, the input devices and their buses): printed.
+      - name: Wake by name, the system now
+        run: cargo test -p snth-connect "island::wake::system::win_tests::wake_system_now" -- --nocapture
+
       # Then the real thing: the pinned model files downloaded as the app
       # downloads them (resume, sha256, rename; cached between runs), and
       # whole holds through the speech thread on clips the Windows speech
@@ -103,6 +109,135 @@ jobs:
           STT_E2E_DOWNLOAD_TO: ${{ github.workspace }}\stt-models\parakeet
           STT_E2E_TONE_DOWNLOAD_TO: ${{ github.workspace }}\stt-models\tone
         run: cargo test -p snth-connect -- --ignored stt_e2e_parakeet_onnx --nocapture --test-threads 1
+
+      # Wake by name on Windows: whisper tiny on whisper.cpp's CPU code and
+      # the ONNX Silero, the listener fed from clips the Windows speech
+      # synthesizer speaks (the runner has no microphone): the name at the
+      # start wakes and the request is sent after a second of silence, the
+      # name alone waits and drops, the name mid-sentence and talk without
+      # it do not wake. Then the CPU and memory it costs, and Parakeet as
+      # the ears on the same clips for comparison (printed, not judged).
+      - name: Wake by name clips
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force wake-e2e | Out-Null
+          Add-Type -AssemblyName System.Speech
+          $fmt = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo 16000, ([System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen), ([System.Speech.AudioFormat.AudioChannel]::Mono)
+          $probe = New-Object System.Speech.Synthesis.SpeechSynthesizer
+          $voices = @($probe.GetInstalledVoices() | Where-Object { $_.Enabled } | ForEach-Object { $_.VoiceInfo })
+          $probe.Dispose()
+          $voices | ForEach-Object { "voice: $($_.Name) ($($_.Culture.Name))" }
+          $en = @($voices | Where-Object { $_.Culture.Name -like "en-*" } | ForEach-Object { $_.Name })
+          $ru = @($voices | Where-Object { $_.Culture.Name -eq "ru-RU" } | ForEach-Object { $_.Name })
+          if ($en.Count -eq 0) { throw "no English voice on this runner" }
+          # file, expect, a word of the request, the synth's name, the text
+          $cases = @(
+            @("en_time.wav", "wake", "time", "Mia", "Mia, what time is it?"),
+            @("en_mail.wav", "wake", "mail", "Mia", "Mia, open my mail."),
+            @("en_calendar.wav", "wake", "calendar", "Mia", "Mia, what is on my calendar tomorrow?"),
+            @("en_kira.wav", "wake", "weather", "Kira", "Kira, what is the weather like today?"),
+            @("en_alexandra.wav", "wake", "report", "Alexandra", "Alexandra, send the report to Daniel."),
+            @("en_name_only.wav", "name_only", "", "Mia", "Mia."),
+            @("en_hey.wav", "any", "", "Mia", "Hey Mia, find tickets to Bangkok."),
+            @("en_maya.wav", "any", "", "Mia", "Maya, how are you doing?"),
+            @("en_mid.wav", "no", "", "Mia", "I talked to Mia yesterday about the trip."),
+            @("en_other.wav", "no", "", "Mia", "The quarterly report is due on Friday afternoon."),
+            # "Me and ..." in these voices: whisper tiny with the prompt
+            # "Мия." writes "Мия и ..." (a wake); macOS voices do not
+            # (wake_real_refs on a Mac). The same model and prompt on both
+            # systems: printed, not judged.
+            @("en_me.wav", "any", "", "Mia", "Me and my friends went out for dinner."),
+            @("en_kira_other.wav", "no", "", "Kira", "We should leave a little earlier tomorrow.")
+          )
+          $refs = @()
+          for ($i = 0; $i -lt $cases.Count; $i++) {
+            $c = $cases[$i]
+            $s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+            $s.SelectVoice($en[$i % $en.Count])
+            $s.SetOutputToWaveFile("$PWD\wake-e2e\$($c[0])", $fmt)
+            $s.Speak($c[4])
+            $s.Dispose()
+            $refs += "$($c[0])`t$($c[1])`t$($c[2])`t$($c[3])"
+          }
+          # The name, a pause of 1.8 s, then the request.
+          $s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+          $s.SelectVoice($en[0])
+          $p = New-Object System.Speech.Synthesis.PromptBuilder
+          $p.AppendText("Mia.")
+          $p.AppendBreak([TimeSpan]::FromMilliseconds(1800))
+          $p.AppendText("Find the cheapest flights to Bangkok.")
+          $s.SetOutputToWaveFile("$PWD\wake-e2e\en_name_pause.wav", $fmt)
+          $s.Speak($p)
+          $s.Dispose()
+          $refs += "en_name_pause.wav`twake`t`tMia"
+          if ($ru.Count -gt 0) {
+            foreach ($c in @(@("ru_wake.wav", "wake", "почт", "Mia", "Мия, открой почту."), @("ru_other.wav", "no", "", "Mia", "Сегодня хорошая погода, пойдём гулять в парк."))) {
+              $s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+              $s.SelectVoice($ru[0])
+              $s.SetOutputToWaveFile("$PWD\wake-e2e\$($c[0])", $fmt)
+              $s.Speak($c[4])
+              $s.Dispose()
+              $refs += "$($c[0])`t$($c[1])`t$($c[2])`t$($c[3])"
+            }
+          } else {
+            "no Russian voice on this runner: English clips only"
+          }
+          $refs | Set-Content -Encoding utf8 wake-e2e\refs.tsv
+          Get-ChildItem wake-e2e
+
+      - uses: actions/cache@v4
+        with:
+          path: wake-models
+          key: wake-models-${{ hashFiles('app/src-tauri/src/island/wake/mod.rs', 'app/src-tauri/src/island/stt/model.rs') }}
+
+      - name: Wake by name on real models
+        timeout-minutes: 20
+        env:
+          WAKE_E2E_CLIPS: ${{ github.workspace }}\wake-e2e
+          WAKE_E2E_DOWNLOAD_TO: ${{ github.workspace }}\wake-models
+          WAKE_E2E_PARAKEET: ${{ github.workspace }}\stt-models\parakeet
+        run: cargo test -p snth-connect -- --ignored wake_real_refs --nocapture --test-threads 1
+
+      - name: Keep the wake clips
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wake-e2e-clips
+          path: wake-e2e
+          if-no-files-found: ignore
+
+      # whisper.cpp's CPU code must be built for the floor the app checks
+      # (AVX2, .cargo/ggml-x64.cmake), not for this runner's processor:
+      # AVX2 code in it, no AVX-512.
+      - name: whisper.cpp CPU floor
+        shell: pwsh
+        run: |
+          $dumpbin = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -find "VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          if (-not $dumpbin) { throw "dumpbin not found" }
+          $libs = @(Get-ChildItem -Recurse -Filter ggml-cpu.lib target\debug\build)
+          if ($libs.Count -eq 0) { throw "ggml-cpu.lib not found" }
+          Get-ChildItem -Recurse -Filter snth-ggml-floor.txt target\debug\build | ForEach-Object { "floor mark: $($_.FullName)" }
+          Get-ChildItem -Recurse -Filter CMakeCache.txt target\debug\build | Where-Object { $_.FullName -like "*whisper-rs-sys*" } | ForEach-Object {
+            "$($_.FullName):"
+            Select-String -Path $_.FullName -Pattern '^(GGML_(NATIVE|SSE42|AVX|AVX2|AVX512|AVX512_\w+|AVX_VNNI|BMI2|FMA|F16C)|CMAKE_PROJECT_INCLUDE_BEFORE)[:=]' | ForEach-Object { "  $($_.Line)" }
+          }
+          foreach ($lib in $libs) {
+            $dis = & $dumpbin /disasm $lib.FullName
+            # Registers as the disassembly writes them (lower case,
+            # numbered): an AVX-512 instruction names a zmm register.
+            $zmmLines = @($dis | Select-String -CaseSensitive -Pattern '\bzmm\d+\b')
+            $ymm = @($dis | Select-String -CaseSensitive -Pattern '\bymm\d+\b').Count
+            $zmm = $zmmLines.Count
+            $zmmLines | Select-Object -First 5 | ForEach-Object { "  $($_.Line.Trim())" }
+            # Other text with "zmm" in it (symbol names), for the record.
+            $other = @($dis | Select-String -SimpleMatch "zmm" | Where-Object { $_.Line -cnotmatch '\bzmm\d+\b' })
+            "  other lines with zmm in any case: $($other.Count)"
+            $other | Select-Object -First 3 | ForEach-Object { "    $($_.Line.Trim())" }
+            $init = @(& $dumpbin /headers $lib.FullName | Select-String -SimpleMatch '.CRT$XCU').Count
+            "$($lib.FullName): $ymm lines with ymm, $zmm with zmm, $init dynamic initializer sections"
+            if ($zmm -gt 0) { throw "AVX-512 code in $($lib.Name)" }
+            if ($ymm -eq 0) { throw "no AVX2 code in $($lib.Name): the floor did not apply" }
+          }
 
       # The computer-control path as the app runs it, on a real Windows
       # machine: install the pinned driver through our installer, start our
