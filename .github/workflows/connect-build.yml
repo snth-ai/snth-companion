@@ -54,7 +54,7 @@ jobs:
       # the island (the engine choice, the voice detector's segment logic,
       # the hold flow with a stand-in engine, the microphone's errors).
       - name: Island tests
-        run: cargo test -p snth-connect island::
+        run: cargo test -p snth-connect "island::"
 
       # Then the real thing: the pinned model files downloaded as the app
       # downloads them (resume, sha256, rename; cached between runs), and
