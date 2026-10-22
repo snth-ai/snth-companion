@@ -140,7 +140,7 @@ impl Tone {
         }
     }
 
-    /// The emotion model can run in this build (Apple silicon).
+    /// The emotion model can run in this build (Apple silicon, Windows x64).
     pub fn available(&self) -> bool {
         self.loader.is_some()
     }
@@ -279,12 +279,12 @@ fn unload_if_idle(held: &Held, idle: Duration) {
     }
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(device_stt)]
 fn loader() -> Option<Loader> {
     Some(Arc::new(|p: &Path| emotion::Model::load(p).map(|m| Box::new(m) as Box<dyn Classify>)))
 }
 
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(not(device_stt))]
 fn loader() -> Option<Loader> {
     None
 }

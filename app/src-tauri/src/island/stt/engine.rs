@@ -1,5 +1,5 @@
 //! whisper.cpp (whisper-rs, Metal) as the stream's decoder. Apple silicon
-//! only (Cargo.toml); everything here runs on the speech thread (mod.rs),
+//! only (Cargo.toml, cfg `whisper_stt`); everything here runs on the speech thread (mod.rs),
 //! never on the main thread or the async runtime.
 //!
 //! Speed on an M1 comes from two settings, measured on large-v3-turbo
@@ -62,14 +62,16 @@ pub(super) fn load_vad(vad_model: &Path) -> Option<WhisperVadContext> {
     })
 }
 
-/// Where the speech is, by Silero.
+/// Where the speech is, by Silero, with the hold's settings
+/// (`silero::HOLD`, which the ONNX detector of the Windows build uses too).
 pub(super) fn silero(vad: &mut WhisperVadContext, audio: &[f32]) -> Option<Vec<Span>> {
+    let hold = super::silero::HOLD;
     let mut params = WhisperVadParams::new();
-    params.set_threshold(0.5);
-    params.set_min_speech_duration(150);
+    params.set_threshold(hold.threshold);
+    params.set_min_speech_duration(hold.min_speech_ms);
     // Short, so the pauses at commas show (the stream may cut there).
-    params.set_min_silence_duration(100);
-    params.set_speech_pad(30);
+    params.set_min_silence_duration(hold.min_silence_ms);
+    params.set_speech_pad(hold.speech_pad_ms);
     let segments = vad.segments_from_samples(params, audio).ok()?;
     let cs = |t: f32| ((t.max(0.0) * RATE as f32 / 100.0) as usize).min(audio.len());
     Some(

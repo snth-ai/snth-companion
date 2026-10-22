@@ -27,7 +27,8 @@
 //! Whisper tiny and the voice detector are their own
 //! download (`FILES`, about 32 MB, in `wake/` of the app's data folder),
 //! fetched when the owner turns the mode on, and in memory only while it
-//! is on. Apple silicon only, like the hold's speech-to-text.
+//! is on. Apple silicon only (it runs whisper.cpp; the hold's
+//! speech-to-text also runs on Windows, with Parakeet).
 
 pub mod device;
 pub mod listen;
@@ -69,9 +70,10 @@ pub const TINY: ModelFile = ModelFile {
 /// removing one model never breaks the other), then whisper tiny.
 pub static FILES: [&ModelFile; 2] = [&model::VAD, &TINY];
 
-/// The mode exists in this build (Apple silicon).
+/// The mode exists in this build (Apple silicon: it runs whisper.cpp,
+/// which the Windows build of the hold's speech-to-text does without).
 pub fn available() -> bool {
-    stt::available()
+    cfg!(whisper_stt)
 }
 
 /// How often the microphone's new audio is read while listening.

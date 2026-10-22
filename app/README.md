@@ -143,7 +143,7 @@ URL parameters stage a screen or a state directly:
 | `account` | the platform account: `signed_out` (first run, nothing linked: "Sign in with SNTH" waits about 2 s in the "browser", then shows the consent screen for Mia and Maya), `consent` (signed in, the consent screen), `two` (signed in, Mia and Maya linked), `none` (signed in, no synths: the code field), `repair` (two linked, Maya refused her token). Without it: signed out, Mia linked with a code, as before |
 | `login` | with `account=signed_out`: the sign-in fails, `denied` (Cancel in the browser) or `expired` |
 | `connectfail` | with `account=consent`: linking Maya fails, `connect_unavailable`, `synth_outdated`, `synth_unreachable` |
-| `island` | the Island screen (with `screen=island`): `off` (default), `on`, `outdated` (the synth is older than the island), `taken` (another app holds the talk key), `micdenied`, `two` (with `account=two`: Maya listens to the keys), `nolink` (on, Mia offline: the keys are released). On `island.html` (the island window on a pretend desktop): `idle` (default), `hover`, `listening`, `screen`, `sending`, `accepted`, `thinking`, `working`, `driving`, `done`, `error`, `approval`, `text`, `offline`, `outdated`, `micdenied`, `asking`, `paused`, `two`, `shot`, and for speech on this computer `live` (the words of a hold), `livesent` (the text going), `offer` (the synth's offer), `offerdl`, `offerready`, `offerfail` (the model's download after "Turn on"), and for wake by name `wakeidle` (the dot), `wakepaused` (paused for a call), `woke` (a wake recording with its words), `wokename` (the name alone); with `notch=0` (a Mac without a notch) and `os=windows` (the Windows desktop: the island floats above a taskbar at the bottom; add `taskbar=top` for a taskbar on the top edge). The strip under the desktop plays a hold, a hold with its words, the offer, a wake by name (with a request, or the name alone), a call pausing it, a line of text, an answer, a request. Speech recognition on the Island screen: `stt` (on, the model here), `sttdl` (downloading), `sttspace` (the disk is too full), `sttold` (the synth does not take text yet), `sttintel` (not available); wake by name: `wake` (on, listening), `wakedl` (its model downloading), `wakecall` (paused: the microphone is in use), `wakebt` (paused: the only microphone is in AirPods); `sttnospace=1` makes the mock download fail for lack of space |
+| `island` | the Island screen (with `screen=island`): `off` (default), `on`, `outdated` (the synth is older than the island), `taken` (another app holds the talk key), `micdenied`, `two` (with `account=two`: Maya listens to the keys), `nolink` (on, Mia offline: the keys are released). On `island.html` (the island window on a pretend desktop): `idle` (default), `hover`, `listening`, `screen`, `sending`, `accepted`, `thinking`, `working`, `driving`, `done`, `error`, `approval`, `text`, `offline`, `outdated`, `micdenied`, `asking`, `paused`, `two`, `shot`, and for speech on this computer `live` (the words of a hold), `livesent` (the text going), `offer` (the synth's offer), `offerdl`, `offerready`, `offerfail` (the model's download after "Turn on"), and for wake by name `wakeidle` (the dot), `wakepaused` (paused for a call), `woke` (a wake recording with its words), `wokename` (the name alone); with `notch=0` (a Mac without a notch) and `os=windows` (the Windows desktop: the island floats above a taskbar at the bottom; add `taskbar=top` for a taskbar on the top edge). The strip under the desktop plays a hold, a hold with its words, the offer, a wake by name (with a request, or the name alone), a call pausing it, a line of text, an answer, a request. Speech recognition on the Island screen: `stt` (on, the model here), `sttdl` (downloading), `sttspace` (the disk is too full), `sttold` (the synth does not take text yet), `sttintel` (not available), and with `os=windows` the same scenarios with Windows' single engine (Parakeet, no choice); wake by name: `wake` (on, listening), `wakedl` (its model downloading), `wakecall` (paused: the microphone is in use), `wakebt` (paused: the only microphone is in AirPods); `sttnospace=1` makes the mock download fail for lack of space |
 | `faceset` | `invalid`: the synth refuses every face the editor saves |
 | `lang` | `en`, `ru` |
 | `theme` | `light`, `dark` |
@@ -586,11 +586,15 @@ talks to `<platform>/api/app/v1/*` only. There is no override in the UI.
   - On-device speech-to-text (`src-tauri/src/island/stt/`, TZ
     `tz-local-stt.md` in the synth's repo; off by default, the switch
     "Speech recognition: through the synth / on this computer" on the
-    Island screen, `IslandSettings.stt` in settings.json). Apple silicon
-    only: whisper.cpp through `whisper-rs` 0.15.1 with Metal, a
-    target-specific dependency, so Windows, Linux and the Intel half of a
-    universal build do not build it and keep the audio path (the switch
-    says it is not available there). The model is `ggml-large-v3-turbo-q5_0`
+    Island screen, `IslandSettings.stt` in settings.json). On Apple
+    silicon and Windows x64 (build.rs sets the cfg names `device_stt`
+    for both and `whisper_stt` for Apple silicon, in step with the target
+    tables of Cargo.toml); Linux and the Intel half of a universal build
+    do not build it and keep the audio path (the switch says it is not
+    available there). Apple silicon has two engines: whisper.cpp through
+    `whisper-rs` 0.15.1 with Metal (a target-specific dependency) and
+    Parakeet (below); Windows has Parakeet alone (no whisper.cpp, so no
+    cmake build on Windows). The whisper model is `ggml-large-v3-turbo-q5_0`
     plus the Silero VAD for whisper.cpp, pinned to a Hugging Face revision
     and a sha256 (`stt/model.rs`), 548 MB in `<data dir>/stt/`, fetched
     only on the owner's yes, resumed after a break, checked, deletable, with
@@ -643,6 +647,33 @@ talks to `<platform>/api/app/v1/*` only. There is no override in the UI.
     on the float model the text matches onnx-asr on all 108 clips; the
     int8 model's text moves with float noise of 1e-5 (in Python too), its
     word error rate matches.
+  - On Windows x64 Parakeet is the only engine (`stt::ENGINES`). The
+    settings keep the owner's `stt_engine` as it is (whisper by default);
+    `stt::effective` maps a choice the build lacks to Parakeet everywhere
+    (the speech thread, the files, the download, the Settings DTO's
+    `stt.engine` / `stt.choices`), so the same settings on a Mac would
+    run whisper again. Settings shows no engine choice there, only
+    "Engine: Parakeet (the one on Windows)" and its model (about 640 MiB).
+    Its voice detector is the official Silero VAD v5.1.2 ONNX model
+    (`stt/silero.rs`, `model::SILERO_ONNX`, snakers4/silero-vad at commit
+    6478567, sha256-pinned, 2.3 MB, instead of whisper.cpp's ggml file) on
+    the same `ort`: 512-sample windows with the LSTM state carried, the
+    64-sample context given as the window's reflection (what whisper.cpp's
+    graph computes), and whisper.cpp 1.7.6's
+    `whisper_vad_segments_from_probs` ported line by line with the hold's
+    parameters (`silero::HOLD`, which engine.rs gives whisper.cpp too).
+    `stt_silero_onnx_matches_whisper_cpp` (ignored, files in /tmp) checks
+    it on 245 clips: the segment logic is identical on whisper.cpp's own
+    probabilities, the ONNX probabilities are within 0.013 of whisper.cpp's
+    and the spans of every clip are the same. The encoder and the emotion
+    model take half the logical CPUs, 2 to 4 (`parakeet::threads`; 4 on a
+    Mac). `stt_e2e_parakeet_onnx` (ignored) runs the whole hold flow with
+    the ONNX detector; the Windows CI runs it on clips spoken by the
+    Windows speech synthesizer after downloading the pinned files. A
+    microphone that Windows refuses (Privacy & security > Microphone off:
+    WASAPI's E_ACCESSDENIED) is reported as `mic_denied` (the island says
+    the microphone is not allowed and offers the privacy settings), not as
+    a generic failure. Wake by name stays Apple silicon only.
   - Wake by name (`src-tauri/src/island/wake/`, TZ `tz-wake-word.md` in
     the synth's repo; off by default, «Откликаться на имя» on the Island
     screen, `IslandSettings.wake` + `wake_phrase`). Apple silicon only
@@ -700,9 +731,10 @@ talks to `<platform>/api/app/v1/*` only. There is no override in the UI.
     absolute bands), and `emotion.rs`, emotion2vec+ base (FunASR Model
     License 1.1: attribution and the model's name kept) as our ONNX export
     with int8 matrix products, 118 MB, run by ONNX Runtime 1.22 (`ort`
-    2.0.0-rc.10, statically linked, Apple silicon only like whisper-rs; its
+    2.0.0-rc.10, statically linked, Apple silicon and Windows x64; its
     build script fetches the prebuilt library from cdn.pyke.io once, cached
-    in ~/Library/Caches/ort.pyke.io). The model file is pinned to a release
+    in ~/Library/Caches/ort.pyke.io, %LOCALAPPDATA%\ort.pyke.io on
+    Windows). The model file is pinned to a release
     asset of this repository (tag `model-emotion2vec-plus-base-1`) and a
     sha256, fetched after the whisper model while the switch is on, and
     deleted with it; a failed fetch is retried after 6 h (or when the owner

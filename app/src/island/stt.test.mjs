@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { aboutMb, sttLoadingVisible, tailOf, transcriptVisible } from "./sttView.ts";
+import { aboutMb, sttEngines, sttLoadingVisible, tailOf, transcriptVisible } from "./sttView.ts";
 
 test("the live transcript keeps its end, from a word", () => {
   assert.equal(tailOf("  Найди мне рейс  "), "Найди мне рейс");
@@ -39,4 +39,19 @@ test("the words show while held, while sent, and briefly after", () => {
   assert.equal(transcriptVisible(base, 0), false, "idle: nothing");
   assert.equal(transcriptVisible({ ...base, transcript: "  ", hold: "voice" }, 0), false);
   assert.equal(transcriptVisible({ ...base, transcript: null, hold: "voice" }, 0), false);
+});
+
+test("Windows runs Parakeet alone, whatever the settings say, and offers no choice", () => {
+  const mac = { engine: "whisper", choices: ["whisper", "parakeet"] };
+  assert.deepEqual(sttEngines(mac, "whisper"), { chosen: "whisper", engines: ["whisper", "parakeet"], pick: true });
+  assert.deepEqual(sttEngines({ ...mac, engine: "parakeet" }, "parakeet").chosen, "parakeet");
+  // The stored choice is whisper (the default); Parakeet runs.
+  const win = { engine: "parakeet", choices: ["parakeet"] };
+  assert.deepEqual(sttEngines(win, "whisper"), { chosen: "parakeet", engines: ["parakeet"], pick: false });
+  // Even a backend that reports the stored choice: the build's engine.
+  assert.equal(sttEngines({ choices: ["parakeet"] }, "whisper").chosen, "parakeet");
+  // An older backend (no fields): a Mac with both.
+  assert.deepEqual(sttEngines({}, undefined), { chosen: "whisper", engines: ["whisper", "parakeet"], pick: true });
+  // Its download, about 640 MiB (the encoder, decoder, tokens, ONNX detector).
+  assert.equal(aboutMb(652_183_999 + 18_202_004 + 93_939 + 2_327_524), 640);
 });

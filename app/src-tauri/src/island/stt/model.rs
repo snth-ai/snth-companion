@@ -3,7 +3,10 @@
 //!
 //! Two files from Hugging Face, each pinned to a repository revision and
 //! a sha256: whisper large-v3-turbo quantized to q5_0 (547 MiB) and the
-//! Silero voice detector whisper.cpp runs (0.9 MB). They live in the app's
+//! Silero voice detector whisper.cpp runs (0.9 MB). Parakeet's files
+//! (`PARAKEET_FILES`) are pinned the same way; on Windows its voice
+//! detector is the official Silero ONNX model, pinned to a commit of its
+//! GitHub repository (`SILERO_ONNX`). They live in the app's
 //! data folder under `stt/`. They are fetched only when the owner turns
 //! on-device speech-to-text on (in Settings or from the synth's offer on
 //! the island), never silently.
@@ -76,8 +79,25 @@ pub const PARAKEET_VOCAB: ModelFile = ModelFile {
     size: 93_939,
 };
 
+/// Silero VAD v5.1.2 as the official ONNX model (snakers4/silero-vad at
+/// the v5.1.2 tag, 6478567; MIT), the same detector as `VAD` for builds
+/// without whisper.cpp (silero.rs). 2.3 MB.
+pub const SILERO_ONNX: ModelFile = ModelFile {
+    name: "silero_vad.onnx",
+    url: "https://raw.githubusercontent.com/snakers4/silero-vad/6478567951ae5c9979ad7b234185b5515f4be7a1/src/silero_vad/data/silero_vad.onnx",
+    sha256: "2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f",
+    size: 2_327_524,
+};
+
+/// Parakeet's voice detector: whisper.cpp's file where whisper.cpp is in
+/// the build (and where no engine is), the ONNX one on Windows.
+#[cfg(not(all(device_stt, not(whisper_stt))))]
+pub const PARAKEET_VAD: &ModelFile = &VAD;
+#[cfg(all(device_stt, not(whisper_stt)))]
+pub const PARAKEET_VAD: &ModelFile = &SILERO_ONNX;
+
 /// The small ones first.
-pub const PARAKEET_FILES: [&ModelFile; 4] = [&VAD, &PARAKEET_VOCAB, &PARAKEET_JOINT, &PARAKEET_ENCODER];
+pub const PARAKEET_FILES: [&ModelFile; 4] = [PARAKEET_VAD, &PARAKEET_VOCAB, &PARAKEET_JOINT, &PARAKEET_ENCODER];
 
 #[cfg(test)]
 pub fn parakeet_size() -> u64 {
@@ -477,11 +497,13 @@ mod tests {
 
     #[test]
     fn the_files_are_pinned() {
-        for f in FILES.iter().chain(TONE_FILES.iter()).chain(PARAKEET_FILES.iter()) {
-            // Hugging Face at a revision, or a release asset of ours (a
-            // tag of its own, never re-uploaded).
+        for f in FILES.iter().chain(TONE_FILES.iter()).chain(PARAKEET_FILES.iter()).chain([&&SILERO_ONNX]) {
+            // Hugging Face at a revision, a release asset of ours (a tag of
+            // its own, never re-uploaded), or a GitHub file at a commit.
             assert!(
-                f.url.starts_with("https://huggingface.co/") || f.url.starts_with("https://github.com/snth-ai/snth-companion/releases/download/model-"),
+                f.url.starts_with("https://huggingface.co/")
+                    || f.url.starts_with("https://github.com/snth-ai/snth-companion/releases/download/model-")
+                    || f.url.starts_with("https://raw.githubusercontent.com/snakers4/silero-vad/6478567951ae5c9979ad7b234185b5515f4be7a1/"),
                 "{}",
                 f.url
             );
@@ -489,7 +511,14 @@ mod tests {
             assert_eq!(f.sha256.len(), 64);
             assert!(f.sha256.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
             // The revision, not "main": the file cannot change under the hash.
-            assert!(!f.url.contains("/resolve/main/"), "{}", f.url);
+            assert!(!f.url.contains("/resolve/main/") && !f.url.contains("/main/"), "{}", f.url);
+        }
+        // The Windows build's detector (no whisper.cpp there), the Mac's
+        // own file elsewhere.
+        if cfg!(all(device_stt, not(whisper_stt))) {
+            assert_eq!(PARAKEET_VAD.name, SILERO_ONNX.name);
+        } else {
+            assert_eq!(PARAKEET_VAD.name, VAD.name);
         }
         assert!((540..600).contains(&(total_size() / 1_000_000)), "about 550 MB");
         assert!((100..130).contains(&(tone_size() / 1_000_000)), "about 118 MB");

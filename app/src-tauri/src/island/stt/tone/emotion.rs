@@ -76,20 +76,16 @@ pub trait Classify: Send {
     fn classify(&mut self, audio: &[f32]) -> Result<[f32; 9], String>;
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(device_stt)]
 pub use onnx::Model;
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(device_stt)]
 mod onnx {
     use std::path::Path;
 
     use ort::session::builder::GraphOptimizationLevel;
     use ort::session::{RunOptions, Session};
     use ort::value::TensorRef;
-
-    /// CPU threads for the model (the M1 has four fast cores; whisper
-    /// works on the GPU meanwhile).
-    const THREADS: usize = 4;
 
     pub struct Model {
         session: Session,
@@ -103,7 +99,9 @@ mod onnx {
         pub fn load(path: &Path) -> Result<Model, String> {
             let session = Session::builder()
                 .and_then(|b| b.with_optimization_level(GraphOptimizationLevel::Level3))
-                .and_then(|b| b.with_intra_threads(THREADS))
+                // 4 on a Mac (the M1 has four fast cores; whisper works on
+                // the GPU meanwhile), half the threads elsewhere (2 to 4).
+                .and_then(|b| b.with_intra_threads(crate::island::stt::parakeet::threads()))
                 .and_then(|b| b.commit_from_file(path))
                 .map_err(|e| format!("emotion model: {e}"))?;
             let mut shrink = RunOptions::new().map_err(|e| e.to_string())?;

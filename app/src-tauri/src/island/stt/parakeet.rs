@@ -1,6 +1,8 @@
 //! NVIDIA Parakeet TDT 0.6B v3 (CC-BY-4.0) as the second decoder, next to
 //! whisper: faster (about 25x on the CPU), better on short Russian
-//! commands, worse at keeping English words in Latin letters.
+//! commands, worse at keeping English words in Latin letters. On Windows
+//! it is the only one (whisper.cpp is not in that build), with the ONNX
+//! voice detector (silero.rs) instead of whisper.cpp's.
 //!
 //! The model is istupakov's ONNX export (`istupakov/parakeet-tdt-0.6b-v3-onnx`,
 //! int8): an encoder (FastConformer, 652 MB) and a small decoder + joint
@@ -270,10 +272,27 @@ pub fn greedy(joint: &mut dyn Joint, frames: usize, vocab: usize, blank: usize, 
     Ok(tokens)
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+/// CPU threads for the encoder on a computer with `logical` threads:
+/// half of them (the physical cores of a laptop with two threads a core),
+/// at least 2, at most 4. Beyond 4 the encoder gains little, and the
+/// owner's other work keeps its cores. An Apple-silicon Mac always uses 4
+/// (the M1 has four fast cores).
+pub fn cpu_threads(logical: usize) -> usize {
+    (logical / 2).clamp(2, 4)
+}
+
+/// `cpu_threads` for this computer.
+pub fn threads() -> usize {
+    if cfg!(whisper_stt) {
+        return 4;
+    }
+    cpu_threads(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
+}
+
+#[cfg(device_stt)]
 pub use onnx::Engine;
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(device_stt)]
 mod onnx {
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -282,15 +301,38 @@ mod onnx {
     use ort::session::builder::GraphOptimizationLevel;
     use ort::session::{RunOptions, Session};
     use ort::value::TensorRef;
-    use whisper_rs::WhisperVadContext;
 
+    #[cfg(whisper_stt)]
     use super::super::engine;
+    use super::super::silero;
     use super::super::stream::{Decoded, Decoder, ABORTED};
     use super::super::vad::{self, Span, RATE};
-    use super::{features, greedy, mel_filters, Fft, Joint, Vocab, BANDS};
+    use super::{features, greedy, mel_filters, threads, Fft, Joint, Vocab, BANDS};
 
-    /// CPU threads for the encoder (the M1 has four fast cores).
-    const THREADS: usize = 4;
+    /// The voice detector: Silero either way. whisper.cpp's port of it
+    /// where whisper.cpp is in the build (the Mac, as before), the official
+    /// ONNX model for a `.onnx` file (the Windows build, silero.rs).
+    enum Vad {
+        #[cfg(whisper_stt)]
+        Whisper(whisper_rs::WhisperVadContext),
+        Onnx(silero::Silero),
+    }
+
+    /// None when it does not load: the loudness detector stands in.
+    fn load_vad(path: &Path) -> Option<Vad> {
+        if path.extension().is_some_and(|e| e == "onnx") {
+            return silero::load(path).map(Vad::Onnx);
+        }
+        #[cfg(whisper_stt)]
+        {
+            engine::load_vad(path).map(Vad::Whisper)
+        }
+        #[cfg(not(whisper_stt))]
+        {
+            connect_core::logln!("island: the voice detector {} is not an ONNX model; using loudness", path.display());
+            None
+        }
+    }
     /// The decoder's state: 2 layers x 640, twice.
     const STATE: usize = 2 * 640;
     /// The encoder's values per frame.
@@ -302,7 +344,7 @@ mod onnx {
         vocab: Vocab,
         filters: Vec<f32>,
         fft: Fft,
-        vad: Option<WhisperVadContext>,
+        vad: Option<Vad>,
         /// The encoder gives its working memory back after each run (a 30
         /// s piece needs a few hundred MB).
         shrink: RunOptions,
@@ -325,11 +367,11 @@ mod onnx {
         pub fn load(encoder: &Path, joint: &Path, vocab: &Path, vad_model: &Path) -> Result<Engine, String> {
             let started = Instant::now();
             let vocab = Vocab::load(vocab)?;
-            let encoder = session(encoder, THREADS)?;
+            let encoder = session(encoder, threads())?;
             let joint = session(joint, 1)?;
             let mut shrink = RunOptions::new().map_err(|e| e.to_string())?;
             shrink.add_config_entry("memory.enable_memory_arena_shrinkage", "cpu:0").map_err(|e| e.to_string())?;
-            let vad = engine::load_vad(vad_model);
+            let vad = load_vad(vad_model);
             let mut e = Engine { encoder, joint, vocab, filters: mel_filters(), fft: Fft::new(), vad, shrink };
             let loaded = started.elapsed();
             e.transcribe(&vec![0.0; RATE / 2], None)?;
@@ -435,7 +477,11 @@ mod onnx {
         }
 
         fn vad(&mut self, audio: &[f32]) -> Option<Vec<Span>> {
-            engine::silero(self.vad.as_mut()?, audio)
+            match self.vad.as_mut()? {
+                #[cfg(whisper_stt)]
+                Vad::Whisper(v) => engine::silero(v, audio),
+                Vad::Onnx(v) => v.spans(audio),
+            }
         }
 
         fn cuts(&self) -> vad::Cuts {
@@ -531,6 +577,18 @@ mod tests {
 
         fn keep(&mut self) {
             self.kept += 1;
+        }
+    }
+
+    #[test]
+    fn the_encoder_takes_half_the_threads_between_two_and_four() {
+        assert_eq!(cpu_threads(1), 2);
+        assert_eq!(cpu_threads(4), 2, "2 cores, 4 threads");
+        assert_eq!(cpu_threads(6), 3);
+        assert_eq!(cpu_threads(8), 4, "4 cores, 8 threads");
+        assert_eq!(cpu_threads(20), 4);
+        if cfg!(whisper_stt) {
+            assert_eq!(threads(), 4, "the M1's four fast cores");
         }
     }
 

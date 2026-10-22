@@ -36,3 +36,20 @@ export function transcriptVisible(
   const sentFresh = Boolean(v.message && v.message.stage === "accepted" && now - v.message.at_ms < SENT_TEXT_FOR);
   return Boolean(v.hold || v.sending || sentFresh);
 }
+
+type Engine = "whisper" | "parakeet";
+
+/** The engines Settings shows. `engine` is the one that runs for the
+ * stored choice (Parakeet on Windows even when the settings say whisper,
+ * the default), `choices` the engines of this build: a choice is offered
+ * only where there are two (a Mac). Older backends without the two fields
+ * mean a Mac. */
+export function sttEngines(
+  stt: { engine?: Engine; choices?: Engine[] },
+  stored: Engine | undefined,
+): { chosen: Engine; engines: Engine[]; pick: boolean } {
+  const engines: Engine[] = stt.choices?.length ? stt.choices : ["whisper", "parakeet"];
+  const want = stt.engine ?? stored ?? "whisper";
+  const chosen = engines.includes(want) ? want : engines[0]!;
+  return { chosen, engines, pick: engines.length > 1 };
+}

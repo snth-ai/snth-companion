@@ -272,6 +272,8 @@ pub enum SttMode {
 }
 
 /// Which on-device engine recognizes the speech (with `SttMode::Device`).
+/// A build without whisper (Windows) runs Parakeet for `Whisper` and keeps
+/// the stored value as it is (the app's `stt::effective`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SttEngine {

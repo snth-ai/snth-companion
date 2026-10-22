@@ -142,6 +142,32 @@ pub fn level(block: &[f32]) -> f32 {
 /// How often the level goes to the face.
 const LEVEL_EVERY: Duration = Duration::from_millis(50);
 
+/// Windows refused the microphone: it is off for apps (or for desktop
+/// apps) in Settings > Privacy & security > Microphone. WASAPI says
+/// E_ACCESSDENIED (0x80070005) when the stream is opened; cpal passes it
+/// on as an OS error (a message in the system's language, then
+/// "(os error -2147024891)"). The code is matched, not the words.
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+pub fn denied_by_system(e: &str) -> bool {
+    let low = e.to_ascii_lowercase();
+    ["-2147024891", "0x80070005", "(os error 5)", "e_accessdenied", "access is denied", "permission denied"].iter().any(|m| low.contains(m))
+}
+
+/// The reason a recording did not start, with its code first: on Windows
+/// a refusal of the system is "mic_denied" (the island says the microphone
+/// is not allowed and offers the privacy settings), anything else
+/// "mic_failed" unless it has a code already.
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+pub fn open_error(e: String) -> String {
+    if cfg!(windows) && denied_by_system(&e) {
+        format!("mic_denied: {e}")
+    } else if e.starts_with("mic_") || e.starts_with("no_microphone") {
+        e
+    } else {
+        format!("mic_failed: {e}")
+    }
+}
+
 #[cfg(any(target_os = "macos", windows))]
 mod capture {
     use std::sync::mpsc;
@@ -151,7 +177,7 @@ mod capture {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use cpal::{FromSample, Sample, SampleFormat, SizedSample};
 
-    use super::{level, wav, Captured, Resampler, LEVEL_EVERY, RATE};
+    use super::{level, open_error, wav, Captured, Resampler, LEVEL_EVERY, RATE};
 
     /// A recording that runs. `finish` ends it and returns the voice;
     /// dropping it throws the recording away.
@@ -277,7 +303,7 @@ mod capture {
                 let supported = match device.default_input_config() {
                     Ok(c) => c,
                     Err(e) => {
-                        let _ = ready_tx.send(Err(format!("mic_failed: {e}")));
+                        let _ = ready_tx.send(Err(open_error(e.to_string())));
                         return;
                     }
                 };
@@ -296,10 +322,10 @@ mod capture {
                     SampleFormat::I8 => build::<i8>(&device, config, shared.clone(), on_level.clone(), fail_tx),
                     other => Err(format!("mic_failed: sample format {other} is not handled")),
                 };
-                let stream = match built.and_then(|s| s.play().map(|_| s).map_err(|e| format!("mic_failed: {e}"))) {
+                let stream = match built.and_then(|s| s.play().map(|_| s).map_err(|e| e.to_string())) {
                     Ok(s) => s,
                     Err(e) => {
-                        let _ = ready_tx.send(Err(if e.starts_with("mic_") { e } else { format!("mic_failed: {e}") }));
+                        let _ = ready_tx.send(Err(open_error(e)));
                         return;
                     }
                 };
@@ -467,7 +493,8 @@ mod permission {
     use super::MicPermission;
 
     /// Windows asks nothing up front: a microphone switched off in the
-    /// privacy settings fails when it is opened, and that is reported then.
+    /// privacy settings fails when it is opened, and that is reported then
+    /// ("mic_denied", `open_error`).
     pub fn status() -> MicPermission {
         if cfg!(windows) {
             MicPermission::Granted
@@ -486,6 +513,27 @@ pub use permission::{request as request_permission, status as permission};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_microphone_blocked_by_windows_is_told_apart() {
+        // cpal 0.18's text of E_ACCESSDENIED from IAudioClient::Initialize,
+        // in English and in another language: the code decides.
+        let en = "Failed to build audio client: Access is denied. (os error -2147024891)";
+        let ru = "Failed to build audio client: \u{41e}\u{442}\u{43a}\u{430}\u{437}\u{430}\u{43d}\u{43e} \u{432} \u{434}\u{43e}\u{441}\u{442}\u{443}\u{43f}\u{435}. (os error -2147024891)";
+        assert!(denied_by_system(en));
+        assert!(denied_by_system(ru));
+        assert!(denied_by_system("Permission denied. Grant the required access and retry."));
+        assert!(!denied_by_system("The requested audio device is not available. It may have been disconnected."));
+        assert!(!denied_by_system("Failed to initialize audio client: (os error -2004287480)"));
+        if cfg!(windows) {
+            assert!(open_error(en.into()).starts_with("mic_denied: "));
+        } else {
+            // A Mac knows its answer before opening (`permission`).
+            assert!(open_error(en.into()).starts_with("mic_failed: "));
+        }
+        assert_eq!(open_error("mic_failed: sample format x".into()), "mic_failed: sample format x");
+        assert_eq!(open_error("no device".into()), "mic_failed: no device");
+    }
 
     #[test]
     fn a_wav_file_is_what_a_reader_expects() {

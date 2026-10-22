@@ -8,14 +8,22 @@
 //! saves the synth's speech-to-text call (about 5 s per message), keeps
 //! the voice on this computer and works offline.
 //!
+//! Where it runs (build.rs sets the cfg names): Apple-silicon Macs have
+//! both engines (`whisper_stt`), Windows x64 has Parakeet alone
+//! (`device_stt` without `whisper_stt`); elsewhere (Linux, Intel Macs) the
+//! switch is shown as unavailable and the voice goes as audio.
+//!
 //! - `model.rs`: the model files (download, check, removal).
-//! - `engine.rs`: whisper.cpp with Metal. Apple silicon only; elsewhere
-//!   the switch is shown as unavailable and the voice goes as audio.
+//! - `engine.rs`: whisper.cpp with Metal. Apple silicon only.
 //! - `parakeet.rs`: NVIDIA Parakeet TDT 0.6B v3 by ONNX Runtime on the CPU,
-//!   the owner's other choice (`SttEngine`), with its own model files.
-//!   One engine is loaded at a time: choosing the other unloads it.
+//!   the owner's other choice on a Mac (`SttEngine`) and the only engine
+//!   on Windows (`ENGINES`, `effective`), with its own model files. One
+//!   engine is loaded at a time: choosing the other unloads it.
 //! - `stream.rs`: one hold, recognized piece by piece while it runs.
 //! - `vad.rs`, `filter.rs`: where the speech is, what whisper invents.
+//! - `silero.rs`: the Silero voice detector as ONNX, for the Windows
+//!   build (whisper.cpp runs it on a Mac).
+//! - `tone/`: the tone of voice (ONNX Runtime too, wherever Parakeet runs).
 //! - `release.rs`: what a released hold sends (a hold is never lost).
 //!
 //! One thread does all of the speech work (`island-stt`). The model is
@@ -30,19 +38,20 @@
 //! speech thread that ended on a panic is started again by the next hold,
 //! and that hold goes as audio.
 
-// Without the engine (Windows, Linux, Intel Macs) only the model files
-// and the settings are used; the stream is there for its tests.
-#![cfg_attr(not(all(target_os = "macos", target_arch = "aarch64")), allow(dead_code))]
+// Without an engine (Linux, Intel Macs) only the model files and the
+// settings are used; the stream is there for its tests.
+#![cfg_attr(not(device_stt), allow(dead_code))]
 
 pub mod filter;
 pub mod model;
 pub mod parakeet;
 pub mod release;
+pub mod silero;
 pub mod stream;
 pub mod tone;
 pub mod vad;
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(whisper_stt)]
 pub mod engine;
 
 use std::path::Path;
@@ -55,9 +64,32 @@ use connect_core::island::{IslandSettings, SttEngine, SttMode};
 pub use release::{decide, AtRelease, EngineState, Release};
 pub use stream::{Decoder, Heard, Vad};
 
-/// The engine exists in this build (Apple silicon).
+/// An engine exists in this build (Apple silicon, Windows x64).
 pub fn available() -> bool {
-    cfg!(all(target_os = "macos", target_arch = "aarch64"))
+    cfg!(device_stt)
+}
+
+/// The engines of this build, the one taken for a choice it lacks first.
+/// Windows has Parakeet alone; a Mac (and a build without any engine,
+/// where nothing loads anyway) lists both.
+#[cfg(all(device_stt, not(whisper_stt)))]
+pub const ENGINES: &[SttEngine] = &[SttEngine::Parakeet];
+#[cfg(not(all(device_stt, not(whisper_stt))))]
+pub const ENGINES: &[SttEngine] = &[SttEngine::Whisper, SttEngine::Parakeet];
+
+/// The engine that runs for the owner's choice. The choice itself stays
+/// in the settings as it is: whisper (the default) on Windows means
+/// Parakeet here, and whisper again if the same settings ever meet a Mac.
+pub fn effective(chosen: SttEngine) -> SttEngine {
+    effective_in(chosen, ENGINES)
+}
+
+fn effective_in(chosen: SttEngine, engines: &[SttEngine]) -> SttEngine {
+    if engines.contains(&chosen) {
+        chosen
+    } else {
+        engines[0]
+    }
 }
 
 /// How long the model stays loaded after the last hold.
@@ -132,11 +164,8 @@ impl Shared {
     }
 
     fn kind(&self) -> SttEngine {
-        if self.kind.load(Ordering::Acquire) == 1 {
-            SttEngine::Parakeet
-        } else {
-            SttEngine::Whisper
-        }
+        let chosen = if self.kind.load(Ordering::Acquire) == 1 { SttEngine::Parakeet } else { SttEngine::Whisper };
+        effective(chosen)
     }
 
     fn set(&self, s: EngineState) {
@@ -260,9 +289,9 @@ impl Stt {
         self.shared.kind()
     }
 
-    /// The files of an engine.
+    /// The files of an engine (of the one that runs for it: `effective`).
     pub fn models_of(&self, e: SttEngine) -> &Arc<model::Models> {
-        match e {
+        match effective(e) {
             SttEngine::Whisper => &self.models,
             SttEngine::Parakeet => &self.parakeet,
         }
@@ -275,7 +304,7 @@ impl Stt {
 
     /// Take the owner's choice (from the settings). True when it changed.
     pub fn select(&self, e: SttEngine) -> bool {
-        let v = u8::from(e == SttEngine::Parakeet);
+        let v = u8::from(effective(e) == SttEngine::Parakeet);
         self.shared.kind.swap(v, Ordering::AcqRel) != v
     }
 
@@ -374,20 +403,22 @@ impl Stt {
     }
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(device_stt)]
 fn engine_loader() -> Option<Loader> {
-    use model::{PARAKEET_ENCODER, PARAKEET_JOINT, PARAKEET_VOCAB, VAD};
+    use model::{PARAKEET_ENCODER, PARAKEET_JOINT, PARAKEET_VAD, PARAKEET_VOCAB};
     Some(Arc::new(|kind: SttEngine, m: &model::Models| match kind {
+        #[cfg(whisper_stt)]
         SttEngine::Whisper => {
             let (model, vad) = m.paths();
             engine::Engine::load(&model, &vad).map(|e| Box::new(e) as Box<dyn Decoder>)
         }
-        SttEngine::Parakeet => parakeet::Engine::load(&m.path(&PARAKEET_ENCODER), &m.path(&PARAKEET_JOINT), &m.path(&PARAKEET_VOCAB), &m.path(&VAD))
+        // Parakeet, and on Windows every choice (`effective`).
+        _ => parakeet::Engine::load(&m.path(&PARAKEET_ENCODER), &m.path(&PARAKEET_JOINT), &m.path(&PARAKEET_VOCAB), &m.path(PARAKEET_VAD))
             .map(|e| Box::new(e) as Box<dyn Decoder>),
     }))
 }
 
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(not(device_stt))]
 fn engine_loader() -> Option<Loader> {
     None
 }
@@ -709,7 +740,7 @@ mod tests {
         // Before the download: the audio goes.
         let (r, _) = hold(&stt, pcm(1.0, &[(0.2, 0.8)]), false);
         assert_eq!(r, Release::Audio("the model is not downloaded yet".into()));
-        stt.models.pretend(model::Status::Ready);
+        stt.active().pretend(model::Status::Ready);
 
         // The first hold after it: the model is still loading at the
         // release. The audio goes within RELEASE_WAIT.
@@ -731,7 +762,7 @@ mod tests {
     #[test]
     fn only_a_ready_engines_voice_detector_drops_a_silent_hold() {
         let stt = fresh_app(Fake::default());
-        stt.models.pretend(model::Status::Ready);
+        stt.active().pretend(model::Status::Ready);
         stt.warm();
         wait_for(&stt, EngineState::Ready);
         assert_eq!(hold(&stt, pcm(1.0, &[]), false).0, Release::Silent);
@@ -742,7 +773,7 @@ mod tests {
 
         // Without the voice detector, silence is never dropped.
         let stt = fresh_app(Fake { no_vad: true, ..Fake::default() });
-        stt.models.pretend(model::Status::Ready);
+        stt.active().pretend(model::Status::Ready);
         stt.warm();
         wait_for(&stt, EngineState::Ready);
         assert_eq!(hold(&stt, pcm(1.0, &[]), false).0, Release::Audio("the voice detector could not run".into()));
@@ -751,7 +782,7 @@ mod tests {
     #[test]
     fn a_model_that_does_not_load_sends_the_audio() {
         let stt = fresh_app(Fake { fail_load: true, ..Fake::default() });
-        stt.models.pretend(model::Status::Ready);
+        stt.active().pretend(model::Status::Ready);
         let (r, after) = hold(&stt, pcm(0.8, &[(0.1, 0.7)]), false);
         assert_eq!(r, Release::Audio("the model did not load".into()));
         assert!(after < Duration::from_millis(500), "{after:?}");
@@ -761,7 +792,7 @@ mod tests {
     #[test]
     fn a_speech_thread_that_panicked_is_started_again_by_the_next_hold() {
         let stt = fresh_app(Fake { panic_once: true, ..Fake::default() });
-        stt.models.pretend(model::Status::Ready);
+        stt.active().pretend(model::Status::Ready);
         stt.warm();
         wait_for(&stt, EngineState::Ready);
         // The decoder panics: the thread ends, the hold goes as audio.
@@ -776,6 +807,8 @@ mod tests {
         assert_eq!(hold(&stt, pcm(1.5, &[(0.2, 1.2)]), false).0, Release::Text("слово".into()));
     }
 
+    /// Where both engines are in the build (a Mac).
+    #[cfg(not(all(device_stt, not(whisper_stt))))]
     #[test]
     fn one_engine_is_loaded_at_a_time_and_each_needs_its_own_files() {
         let loaded = Arc::new(Mutex::new(Vec::new()));
@@ -810,6 +843,52 @@ mod tests {
         wait_for(&stt, EngineState::Ready);
         assert_eq!(*loaded.lock().unwrap(), vec![SttEngine::Whisper, SttEngine::Parakeet, SttEngine::Whisper]);
         assert!(!stt.select(SttEngine::Whisper), "the same choice is no change");
+    }
+
+    #[test]
+    fn a_choice_the_build_lacks_runs_its_first_engine() {
+        use SttEngine::{Parakeet, Whisper};
+        // A Mac: both, as chosen.
+        assert_eq!(effective_in(Whisper, &[Whisper, Parakeet]), Whisper);
+        assert_eq!(effective_in(Parakeet, &[Whisper, Parakeet]), Parakeet);
+        // Windows: whisper (the default in the settings) runs as Parakeet.
+        assert_eq!(effective_in(Whisper, &[Parakeet]), Parakeet);
+        assert_eq!(effective_in(Parakeet, &[Parakeet]), Parakeet);
+        if cfg!(all(device_stt, not(whisper_stt))) {
+            assert_eq!(ENGINES, &[Parakeet]);
+        } else {
+            assert_eq!(ENGINES, &[Whisper, Parakeet]);
+        }
+        assert_eq!(effective(Parakeet), Parakeet);
+    }
+
+    /// Windows: the stored choice is whisper (the default), yet Parakeet's
+    /// files are the ones looked at, downloaded and loaded, and a hold
+    /// goes as text once they are here. Run here with a Parakeet-only
+    /// list, as the Windows build has it.
+    #[test]
+    fn whisper_chosen_where_only_parakeet_exists_runs_parakeet() {
+        let dir = std::env::temp_dir().join(format!("snth-stt-test-win-{}-{}", std::process::id(), rand_suffix()));
+        let loaded = Arc::new(Mutex::new(Vec::new()));
+        let seen = loaded.clone();
+        let loader: Loader = Arc::new(move |k: SttEngine, m: &model::Models| {
+            seen.lock().unwrap().push((k, m.size()));
+            Ok(Box::new(FakeEngine { no_vad: false, panic_on_decode: false }) as Box<dyn Decoder>)
+        });
+        let parakeet = Arc::new(model::Models::with_files(dir.join("parakeet"), &model::PARAKEET_FILES));
+        let stt = Stt::with_loader(Arc::new(model::Models::new(dir)), parakeet, Some(loader));
+        if cfg!(all(device_stt, not(whisper_stt))) {
+            stt.select(SttEngine::Whisper);
+            assert_eq!(stt.kind(), SttEngine::Parakeet);
+            assert!(Arc::ptr_eq(stt.models_of(SttEngine::Whisper), &stt.parakeet));
+            assert!(Arc::ptr_eq(stt.active(), &stt.parakeet));
+            stt.parakeet.pretend(model::Status::Ready);
+            assert_eq!(hold(&stt, pcm(1.5, &[(0.2, 1.2)]), false).0, Release::Text("слово".into()));
+            assert_eq!(*loaded.lock().unwrap(), vec![(SttEngine::Parakeet, stt.parakeet.size())]);
+        } else {
+            assert_eq!(stt.kind(), SttEngine::Whisper);
+            assert!(Arc::ptr_eq(stt.models_of(SttEngine::Whisper), &stt.models));
+        }
     }
 
     #[test]
@@ -976,6 +1055,134 @@ mod tests {
         println!("unloaded: now {} MB", rss_now_mb());
     }
 
+    /// Download a pinned set into `dir` as the app does (resume, sha256,
+    /// rename, mark) and wait for it.
+    #[cfg(device_stt)]
+    fn download_into(dir: &Path, files: &'static [&'static model::ModelFile]) -> Arc<model::Models> {
+        let m = Arc::new(model::Models::with_files(dir.to_path_buf(), files));
+        let t = Instant::now();
+        m.download(Arc::new(|| {})).expect("the download starts");
+        while !m.ready() {
+            if let model::Status::Failed { code, detail } = m.status() {
+                panic!("download failed: {code}: {detail}");
+            }
+            assert!(t.elapsed() < Duration::from_secs(1200), "the download took too long");
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        println!("{} downloaded and checked in {} s", files.iter().map(|f| f.name).collect::<Vec<_>>().join(", "), t.elapsed().as_secs());
+        m
+    }
+
+    /// Parakeet with the ONNX voice detector (the Windows engine) through
+    /// the speech thread, hold by hold as the island runs it (audio in real
+    /// time, the release at the end), and the tone's emotion model on the
+    /// same clips.
+    ///
+    /// Clips: $STT_E2E_CLIPS (default /tmp/parakeet-bench/q/cs), a folder
+    /// of 16 kHz mono 16-bit WAVs with `refs.tsv` ("<wav>\t<text>"; an
+    /// empty text means no speech: the hold must not become text, and
+    /// digital silence must be dropped), at most $STT_E2E_MAX of them
+    /// (default 6).
+    ///
+    /// Models, either:
+    ///  - $STT_E2E_DOWNLOAD_TO: download Parakeet's pinned files for this
+    ///    build there (on Windows with the ONNX detector) and load them by
+    ///    `engine_loader` with the settings' default choice (whisper), as
+    ///    the app does on Windows; the CI on Windows runs it so;
+    ///  - else $STT_E2E_MODELS (default
+    ///    /tmp/parakeet-bench/dl/models/parakeet-onnx, the int8 files and
+    ///    vocab.txt) and the detector $STT_E2E_VAD (default
+    ///    /tmp/wds-models/silero_vad.onnx).
+    ///
+    /// The tone: $STT_E2E_TONE_DOWNLOAD_TO downloads the emotion model and
+    /// runs it on each clip. Run in release, alone:
+    ///
+    /// `cargo test -p snth-connect --release -- --ignored stt_e2e_parakeet_onnx --nocapture --test-threads 1`
+    #[cfg(device_stt)]
+    #[test]
+    #[ignore]
+    fn stt_e2e_parakeet_onnx() {
+        use std::path::PathBuf;
+        let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        let clips = PathBuf::from(env("STT_E2E_CLIPS").unwrap_or_else(|| "/tmp/parakeet-bench/q/cs".into()));
+        let max: usize = env("STT_E2E_MAX").and_then(|v| v.parse().ok()).unwrap_or(6);
+        let scratch = std::env::temp_dir().join(format!("snth-stt-e2e-{}", std::process::id()));
+        let stt = match env("STT_E2E_DOWNLOAD_TO") {
+            Some(dir) => {
+                let parakeet = download_into(Path::new(&dir), &model::PARAKEET_FILES);
+                let stt = Stt::with_loader(Arc::new(model::Models::new(scratch.clone())), parakeet, engine_loader());
+                // The settings' default.
+                stt.select(SttEngine::Whisper);
+                stt
+            }
+            None => {
+                let models = PathBuf::from(env("STT_E2E_MODELS").unwrap_or_else(|| "/tmp/parakeet-bench/dl/models/parakeet-onnx".into()));
+                let vad = PathBuf::from(env("STT_E2E_VAD").unwrap_or_else(|| "/tmp/wds-models/silero_vad.onnx".into()));
+                let loader: Loader = Arc::new(move |_: SttEngine, _: &model::Models| {
+                    parakeet::Engine::load(
+                        &models.join(model::PARAKEET_ENCODER.name),
+                        &models.join(model::PARAKEET_JOINT.name),
+                        &models.join(model::PARAKEET_VOCAB.name),
+                        &vad,
+                    )
+                    .map(|e| Box::new(e) as Box<dyn Decoder>)
+                });
+                let parakeet = Arc::new(model::Models::with_files(scratch.join("parakeet"), &model::PARAKEET_FILES));
+                parakeet.pretend(model::Status::Ready);
+                let stt = Stt::with_loader(Arc::new(model::Models::new(scratch.clone())), parakeet, Some(loader));
+                stt.select(SttEngine::Parakeet);
+                stt
+            }
+        };
+        assert_eq!(stt.kind(), SttEngine::Parakeet);
+        assert!(stt.active().ready());
+        let mut emotion = env("STT_E2E_TONE_DOWNLOAD_TO").map(|dir| {
+            let m = download_into(Path::new(&dir), &model::TONE_FILES);
+            tone::emotion::Model::load(&m.path(&model::EMOTION)).expect("the emotion model loads")
+        });
+        let t = Instant::now();
+        stt.warm();
+        wait_for(&stt, EngineState::Ready);
+        println!("parakeet: load + warm-up {} ms", t.elapsed().as_millis());
+
+        let refs = std::fs::read_to_string(clips.join("refs.tsv")).expect("refs.tsv");
+        let refs = refs.trim_start_matches('\u{feff}');
+        let (mut heard, mut said, mut speech_clips, mut silent_ok, mut silent_clips) = (0usize, 0usize, 0, 0, 0);
+        for line in refs.lines().filter(|l| !l.trim().is_empty()).take(max) {
+            let (name, want) = line.split_once('\t').unwrap_or((line.trim(), ""));
+            let pcm = read_clip(&clips, name);
+            let pcm_silent = pcm.iter().all(|s| *s == 0);
+            let secs = pcm.len() as f32 / vad::RATE as f32;
+            if let Some(m) = emotion.as_mut() {
+                use tone::emotion::Classify;
+                let p = m.classify(&to_f32(&pcm)).expect("the emotion model runs");
+                assert!((p.iter().sum::<f32>() - 1.0).abs() < 0.01, "{p:?}");
+                println!("  tone of {name}: {:?}", tone::emotion::Emotion { probs: p, secs }.top());
+            }
+            let (out, after) = hold(&stt, pcm, false);
+            println!("{name} ({secs:.1} s): {} ms after the release -> {out:?}\n  want: {want:?}", after.as_millis());
+            if want.trim().is_empty() {
+                assert!(!matches!(out, Release::Text(_)), "{name}: no speech became {out:?}");
+                silent_clips += 1;
+                silent_ok += usize::from(out == Release::Silent);
+                if pcm_silent {
+                    assert_eq!(out, Release::Silent, "{name}: digital silence");
+                }
+                continue;
+            }
+            speech_clips += 1;
+            let Release::Text(text) = out else { panic!("{name}: {out:?}") };
+            let got = filter::norm(&text);
+            let words: Vec<String> = filter::norm(want).split_whitespace().map(String::from).collect();
+            said += words.len();
+            heard += words.iter().filter(|w| got.contains(w.as_str())).count();
+        }
+        println!("{heard} of {said} words heard on {speech_clips} speech clips; {silent_ok} of {silent_clips} clips without speech dropped (the rest went as audio)");
+        assert!(speech_clips > 0, "no speech clips");
+        assert!(heard * 10 >= said * 7, "only {heard} of {said} words heard");
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
     /// The physical footprint now (what Activity Monitor calls Memory,
     /// GPU buffers included), in MB.
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -986,7 +1193,7 @@ mod tests {
         format!("footprint {fp}")
     }
 
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(device_stt)]
     fn read_clip(dir: &Path, name: &str) -> Vec<i16> {
         let b = std::fs::read(dir.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
         let at = b.windows(4).position(|w| w == b"data").unwrap() + 8;
