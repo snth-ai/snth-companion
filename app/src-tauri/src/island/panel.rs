@@ -36,10 +36,13 @@
 //! (`WDA_EXCLUDEFROMCAPTURE`, through Tauri's `content_protected`).
 //!
 //! Where it goes on Windows: there is no menu bar and the top of the
-//! screen is browser tabs and title bars, so the island floats at the
-//! bottom centre of the primary monitor, just above the taskbar
+//! screen is browser tabs and title bars, so by default the island floats
+//! at the bottom centre of the primary monitor, just above the taskbar
 //! (`geometry::place`, `edge: Bottom`; a taskbar on the top edge puts it
-//! just under the taskbar, `edge: Top`). `screen_info` reads the
+//! just under the taskbar, `edge: Top`). The top centre, when the owner
+//! chooses it, is the drawn notch flush with the monitor's top edge (under
+//! a taskbar on the top edge), as on a Mac without a notch; the other
+//! spots float. `screen_info` reads the
 //! monitor's frame and its work area (Tauri's `Monitor::work_area`, the
 //! `rcWork` of `GetMonitorInfoW`: the screen less the taskbar) in
 //! physical pixels and turns both into logical points at the monitor's
@@ -555,7 +558,8 @@ pub fn screen_info(window: &WebviewWindow) -> Option<ScreenInfo> {
         let size = monitor.size();
         let frame = geometry::from_physical(pos.x, pos.y, size.width, size.height, scale);
         // Windows: the work area makes the island float above the
-        // taskbar. Elsewhere (Linux) the drawn notch as before.
+        // taskbar (and keeps a chosen top centre off a top taskbar).
+        // Elsewhere (Linux) the drawn notch as before.
         #[cfg(windows)]
         let work = {
             let wa = monitor.work_area();

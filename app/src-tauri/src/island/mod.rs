@@ -2,9 +2,11 @@
 //! of the screen, merged with the notch (macOS), or floating just above
 //! the taskbar (Windows, `geometry.rs`), and the owner's hold keys. The
 //! owner may put it elsewhere (the settings' `position`: top, bottom or
-//! the middle of a side, left, centre or right); every spot but the
-//! macOS default is the floating pill (`geometry::place`). A change of
-//! the setting places it again at once (`sync`).
+//! the middle of a side, left, centre or right); every spot but the top
+//! centre (the macOS default; on Windows when the owner chooses it, the
+//! drawn notch flush with the top edge) is the floating pill
+//! (`geometry::place`). A change of the setting places it again at once
+//! (`sync`).
 //!
 //! One more window, `island` (island.html): transparent, always on top,
 //! never activated (`panel.rs`), placed by `geometry.rs`. The webview draws
@@ -108,7 +110,8 @@ const COVER_EVERY: Duration = Duration::from_millis(190);
 const COVER_FAST: Duration = Duration::from_millis(90);
 /// How often the poller asks where a floating island goes (the taskbar
 /// or the Dock moved or hides itself now, another resolution or scale).
-/// Windows always floats. macOS hears of screen changes
+/// Windows polls whatever the spot (its top centre too: a taskbar moved
+/// to the top edge moves it). macOS hears of screen changes
 /// (`panel::watch_screens`) but not for certain of the Dock's, so only a
 /// floating spot polls there; the notch placement never does.
 const REPLACE_EVERY: Duration = Duration::from_secs(3);
@@ -952,12 +955,13 @@ fn start_hold(ctx: &Arc<Ctx>, kind: HotkeyKind, synth_id: String) {
                 }
                 ctx2.island.hold.lock().unwrap().cancel();
                 let code = e.split(':').next().unwrap_or("mic_failed").to_string();
-                ctx2.island.notice(&code, e);
+                // The path in the detail: the notice's log line says it.
+                ctx2.island.notice(&code, format!("key hold, opening the microphone: {e}"));
                 emit_view(&ctx2);
             }
             Err(e) => {
                 ctx2.island.hold.lock().unwrap().cancel();
-                ctx2.island.notice("mic_failed", e.to_string());
+                ctx2.island.notice("mic_failed", format!("key hold, opening the microphone (the task failed): {e}"));
                 emit_view(&ctx2);
             }
         }
@@ -1074,7 +1078,8 @@ async fn finish(ctx: &Arc<Ctx>, kind: HotkeyKind, h: Hold) {
             }
             drop(recognizing);
             ctx.island.inner.lock().unwrap().transcript = None;
-            ctx.island.notice("mic_failed", e);
+            let path = if wake { "wake hold" } else { "key hold" };
+            ctx.island.notice("mic_failed", format!("{path}, stopping the recording at the release: {e}"));
             emit_view(ctx);
             return;
         }

@@ -16,8 +16,9 @@
 //! the top edge, as tall as the menu bar.
 //!
 //! Windows (a `work` area in `ScreenInfo`): there is no menu bar, and the
-//! top of the screen is where browser tabs and title bars are, so the
-//! island floats instead: a small free-standing pill (`FLOAT_PILL_W` x
+//! top of the screen is where browser tabs and title bars are, so by
+//! default the island floats instead (the top centre, flush with the top
+//! edge, is there when the owner chooses it: see the spots below): a small free-standing pill (`FLOAT_PILL_W` x
 //! `FLOAT_PILL_H`, every corner rounded, no notch, no ears) at the bottom
 //! centre of the primary monitor's work area (the screen less the
 //! taskbar), its bottom edge `FLOAT_GAP` above the taskbar
@@ -27,7 +28,7 @@
 //! face, which stays at the bottom of the shape. A taskbar on the top
 //! edge puts the island at the top of the work area instead (`edge:
 //! Top`, still a floating pill, `FLOAT_GAP` under the taskbar), growing
-//! down. The window always stays inside the work area.
+//! down. The floating window always stays inside the work area.
 //!
 //! The owner may choose another spot (`Spot`, from the island's settings):
 //! top, bottom or the middle of a side, at the left, the centre or the
@@ -35,8 +36,13 @@
 //! the centre is bad data and means the default). None on an axis is
 //! the system's default: macOS top centre (the notch placement above,
 //! `edge: Top`, `floating: false`, exactly as it always was), Windows
-//! bottom centre with the top-taskbar rule above. Every other spot, on
-//! both systems, is the floating pill inside the screen's usable area
+//! bottom centre with the top-taskbar rule above. Top centre chosen on
+//! Windows is the notch placement too, as on a Mac without a notch (and
+//! as Windows had it before 0.1.25): the drawn notch and its ears, flush
+//! with the top edge of the monitor, `MIN_BAR_H` tall, opening downwards;
+//! with a taskbar on the top edge, flush under the taskbar (the work
+//! area's top, `top_band`). Every other spot, on both systems, is the
+//! floating pill inside the screen's usable area
 //! (`work`: Windows the work area, macOS `NSScreen.visibleFrame`, the
 //! screen less the menu bar and a Dock that is not hidden, wherever the
 //! Dock is; on a screen with a menu bar the area also starts no higher
@@ -164,8 +170,9 @@ pub struct ScreenInfo {
     /// The screen has a menu bar the island merges with at the top centre
     /// (macOS): the default spot is the notch placement and the floating
     /// spots stay below the bar and the notch. False (Windows): the
-    /// floating pill everywhere, and with a `work` area the default spot
-    /// is the bottom centre.
+    /// floating pill everywhere but a chosen top centre (the drawn notch
+    /// flush with the top), and with a `work` area the default spot is
+    /// the bottom centre.
     pub menu_bar: bool,
 }
 
@@ -189,9 +196,9 @@ pub struct Placement {
     pub real_notch: bool,
     /// The edge the island keeps to (it grows away from it).
     pub edge: Edge,
-    /// A free-standing pill with every corner rounded (Windows, and every
-    /// spot but the notch on macOS), not a shape flush with the screen's
-    /// top edge.
+    /// A free-standing pill with every corner rounded (every spot but the
+    /// top centre: the macOS notch, the Windows top centre chosen), not a
+    /// shape flush with the screen's top edge.
     pub floating: bool,
     /// The side the open island is anchored to (`Center` for the notch).
     pub align: Align,
@@ -208,7 +215,36 @@ pub fn place(screen: &ScreenInfo, spot: Spot) -> Placement {
     if notch_os && vertical == Some(Edge::Top) && align == Align::Center {
         return place_notch(screen);
     }
+    // Windows, top centre chosen: the drawn notch flush with the top, as
+    // on a Mac without a notch (and on Windows before 0.1.25). Only when
+    // the owner chose the top: the default stays the floating pill.
+    if !notch_os && spot.vertical == Some(Edge::Top) && align == Align::Center {
+        return place_notch(&top_band(screen));
+    }
     place_floating(screen, vertical, align)
+}
+
+/// The screen a flush island at the top centre goes on when there is no
+/// menu bar (Windows): the monitor's frame across (centred on the
+/// monitor; the island is above every window), from its top edge, or
+/// from under a taskbar on the top edge (the work area's top) so the
+/// shape is never under the taskbar, down to the work area's bottom so
+/// the window stays off a bottom taskbar. A work area that makes no sense
+/// is ignored. No bar height: `MIN_BAR_H`.
+fn top_band(screen: &ScreenInfo) -> ScreenInfo {
+    const SLACK: f64 = 1.0;
+    let f = screen.frame;
+    let work = screen.work.filter(|w| {
+        w.w >= FLOAT_PILL_W
+            && w.h >= FLOAT_PILL_H * 2.0
+            && w.x >= f.x - SLACK
+            && w.y >= f.y - SLACK
+            && w.x + w.w <= f.x + f.w + SLACK
+            && w.y + w.h <= f.y + f.h + SLACK
+    });
+    let top = work.filter(|w| w.y > f.y + SLACK).map_or(f.y, |w| w.y);
+    let bottom = work.map_or(f.y + f.h, |w| w.y + w.h);
+    ScreenInfo { frame: Rect { x: f.x, y: top, w: f.w, h: bottom - top }, notch: None, bar_h: 0.0, work: None, menu_bar: false }
 }
 
 /// The notch placement (macOS's default): see the module's notes.
@@ -556,6 +592,8 @@ mod tests {
         (Edge::Bottom, Align::Right),
     ];
 
+    const TOP_CENTER: (Edge, Align) = (Edge::Top, Align::Center);
+
     fn overlaps(a: Rect, b: Rect) -> bool {
         a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
     }
@@ -729,7 +767,9 @@ mod tests {
         let work = Rect { x: 0.0, y: 0.0, w: 1920.0, h: 1032.0 };
         let screen = windows(FHD, work);
         for spot in SPOTS {
-            check_spot(&screen, spot, work, FLOAT_GAP_EDGE, FLOAT_GAP);
+            if spot != TOP_CENTER {
+                check_spot(&screen, spot, work, FLOAT_GAP_EDGE, FLOAT_GAP);
+            }
         }
         // Bottom centre chosen is the default.
         assert_eq!(place(&screen, Spot::new(Edge::Bottom, Align::Center)), place(&screen, Spot::DEFAULT));
@@ -741,7 +781,9 @@ mod tests {
         let work = Rect { x: 0.0, y: 48.0, w: 1920.0, h: 1032.0 };
         let screen = windows(FHD, work);
         for spot in SPOTS {
-            check_spot(&screen, spot, work, FLOAT_GAP, FLOAT_GAP_EDGE);
+            if spot != TOP_CENTER {
+                check_spot(&screen, spot, work, FLOAT_GAP, FLOAT_GAP_EDGE);
+            }
         }
         assert_eq!(place(&screen, Spot::DEFAULT).edge, Edge::Top, "the default follows a top taskbar");
         assert_eq!(place(&screen, Spot { vertical: None, horizontal: Some(Align::Right) }).edge, Edge::Top);
@@ -749,6 +791,9 @@ mod tests {
         let work = Rect { x: 62.0, y: 0.0, w: 1858.0, h: 1080.0 };
         let screen = windows(FHD, work);
         for spot in SPOTS {
+            if spot == TOP_CENTER {
+                continue;
+            }
             let p = check_spot(&screen, spot, work, FLOAT_GAP_EDGE, FLOAT_GAP_EDGE);
             assert!(!overlaps(p.window, Rect { x: 0.0, y: 0.0, w: 62.0, h: 1080.0 }), "{spot:?} over the taskbar");
         }
@@ -761,7 +806,9 @@ mod tests {
         let work = Rect { x: -1920.0, y: -300.0, w: 1920.0, h: 1040.0 };
         let screen = windows(frame, work);
         for spot in SPOTS {
-            check_spot(&screen, spot, work, FLOAT_GAP_EDGE, FLOAT_GAP);
+            if spot != TOP_CENTER {
+                check_spot(&screen, spot, work, FLOAT_GAP_EDGE, FLOAT_GAP);
+            }
         }
         // A screen narrower than the window: still inside, the pill at its side.
         let small = windows(Rect { x: 0.0, y: 0.0, w: 400.0, h: 290.0 }, Rect { x: 0.0, y: 0.0, w: 400.0, h: 250.0 });
@@ -770,6 +817,80 @@ mod tests {
             assert!(inside(Rect { x: 0.0, y: 0.0, w: 400.0, h: 250.0 }, p.window), "{v:?} {h:?}");
             assert!(inside(p.window, pill_on_screen(&p)), "{v:?} {h:?}");
         }
+    }
+
+    #[test]
+    fn windows_top_centre_chosen_is_the_drawn_notch_flush_with_the_top() {
+        // The default 48 px taskbar at the bottom: flush with the monitor's
+        // top edge, centred on it, the drawn notch with its ears, as on a
+        // Mac without a notch.
+        let work = Rect { x: 0.0, y: 0.0, w: 1920.0, h: 1032.0 };
+        let screen = windows(FHD, work);
+        let p = place(&screen, Spot::new(Edge::Top, Align::Center));
+        assert!(!p.floating && !p.real_notch);
+        assert_eq!((p.edge, p.align), (Edge::Top, Align::Center));
+        assert_eq!(p.window, Rect { x: 960.0 - WINDOW_W / 2.0, y: 0.0, w: WINDOW_W, h: WINDOW_H });
+        assert_eq!(p.notch, Rect { x: WINDOW_W / 2.0 - VIRTUAL_NOTCH_W / 2.0, y: 0.0, w: VIRTUAL_NOTCH_W, h: MIN_BAR_H });
+        assert_eq!(p.pill, Rect { x: WINDOW_W / 2.0 - VIRTUAL_NOTCH_W / 2.0 - EAR_W, y: 0.0, w: VIRTUAL_NOTCH_W + 2.0 * EAR_W, h: MIN_BAR_H });
+        let pill = pill_on_screen(&p);
+        assert_eq!(pill.y, 0.0, "flush with the top edge");
+        assert_eq!(pill.x + pill.w / 2.0, 960.0);
+        let json = serde_json::to_value(p).unwrap();
+        assert_eq!((json["edge"].as_str(), json["floating"].as_bool(), json["align"].as_str()), (Some("top"), Some(false), Some("center")));
+        // The same as the drawn notch of a screen without a menu bar (the
+        // shape Windows had before 0.1.25).
+        let before = ScreenInfo { frame: FHD, notch: None, bar_h: 0.0, work: None, menu_bar: false };
+        assert_eq!(p, place(&before, Spot::DEFAULT));
+        // Only the top chosen: the centre is the horizontal default.
+        assert_eq!(place(&screen, Spot { vertical: Some(Edge::Top), horizontal: None }), p);
+        // The default and the other seven spots still float.
+        assert!(place(&screen, Spot::DEFAULT).floating);
+        assert!(place(&screen, Spot { vertical: None, horizontal: Some(Align::Center) }).floating);
+        for spot in SPOTS {
+            assert_eq!(place(&screen, Spot::new(spot.0, spot.1)).floating, spot != TOP_CENTER, "{spot:?}");
+        }
+
+        // A taskbar on the top edge: flush under it, never over it; the
+        // default there stays the floating pill under it.
+        let work = Rect { x: 0.0, y: 48.0, w: 1920.0, h: 1032.0 };
+        let screen = windows(FHD, work);
+        let p = place(&screen, Spot::new(Edge::Top, Align::Center));
+        assert!(!p.floating);
+        assert_eq!(p.window, Rect { x: 960.0 - WINDOW_W / 2.0, y: 48.0, w: WINDOW_W, h: WINDOW_H });
+        assert_eq!(pill_on_screen(&p).y, 48.0);
+        assert!(place(&screen, Spot::DEFAULT).floating);
+
+        // A taskbar on the left: centred on the monitor, still flush with
+        // the top, off the taskbar.
+        let work = Rect { x: 62.0, y: 0.0, w: 1858.0, h: 1080.0 };
+        let p = place(&windows(FHD, work), Spot::new(Edge::Top, Align::Center));
+        assert_eq!(pill_on_screen(&p).x + p.pill.w / 2.0, 960.0);
+        assert_eq!(p.window.y, 0.0);
+        assert!(!overlaps(p.window, Rect { x: 0.0, y: 0.0, w: 62.0, h: 1080.0 }));
+
+        // Auto-hidden taskbar: the work area is the screen.
+        let p = place(&windows(FHD, FHD), Spot::new(Edge::Top, Align::Center));
+        assert_eq!((p.window.y, p.floating), (0.0, false));
+
+        // A monitor away from the origin keeps its offsets; a work area
+        // that makes no sense is the monitor.
+        let frame = Rect { x: -1920.0, y: -300.0, w: 1920.0, h: 1080.0 };
+        let p = place(&windows(frame, Rect { x: -1920.0, y: -300.0, w: 1920.0, h: 1040.0 }), Spot::new(Edge::Top, Align::Center));
+        assert_eq!((p.window.y, p.window.x + p.window.w / 2.0), (-300.0, -960.0));
+        let p = place(&windows(FHD, Rect { x: 5000.0, y: 60.0, w: 1920.0, h: 1000.0 }), Spot::new(Edge::Top, Align::Center));
+        assert_eq!(p.window.y, 0.0);
+
+        // A small screen: the window stays on it and off the taskbar.
+        let work = Rect { x: 0.0, y: 0.0, w: 400.0, h: 250.0 };
+        let p = place(&windows(Rect { x: 0.0, y: 0.0, w: 400.0, h: 290.0 }, work), Spot::new(Edge::Top, Align::Center));
+        assert!(inside(work, p.window), "{:?}", p.window);
+        assert!(inside(p.window, pill_on_screen(&p)));
+
+        // 150 %: pixels to points first, then the same.
+        let frame = from_physical(0, 0, 3840, 2160, 1.5);
+        let work = from_physical(0, 0, 3840, 2088, 1.5);
+        let p = place(&windows(frame, work), Spot::new(Edge::Top, Align::Center));
+        assert_eq!((p.window.y, p.window.x + p.window.w / 2.0, p.pill.h), (0.0, 1280.0, MIN_BAR_H));
     }
 
     #[test]

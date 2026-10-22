@@ -35,8 +35,10 @@
 // at the bottom. The shape reported to the shell is the drawn shape, so
 // the rest of the window stays click-through whichever way it grows.
 //
-// The owner's spot (Settings, `IslandPosition`): every spot but the macOS
-// default (the notch) is this floating pill, on macOS too. At the left
+// The owner's spot (Settings, `IslandPosition`): every spot but the top
+// centre is this floating pill, on macOS too. The top centre is the notch
+// shape on both systems (macOS: its default; Windows: when chosen, the
+// drawn notch flush with the top edge, `floating` false). At the left
 // or the right (`placement.align`) the shape is anchored to the pill's
 // side edge and grows inwards, never past the window (which the shell
 // keeps on the screen); at the right the row is mirrored (the face at the
@@ -442,7 +444,7 @@ export function IslandApp() {
     view && (view.hover || view.approval || view.text_open || view.hold || summaryShown || noticeShown || transcriptShown || card),
   );
 
-  // Floating (Windows, and the owner's other spots): the pill keeps to an
+  // Floating (the Windows default, and every spot but the top centre): the pill keeps to an
   // edge and grows away from it, from its side at the left and the right.
   const placed = view?.placement ?? null;
   const floating = Boolean(placed?.floating);

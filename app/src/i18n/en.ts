@@ -1086,7 +1086,7 @@ export const en = {
     positionDesc: (spot: string, isDefault: boolean) => `${spot}${isDefault ? " (the default)" : ""}`,
     positionNote: (windows: boolean): string =>
       windows
-        ? "The island keeps clear of the taskbar wherever it is. The default is the bottom center, just above the taskbar."
+        ? "At the top center the island hugs the top edge of the screen. Anywhere else it is a small floating pill. It keeps clear of the taskbar wherever it is; the default is the bottom center, just above the taskbar."
         : "At the top center the island merges with the notch. Anywhere else it is a small floating pill that keeps clear of the menu bar and the Dock, and steps aside for full-screen apps.",
     positionPicker: "Island position",
     positionIsDefault: "The default here.",

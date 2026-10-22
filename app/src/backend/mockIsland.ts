@@ -37,10 +37,13 @@
 //         bottom above a taskbar and grows upwards, &taskbar=top puts the
 //         taskbar on the top edge and the island under it. &pos=<v>-<h>
 //         (v top|middle|bottom, h left|center|right, not middle-center)
-//         puts it at the owner's spot, as Settings does: on macOS any
-//         spot but top-center is the floating pill (with a Dock drawn at
-//         the bottom), e.g. island.html?pos=bottom-right&island=done or
-//         island.html?os=windows&pos=middle-left&island=approval; on the
+//         puts it at the owner's spot, as Settings does: on either
+//         system any spot but top-center is the floating pill (with a
+//         Dock drawn at the bottom on the Mac), top-center is the notch
+//         shape flush with the top (on Windows the drawn notch, under a
+//         taskbar on the top edge), e.g. island.html?pos=bottom-right&island=done,
+//         island.html?os=windows&pos=middle-left&island=approval or
+//         island.html?os=windows&pos=top-center&island=done; on the
 //         Island screen (index.html?screen=island&island=on&pos=...) the
 //         picker shows that spot. The pointer over the desktop
 //         is the gaze; the strip under it plays a hold, a line of text, a
@@ -507,6 +510,9 @@ function spotPlacement(os: string): IslandPlacement | null {
   const edge = pos.vertical ?? (windows ? (taskbarTop ? "top" : "bottom") : "top");
   if (!windows && edge === "top" && align === "center") return null;
   if (windows && pos.vertical === undefined && pos.horizontal === undefined) return null;
+  // Windows, top centre chosen: the drawn notch flush with the top (under
+  // a taskbar on the top edge), as geometry.rs `top_band` places it.
+  if (windows && pos.vertical === "top" && align === "center") return notchPlacement(os, taskbarTop ? STAGE_TASKBAR : 0);
   const bar = windows ? 0 : stageBar(os);
   const area = windows
     ? { x: 0, y: taskbarTop ? STAGE_TASKBAR : 0, w: STAGE_W, h: STAGE_H - STAGE_TASKBAR }
@@ -555,13 +561,20 @@ function placement(os: string): IslandPlacement {
       floating: true,
     };
   }
+  return notchPlacement(os, 0);
+}
+
+/** The notch shape at the top centre, its top at `top` (a top taskbar's
+ * height on Windows, else 0): the real notch on the stage's Mac, the drawn
+ * one (184 wide, as tall as the menu bar, 24 without one) elsewhere. */
+function notchPlacement(os: string, top: number): IslandPlacement {
   const real = os === "macos" && params.get("notch") !== "0";
   const notchW = real ? 185 : 184;
   const notchH = real ? 32 : os === "macos" ? 25 : 24;
   const w = 480;
   const ear = 84;
   return {
-    window: { x: 1512 / 2 - w / 2, y: 0, w, h: 300 },
+    window: { x: 1512 / 2 - w / 2, y: top, w, h: 300 },
     notch: { x: w / 2 - notchW / 2, y: 0, w: notchW, h: notchH },
     pill: { x: w / 2 - notchW / 2 - ear, y: 0, w: notchW + 2 * ear, h: notchH },
     real_notch: real,
