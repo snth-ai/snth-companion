@@ -5,6 +5,8 @@
 // No console window next to the app on Windows (release builds).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(test)]
+mod acl_check;
 mod account;
 mod actions;
 mod approvals;
