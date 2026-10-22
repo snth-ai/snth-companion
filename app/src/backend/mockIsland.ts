@@ -15,7 +15,9 @@
 //         without Apple silicon, where it is not available. Wake by name:
 //         wake = on and listening; wakedl = its model downloading;
 //         wakecall = paused, another app uses the microphone; wakebt =
-//         paused, the only microphone is in AirPods)
+//         paused, the only microphone is in AirPods; wakemic = waiting
+//         for the microphone (on Windows: its privacy settings refused
+//         it). With &os=windows the Windows texts and file sizes)
 //   island.html?island=idle|hover|listening|screen|sending|accepted|thinking|
 //        working|driving|done|error|approval|text|offline|outdated|
 //        micdenied|asking|paused|two|shot|live|liveloading|livesent|
@@ -75,6 +77,9 @@ export const PARAKEET_SIZE = 652_183_999 + 18_202_004 + 93_939 + 885_098;
 export const PARAKEET_WIN_SIZE = 652_183_999 + 18_202_004 + 93_939 + 2_327_524;
 /** Wake by name's files (wake/mod.rs): the voice detector, whisper tiny. */
 export const WAKE_SIZE = 885_098 + 32_152_673;
+/** On Windows the voice detector is the Silero ONNX file (wake/mod.rs
+ * VAD). */
+export const WAKE_WIN_SIZE = 2_327_524 + 32_152_673;
 
 const params = new URLSearchParams(window.location.search);
 
@@ -148,8 +153,9 @@ export function stagedIslandState(os: string, links: LinkBrief[]): IslandState {
   for (const l of links) deviceStt[l.synth_id] = scenario !== "sttold";
   const model: SttModelStatus = scenario === "sttparakeet" ? { state: "missing" } : sttModelOf(scenario, STT_SIZE);
   const wakeOn = scenario.startsWith("wake") && scenario !== "wakeintel";
+  const wakeSize = win ? WAKE_WIN_SIZE : WAKE_SIZE;
   const wakeModel: SttModelStatus =
-    scenario === "wakedl" ? { state: "downloading", done: Math.round(WAKE_SIZE * 0.4), total: WAKE_SIZE } : wakeOn ? { state: "ready" } : { state: "missing" };
+    scenario === "wakedl" ? { state: "downloading", done: Math.round(wakeSize * 0.4), total: wakeSize } : wakeOn ? { state: "ready" } : { state: "missing" };
   const wakeStatus: WakeStatus = !wakeOn
     ? { state: "off" }
     : scenario === "wakedl"
@@ -158,7 +164,9 @@ export function stagedIslandState(os: string, links: LinkBrief[]): IslandState {
         ? { state: "paused", reason: "mic_busy" }
         : scenario === "wakebt"
           ? { state: "paused", reason: "bt_mic" }
-          : { state: "listening" };
+          : scenario === "wakemic"
+            ? { state: "waiting", need: "mic" }
+            : { state: "listening" };
   return {
     available: os !== "linux",
     settings: {
@@ -189,9 +197,9 @@ export function stagedIslandState(os: string, links: LinkBrief[]): IslandState {
     },
     wake: {
       ...wakeStatus,
-      available: os === "macos" && scenario !== "sttintel" && scenario !== "wakeintel",
+      available: (os === "macos" && scenario !== "sttintel" && scenario !== "wakeintel") || (win && scenario !== "wakeintel"),
       model: wakeModel,
-      size: WAKE_SIZE,
+      size: wakeSize,
       names: wakeNames("Mia", ""),
       wakes: wakeOn ? 3 : 0,
       dropped: wakeOn ? 1 : 0,

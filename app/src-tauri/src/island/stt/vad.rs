@@ -22,6 +22,18 @@ const MIN_SPAN: usize = RATE * 120 / 1000;
 /// Padding around each span, so a soft start or end is not cut off.
 const PAD: usize = RATE * 60 / 1000;
 
+/// whisper's encoder size for a piece (engine.rs, and wake by name's
+/// ears): the smallest (in 20 ms frames, a multiple of 64, at least 192 =
+/// 3.8 s) that holds this many samples with 0.16 s of room; 0 (whisper's
+/// own 30 s windows) past 29 s.
+pub fn audio_ctx(samples: usize) -> i32 {
+    if samples >= RATE * 29 {
+        return 0;
+    }
+    let need = (samples * 50 / RATE) as i32 + 8;
+    ((need + 63) / 64 * 64).clamp(192, 1500)
+}
+
 /// A frame's level in dBFS.
 fn frame_db(frame: &[f32]) -> f32 {
     let rms = (frame.iter().map(|s| s * s).sum::<f32>() / frame.len().max(1) as f32).sqrt();

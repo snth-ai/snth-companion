@@ -4245,6 +4245,7 @@ dependencies = [
  "tokio",
  "ureq 2.12.1",
  "whisper-rs",
+ "windows 0.62.2",
  "windows-sys 0.61.2",
 ]
 

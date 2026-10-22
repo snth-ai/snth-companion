@@ -22,13 +22,23 @@
 //! It pauses by itself (`pause.rs`, `system.rs`): while the app is paused,
 //! while a hold key is down, while the screen is locked, while another app
 //! records (a call). It never opens a Bluetooth microphone (`device.rs`:
-//! that turns AirPods into a phone line): with a Bluetooth default it
-//! listens on the built-in microphone, and pauses where there is none.
-//! Whisper tiny and the voice detector are their own
-//! download (`FILES`, about 32 MB, in `wake/` of the app's data folder),
+//! that turns AirPods, or any headset, into a phone line): with a
+//! Bluetooth default it listens on the built-in microphone, and pauses
+//! where there is none. Whisper tiny and the voice detector are their own
+//! download (`FILES`, about 33 MB, in `wake/` of the app's data folder),
 //! fetched when the owner turns the mode on, and in memory only while it
-//! is on. Apple silicon only (it runs whisper.cpp; the hold's
-//! speech-to-text also runs on Windows, with Parakeet).
+//! is on.
+//!
+//! Where (build.rs, cfg `wake_whisper`): Apple-silicon Macs and Windows
+//! x64, both with whisper.cpp's whisper tiny on the CPU (`ears.rs`). On
+//! Windows the voice detector is the ONNX Silero (`stt/silero.rs`, the
+//! one the hold's Parakeet uses there), the system's answers come from
+//! the microphone's consent store, the session and the MMDevice API
+//! (`system.rs`), and the processor must have AVX2 (`available`), the
+//! floor whisper.cpp is built for there. Whisper tiny rather than
+//! Parakeet as the ears on Windows: about 80 MB in memory instead of
+//! about 1.1 GB for as long as the mode is on, and the same model, prompt
+//! and `names.rs` tuning as on a Mac.
 
 pub mod device;
 pub mod listen;
@@ -36,7 +46,7 @@ pub mod names;
 pub mod pause;
 pub mod system;
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(wake_whisper)]
 pub mod ears;
 
 use std::str::FromStr;
@@ -66,14 +76,46 @@ pub const TINY: ModelFile = ModelFile {
     size: 32_152_673,
 };
 
+/// The voice detector: whisper.cpp's file on a Mac, the ONNX one where
+/// whisper.cpp's detector is not in the build (Windows), as the hold's
+/// Parakeet set has it (`model::PARAKEET_VAD`).
+#[cfg(not(all(wake_whisper, not(whisper_stt))))]
+pub const VAD: &ModelFile = &model::VAD;
+#[cfg(all(wake_whisper, not(whisper_stt)))]
+pub const VAD: &ModelFile = &model::SILERO_ONNX;
+
 /// The voice detector (the hold's own file, a copy of its own here so
 /// removing one model never breaks the other), then whisper tiny.
-pub static FILES: [&ModelFile; 2] = [&model::VAD, &TINY];
+pub static FILES: [&ModelFile; 2] = [VAD, &TINY];
 
-/// The mode exists in this build (Apple silicon: it runs whisper.cpp,
-/// which the Windows build of the hold's speech-to-text does without).
+/// The mode exists in this build and on this processor: Apple silicon,
+/// and Windows x64 with AVX2 (whisper.cpp is built for that floor there).
 pub fn available() -> bool {
-    cfg!(whisper_stt)
+    cfg!(wake_whisper) && cpu_ok()
+}
+
+/// What whisper.cpp's CPU code is built for on Windows x64
+/// (.cargo/ggml-x64.cmake): AVX2, with FMA and F16C (MSVC's AVX2 code
+/// uses both) and BMI2. Without them the first decode would stop the app
+/// on an illegal instruction. Asked once.
+#[cfg(all(wake_whisper, target_arch = "x86_64"))]
+pub fn cpu_ok() -> bool {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OK.get_or_init(|| {
+        let ok = std::is_x86_feature_detected!("avx2")
+            && std::is_x86_feature_detected!("fma")
+            && std::is_x86_feature_detected!("f16c")
+            && std::is_x86_feature_detected!("bmi2");
+        if !ok {
+            connect_core::logln!("island: wake: this processor has no AVX2: wake by name is not offered");
+        }
+        ok
+    })
+}
+
+#[cfg(not(all(wake_whisper, target_arch = "x86_64")))]
+pub fn cpu_ok() -> bool {
+    true
 }
 
 /// How often the microphone's new audio is read while listening.
@@ -88,11 +130,15 @@ const SYSTEM_EVERY: Duration = Duration::from_secs(1);
 const STALL: Duration = Duration::from_secs(3);
 /// While listening, the recording is cut back once it holds this much.
 const TRIM_AT: usize = listen::KEEP + 6 * stt::vad::RATE;
+/// Windows refused the microphone (privacy settings, "mic_denied"): the
+/// mode waits for it this long before it tries again. Windows asks
+/// nothing up front, so trying is the only way to know.
+const DENIED_RETRY: Duration = Duration::from_secs(60);
 
 /// What the Island screen shows of the mode.
 #[derive(Debug, Clone, Serialize)]
 pub struct WakeDto {
-    /// The mode exists here (Apple silicon).
+    /// The mode exists here (Apple silicon, Windows x64 with AVX2).
     pub available: bool,
     pub model: model::Status,
     /// The download, in bytes.
@@ -368,12 +414,12 @@ pub fn spawn(ctx: Arc<Ctx>) {
     }
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(wake_whisper)]
 fn load_ears(models: &Models) -> Result<Box<dyn Ears>, String> {
-    ears::WhisperEars::load(&models.path(&TINY), &models.path(&model::VAD)).map(|e| Box::new(e) as Box<dyn Ears>)
+    ears::WhisperEars::load(&models.path(&TINY), &models.path(VAD)).map(|e| Box::new(e) as Box<dyn Ears>)
 }
 
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(not(wake_whisper))]
 fn load_ears(_models: &Models) -> Result<Box<dyn Ears>, String> {
     Err("not on this system".into())
 }
@@ -408,6 +454,7 @@ fn run(ctx: &Arc<Ctx>) {
     let mut refreshed;
     let mut busy_with: Vec<String> = Vec::new();
     let mut woke_at: Option<Instant> = None;
+    let mut denied_at: Option<Instant> = None;
     loop {
         let settings = ctx.core.island();
         let on = settings.wake && available();
@@ -433,7 +480,7 @@ fn run(ctx: &Arc<Ctx>) {
             }
             busy_with = if busy { who } else { Vec::new() };
             system = (busy, system::locked());
-            mic_granted = audio::permission() == audio::MicPermission::Granted;
+            mic_granted = audio::permission() == audio::MicPermission::Granted && denied_at.is_none_or(|t| t.elapsed() >= DENIED_RETRY);
             // The default input changed, a device came or went.
             let chosen = device::choose(&system::input_devices());
             if chosen != mic {
@@ -530,6 +577,19 @@ fn run(ctx: &Arc<Ctx>) {
                 Ok(recording) => {
                     let tap = recording.tap();
                     capture = Some(Capture { recording: Some(recording), uid, tap, off: listener.now(), last_data: Instant::now() });
+                    denied_at = None;
+                }
+                Err(e) if e.starts_with("mic_denied") => {
+                    // Windows: the microphone is off for apps. Waiting
+                    // for it (Settings says so), tried again in a minute.
+                    if denied_at.is_none() {
+                        connect_core::logln!("island: wake: Windows refused the microphone (privacy settings): {e}");
+                    }
+                    denied_at = Some(Instant::now());
+                    mic_granted = false;
+                    system_at = None;
+                    wake.sleep(IDLE_TICK);
+                    continue;
                 }
                 Err(e) => {
                     connect_core::logln!("island: wake: the microphone did not open: {e}");
