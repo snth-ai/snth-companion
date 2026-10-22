@@ -543,7 +543,8 @@ html.island #root {
   .isl-root {
     transition: opacity 0.2s linear;
   }
-  .isl-root.hidden {
+  .isl-root.hidden,
+  .isl-root.hidden.isl-side {
     transform: none;
   }
   .isl-head,
