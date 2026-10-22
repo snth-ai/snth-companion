@@ -731,10 +731,17 @@ talks to `<platform>/api/app/v1/*` only. There is no override in the UI.
     off) and does nothing elsewhere; the CI's "whisper.cpp CPU floor"
     step checks ggml-cpu.lib for AVX2 and no AVX-512 code. Whisper tiny
     rather than Parakeet as the ears (`wake_real_refs` prints both on the
-    same clips): Parakeet adds about 1.07 GB while the mode is on (whisper
-    tiny about 50 MB), takes about 135 ms a check against about 40 ms,
-    and hears "Мия" said alone as "Nie." (so the name alone and the name,
-    a pause, then the request never wake). `system.rs` on Windows: another
+    same clips): Parakeet holds about 675 MB of working set on Windows
+    (1.07 GB footprint on an M1) for as long as the mode is on, against
+    about 92 MB for whisper tiny with the ONNX Silero (its commit is
+    about 435 MB, mostly untouched), takes 330 to 370 ms a check on the
+    CI runner against 150 to 200 ms (M1: 135 ms against 40 ms), and hears
+    the name said alone as "Me." / "Nie." (so "Mia." alone and "Mia.",
+    a pause, the request never wake). It is better than whisper tiny at
+    English ("Maya" and "Me and my ..." do not wake it; tiny with the
+    prompt "Мия." wakes on both, on a Mac as well for "Maya").
+    On the runner (4 vCPU, MSVC-built ggml) the listener takes 8 to 13% of
+    one core on non-stop speech without the name. `system.rs` on Windows: another
     app records = an entry of the microphone consent store
     (`HKCU\...\CapabilityAccessManager\ConsentStore\microphone`, Store
     apps and `NonPackaged` programs) with `LastUsedTimeStart` and no
