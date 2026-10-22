@@ -143,7 +143,7 @@ URL parameters stage a screen or a state directly:
 | `account` | the platform account: `signed_out` (first run, nothing linked: "Sign in with SNTH" waits about 2 s in the "browser", then shows the consent screen for Mia and Maya), `consent` (signed in, the consent screen), `two` (signed in, Mia and Maya linked), `none` (signed in, no synths: the code field), `repair` (two linked, Maya refused her token). Without it: signed out, Mia linked with a code, as before |
 | `login` | with `account=signed_out`: the sign-in fails, `denied` (Cancel in the browser) or `expired` |
 | `connectfail` | with `account=consent`: linking Maya fails, `connect_unavailable`, `synth_outdated`, `synth_unreachable` |
-| `island` | the Island screen (with `screen=island`): `off` (default), `on`, `outdated` (the synth is older than the island), `taken` (another app holds the talk key), `micdenied`, `two` (with `account=two`: Maya listens to the keys), `nolink` (on, Mia offline: the keys are released). On `island.html` (the island window on a pretend desktop): `idle` (default), `hover`, `listening`, `screen`, `sending`, `accepted`, `thinking`, `working`, `driving`, `done`, `error`, `approval`, `text`, `offline`, `outdated`, `micdenied`, `asking`, `paused`, `two`, `shot`, and for speech on this computer `live` (the words of a hold), `livesent` (the text going), `offer` (the synth's offer), `offerdl`, `offerready`, `offerfail` (the model's download after "Turn on"), and for wake by name `wakeidle` (the dot), `wakepaused` (paused for a call), `woke` (a wake recording with its words), `wokename` (the name alone); with `notch=0` (a Mac without a notch) and `os=windows` (the Windows desktop: the island floats above a taskbar at the bottom; add `taskbar=top` for a taskbar on the top edge). The strip under the desktop plays a hold, a hold with its words, the offer, a wake by name (with a request, or the name alone), a call pausing it, a line of text, an answer, a request. Speech recognition on the Island screen: `stt` (on, the model here), `sttdl` (downloading), `sttspace` (the disk is too full), `sttold` (the synth does not take text yet), `sttintel` (not available), and with `os=windows` the same scenarios with Windows' single engine (Parakeet, no choice); wake by name: `wake` (on, listening), `wakedl` (its model downloading), `wakecall` (paused: the microphone is in use), `wakebt` (paused: the only microphone is in AirPods); `sttnospace=1` makes the mock download fail for lack of space |
+| `island` | the Island screen (with `screen=island`): `off` (default), `on`, `outdated` (the synth is older than the island), `taken` (another app holds the talk key), `micdenied`, `two` (with `account=two`: Maya listens to the keys), `nolink` (on, Mia offline: the keys are released). On `island.html` (the island window on a pretend desktop): `idle` (default), `hover`, `listening`, `screen`, `sending`, `accepted`, `thinking`, `working`, `driving`, `done`, `error`, `approval`, `text`, `offline`, `outdated`, `micdenied`, `asking`, `paused`, `two`, `shot`, and for speech on this computer `live` (the words of a hold), `livesent` (the text going), `offer` (the synth's offer), `offerdl`, `offerready`, `offerfail` (the model's download after "Turn on"), and for wake by name `wakeidle` (the dot), `wakepaused` (paused for a call), `woke` (a wake recording with its words), `wokename` (the name alone); with `notch=0` (a Mac without a notch) and `os=windows` (the Windows desktop: the island floats above a taskbar at the bottom; add `taskbar=top` for a taskbar on the top edge). The strip under the desktop plays a hold, a hold with its words, the offer, a wake by name (with a request, or the name alone), a call pausing it, a line of text, an answer, a request. Speech recognition on the Island screen: `stt` (on, the model here), `sttdl` (downloading), `sttspace` (the disk is too full), `sttold` (the synth does not take text yet), `sttintel` (not available), and with `os=windows` the same scenarios with Windows' single engine (Parakeet, no choice); wake by name: `wake` (on, listening), `wakedl` (its model downloading), `wakecall` (paused: the microphone is in use), `wakebt` (paused: the only microphone is in AirPods), `wakemic` (waiting for the microphone; with `os=windows` the Windows texts and sizes); `sttnospace=1` makes the mock download fail for lack of space |
 | `faceset` | `invalid`: the synth refuses every face the editor saves |
 | `lang` | `en`, `ru` |
 | `theme` | `light`, `dark` |
@@ -673,14 +673,17 @@ talks to `<platform>/api/app/v1/*` only. There is no override in the UI.
     microphone that Windows refuses (Privacy & security > Microphone off:
     WASAPI's E_ACCESSDENIED) is reported as `mic_denied` (the island says
     the microphone is not allowed and offers the privacy settings), not as
-    a generic failure. Wake by name stays Apple silicon only.
+    a generic failure.
   - Wake by name (`src-tauri/src/island/wake/`, TZ `tz-wake-word.md` in
     the synth's repo; off by default, «Откликаться на имя» on the Island
-    screen, `IslandSettings.wake` + `wake_phrase`). Apple silicon only
-    (hidden elsewhere). Its own download in `<data dir>/wake/`: whisper
-    tiny multilingual q5_1 (`wake::TINY`, 32 MB, pinned like the hold's
-    model) and a copy of the Silero file, so deleting one model never
-    breaks the other. One thread (`island-wake`) keeps the microphone open
+    screen, `IslandSettings.wake` + `wake_phrase`). Apple silicon and
+    Windows x64 (build.rs cfg `wake_whisper`; on Windows only with AVX2,
+    FMA, F16C and BMI2, `wake::cpu_ok`; hidden elsewhere). Its own
+    download in `<data dir>/wake/`: whisper tiny multilingual q5_1
+    (`wake::TINY`, 32 MB, pinned like the hold's model) and a copy of the
+    Silero file (`wake::VAD`: whisper.cpp's ggml file on a Mac,
+    `silero_vad.onnx` on Windows), so deleting one model never breaks the
+    other. One thread (`island-wake`) keeps the microphone open
     through `audio.rs` (the hold's own capture, trimmed to the last 4 s
     with `Tap::drop_front`) and feeds `listen.rs`: the loudness against
     the room's floor finds stretches; each is checked once (after 2 s, or
@@ -717,6 +720,40 @@ talks to `<platform>/api/app/v1/*` only. There is no override in the UI.
     Air: 0.3% of one core in a quiet room with the capture, about 2.2% of
     one core on non-stop speech without the name (a decode is about 40 ms
     on two threads), 110 MB peak with whisper tiny loaded.
+  - Wake by name on Windows x64: the same listener, names and pause
+    rules. The ears (`wake/ears.rs`) are whisper tiny on whisper.cpp
+    (`whisper-rs` =0.15.1 without Metal, built by cmake + MSVC; bindgen
+    uses the runner's LLVM) and the ONNX Silero (`stt/silero.rs`, the
+    same spans as whisper.cpp's). ggml's CPU code is built for AVX2, never
+    for the build machine: `.cargo/config.toml` sets
+    `CMAKE_PROJECT_INCLUDE_BEFORE` to `.cargo/ggml-x64.cmake`, which on a
+    Windows host turns `GGML_NATIVE` off and AVX/AVX2/BMI2 on (AVX-512
+    off) and does nothing elsewhere; the CI's "whisper.cpp CPU floor"
+    step checks ggml-cpu.lib for AVX2 and no AVX-512 code. Whisper tiny
+    rather than Parakeet as the ears (`wake_real_refs` prints both on the
+    same clips): Parakeet adds about 1.07 GB while the mode is on (whisper
+    tiny about 50 MB), takes about 135 ms a check against about 40 ms,
+    and hears "Мия" said alone as "Nie." (so the name alone and the name,
+    a pause, then the request never wake). `system.rs` on Windows: another
+    app records = an entry of the microphone consent store
+    (`HKCU\...\CapabilityAccessManager\ConsentStore\microphone`, Store
+    apps and `NonPackaged` programs) with `LastUsedTimeStart` and no
+    `LastUsedTimeStop`, not this program and, for a desktop program, only
+    while a program of that file name runs (`system::consent`, tested on
+    fixtures); locked = `WTSQuerySessionInformation(WTSSessionInfoEx)`
+    says locked or the session is not the active one (the input desktop
+    as the fallback when the flag is unknown); the inputs come from the
+    MMDevice API with `PKEY_Device_EnumeratorName`, mapped to the Mac's
+    transport codes by `device::windows_transport` (BTH* = Bluetooth,
+    including the hands-free BTHHFENUM microphone; HDAUDIO/INTELAUDIO =
+    built in; USB; ROOT/SW = virtual), so `device::choose` is shared. A
+    microphone refused by Windows' privacy settings makes the mode wait
+    (`need: mic`, its own text on Windows) and try again once a minute.
+    `wake_real_refs` (ignored) runs the listener on clips with a
+    `refs.tsv`; the Windows CI makes them with the speech synthesizer
+    ("Mia, what time is it?", "Kira, ...", the name alone, the name then a
+    pause, and clips that must not wake) and runs it on the downloaded
+    files.
   - The tone of voice for a hold sent as text (`src-tauri/src/island/stt/tone/`;
     the switch "Detect tone of voice on this computer" under speech
     recognition, `IslandSettings.stt_tone`, on by default). Sent as
