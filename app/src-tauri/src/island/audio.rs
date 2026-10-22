@@ -168,6 +168,75 @@ pub fn open_error(e: String) -> String {
     }
 }
 
+/// What the stream reported while a recording ran (cpal's error
+/// callback). cpal 0.18 reports glitches there that do not stop the
+/// stream: WASAPI's data discontinuity (`Xrun`, "A buffer underrun or
+/// overrun occurred.", at any hiccup of a busy CPU: Parakeet decoding the
+/// live words, whisper listening for the name), CoreAudio's processor
+/// overload (`Xrun` too), the default device changing. So an error alone
+/// never throws a recording away (`verdict`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StreamErrors {
+    pub count: u32,
+    /// Of `count`, the glitches the stream goes on after (`is_glitch`).
+    pub glitches: u32,
+    pub first: Option<String>,
+    pub last: Option<String>,
+}
+
+impl StreamErrors {
+    pub fn add(&mut self, text: String, glitch: bool) {
+        self.count = self.count.saturating_add(1);
+        if glitch {
+            self.glitches = self.glitches.saturating_add(1);
+        }
+        if self.first.is_none() {
+            self.first = Some(text);
+        } else {
+            self.last = Some(text);
+        }
+    }
+
+    /// One line for the log: how many, the first and the last.
+    pub fn describe(&self) -> String {
+        let mut out = format!("{} stream error(s), {} of them glitches", self.count, self.glitches);
+        if let Some(f) = &self.first {
+            out.push_str(&format!("; first: {f}"));
+        }
+        if let Some(l) = &self.last {
+            out.push_str(&format!("; last: {l}"));
+        }
+        out
+    }
+}
+
+/// A stream error the stream goes on after (cpal's kinds): a buffer
+/// underrun or overrun, the route changing under a default-device stream,
+/// real-time scheduling refused.
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+pub fn is_glitch(kind: &str) -> bool {
+    matches!(kind, "Xrun" | "DeviceChanged" | "RealtimeDenied")
+}
+
+/// The least audio a recording keeps despite a stream error: a quarter of
+/// a second. Less than that after an error is a microphone that did not
+/// really run.
+pub const USABLE_AFTER_ERROR: usize = RATE as usize / 4;
+
+/// Does a stopped recording go on (Ok) or fail ("mic_failed: ...")? With
+/// no error from the stream it goes on whatever its length (a short hold
+/// is the release path's business); with errors only when it captured
+/// `USABLE_AFTER_ERROR` or more: what was heard is what the owner said,
+/// a glitch in the middle of it (or one when the stream stopped) changes
+/// nothing for it.
+pub fn verdict(samples: usize, errors: &StreamErrors) -> Result<(), String> {
+    match &errors.first {
+        None => Ok(()),
+        Some(_) if samples >= USABLE_AFTER_ERROR => Ok(()),
+        Some(first) => Err(format!("mic_failed: {first} ({}, {samples} samples)", errors.describe())),
+    }
+}
+
 #[cfg(any(target_os = "macos", windows))]
 mod capture {
     use std::sync::mpsc;
@@ -177,14 +246,17 @@ mod capture {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use cpal::{FromSample, Sample, SampleFormat, SizedSample};
 
-    use super::{level, open_error, wav, Captured, Resampler, LEVEL_EVERY, RATE};
+    use super::{is_glitch, level, open_error, verdict, wav, Captured, Resampler, StreamErrors, LEVEL_EVERY, RATE};
 
     /// A recording that runs. `finish` ends it and returns the voice;
     /// dropping it throws the recording away.
     pub struct Recording {
         stop: Option<mpsc::Sender<()>>,
-        done: mpsc::Receiver<Result<Vec<i16>, String>>,
+        done: mpsc::Receiver<Vec<i16>>,
         shared: Arc<Mutex<Shared>>,
+        /// Whose it is, for the log: "hold" (a key) or "wake" (the wake
+        /// listener's, a wake's hold once the name was heard).
+        who: &'static str,
     }
 
     /// A look at a running recording's samples (on-device speech-to-text
@@ -216,6 +288,11 @@ mod capture {
         resampler: Resampler,
         block: Vec<f32>,
         last_level: Instant,
+        /// What the stream reported (`StreamErrors`).
+        errors: StreamErrors,
+        /// The recording was taken (or dropped): the callback adds
+        /// nothing more, even when the device is slow to stop.
+        closed: bool,
     }
 
     fn mono<T>(data: &[T], channels: usize, into: &mut Vec<f32>)
@@ -235,7 +312,7 @@ mod capture {
         config: cpal::StreamConfig,
         shared: Arc<Mutex<Shared>>,
         on_level: Arc<dyn Fn(f32) + Send + Sync>,
-        failed: mpsc::Sender<String>,
+        who: &'static str,
     ) -> Result<cpal::Stream, String>
     where
         T: SizedSample + Send + 'static,
@@ -243,12 +320,16 @@ mod capture {
     {
         let channels = usize::from(config.channels);
         let mut scratch = Vec::new();
+        let errors = shared.clone();
         device
             .build_input_stream(
                 config,
                 move |data: &[T], _: &_| {
                     mono(data, channels, &mut scratch);
                     let Ok(mut sh) = shared.lock() else { return };
+                    if sh.closed {
+                        return;
+                    }
                     let sh = &mut *sh;
                     sh.resampler.push(&scratch, &mut sh.samples);
                     sh.block.extend_from_slice(&scratch);
@@ -258,24 +339,43 @@ mod capture {
                         sh.last_level = Instant::now();
                     }
                 },
-                move |e| {
-                    let _ = failed.send(e.to_string());
+                move |e: cpal::Error| {
+                    // Kept for the end of the recording (`verdict`); the
+                    // first one is logged as it comes, the rest counted.
+                    let kind = format!("{:?}", e.kind());
+                    let glitch = is_glitch(&kind);
+                    let text = format!("{e} ({kind})");
+                    let first = errors.lock().map(|mut sh| {
+                        let first = sh.errors.count == 0;
+                        sh.errors.add(text.clone(), glitch);
+                        first
+                    });
+                    if first.unwrap_or(true) {
+                        connect_core::logln!(
+                            "island: mic ({who}): the stream reported an error{}: {text}",
+                            if glitch { " (a glitch, the recording goes on)" } else { "" }
+                        );
+                    }
                 },
                 None,
             )
             .map_err(|e| e.to_string())
     }
 
-    /// Start recording from the default input. Err with a short reason
-    /// when there is no microphone or it cannot be opened.
+    /// Start recording from the default input (a key's hold). Err with a
+    /// short reason when there is no microphone or it cannot be opened.
     pub fn start(on_level: Arc<dyn Fn(f32) + Send + Sync>) -> Result<Recording, String> {
-        start_on(None, on_level)
+        open(None, on_level, "hold")
     }
 
     /// Start recording from the input with this CoreAudio UID (cpal's
     /// device id), or the default input for None. Wake by name uses it to
     /// stay off a Bluetooth headset's microphone.
     pub fn start_on(uid: Option<String>, on_level: Arc<dyn Fn(f32) + Send + Sync>) -> Result<Recording, String> {
+        open(uid, on_level, "wake")
+    }
+
+    fn open(uid: Option<String>, on_level: Arc<dyn Fn(f32) + Send + Sync>, who: &'static str) -> Result<Recording, String> {
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
         let (done_tx, done_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
@@ -286,6 +386,8 @@ mod capture {
             resampler: Resampler::new(RATE),
             block: Vec::new(),
             last_level: Instant::now(),
+            errors: StreamErrors::default(),
+            closed: false,
         }));
         let tapped = shared.clone();
         std::thread::Builder::new()
@@ -312,14 +414,13 @@ mod capture {
                 if let Ok(mut sh) = shared.lock() {
                     sh.resampler = Resampler::new(config.sample_rate);
                 }
-                let (fail_tx, fail_rx) = mpsc::channel::<String>();
                 let built = match format {
-                    SampleFormat::F32 => build::<f32>(&device, config, shared.clone(), on_level.clone(), fail_tx),
-                    SampleFormat::I16 => build::<i16>(&device, config, shared.clone(), on_level.clone(), fail_tx),
-                    SampleFormat::I32 => build::<i32>(&device, config, shared.clone(), on_level.clone(), fail_tx),
-                    SampleFormat::U16 => build::<u16>(&device, config, shared.clone(), on_level.clone(), fail_tx),
-                    SampleFormat::U8 => build::<u8>(&device, config, shared.clone(), on_level.clone(), fail_tx),
-                    SampleFormat::I8 => build::<i8>(&device, config, shared.clone(), on_level.clone(), fail_tx),
+                    SampleFormat::F32 => build::<f32>(&device, config, shared.clone(), on_level.clone(), who),
+                    SampleFormat::I16 => build::<i16>(&device, config, shared.clone(), on_level.clone(), who),
+                    SampleFormat::I32 => build::<i32>(&device, config, shared.clone(), on_level.clone(), who),
+                    SampleFormat::U16 => build::<u16>(&device, config, shared.clone(), on_level.clone(), who),
+                    SampleFormat::U8 => build::<u8>(&device, config, shared.clone(), on_level.clone(), who),
+                    SampleFormat::I8 => build::<i8>(&device, config, shared.clone(), on_level.clone(), who),
                     other => Err(format!("mic_failed: sample format {other} is not handled")),
                 };
                 let stream = match built.and_then(|s| s.play().map(|_| s).map_err(|e| e.to_string())) {
@@ -334,17 +435,20 @@ mod capture {
                 let _ = stop_rx.recv();
                 drop(stream);
                 on_level(0.0);
-                let result = match fail_rx.try_recv() {
-                    Ok(e) => Err(format!("mic_failed: {e}")),
-                    Err(_) => Ok(std::mem::take(&mut shared.lock().map(|mut s| std::mem::take(&mut s.samples)).unwrap_or_default())),
-                };
-                let _ = done_tx.send(result);
+                let samples = shared
+                    .lock()
+                    .map(|mut s| {
+                        s.closed = true;
+                        std::mem::take(&mut s.samples)
+                    })
+                    .unwrap_or_default();
+                let _ = done_tx.send(samples);
             })
             .map_err(|e| format!("mic_failed: {e}"))?;
         match ready_rx.recv_timeout(std::time::Duration::from_secs(5)) {
-            Ok(Ok(())) => Ok(Recording { stop: Some(stop_tx), done: done_rx, shared: tapped }),
+            Ok(Ok(())) => Ok(Recording { stop: Some(stop_tx), done: done_rx, shared: tapped, who }),
             Ok(Err(e)) => Err(e),
-            Err(_) => Err("mic_failed: the microphone did not start in time".into()),
+            Err(_) => Err("mic_failed: the microphone did not start in time (5 s)".into()),
         }
     }
 
@@ -353,17 +457,45 @@ mod capture {
             Tap { shared: self.shared.clone() }
         }
 
+        /// What the stream reported so far, and forget it: a wake's hold
+        /// starts with a clean slate (the listener's stream may have run
+        /// for hours).
+        pub fn take_errors(&self) -> StreamErrors {
+            self.shared.lock().map(|mut s| std::mem::take(&mut s.errors)).unwrap_or_default()
+        }
+
         /// Stop and take the voice (blocking for as long as the device
-        /// needs to stop: call it off the async runtime's threads).
+        /// needs to stop: call it off the async runtime's threads). A
+        /// stream error does not throw away what was recorded (`verdict`);
+        /// a device that does not stop in 5 s gives what it recorded so
+        /// far.
         pub fn finish(mut self) -> Result<Captured, String> {
+            let who = self.who;
             if let Some(stop) = self.stop.take() {
                 let _ = stop.send(());
             }
-            let samples = self
-                .done
-                .recv_timeout(std::time::Duration::from_secs(5))
-                .map_err(|_| "mic_failed: the recording did not end".to_string())??;
+            let samples = match self.done.recv_timeout(std::time::Duration::from_secs(5)) {
+                Ok(samples) => samples,
+                Err(_) => {
+                    connect_core::logln!("island: mic ({who}): the device did not stop in 5 s; taking what was recorded");
+                    self.shared
+                        .lock()
+                        .map(|mut s| {
+                            s.closed = true;
+                            std::mem::take(&mut s.samples)
+                        })
+                        .unwrap_or_default()
+                }
+            };
+            let errors = self.shared.lock().map(|s| s.errors.clone()).unwrap_or_default();
             let ms = samples.len() as u64 * 1000 / u64::from(RATE);
+            if let Err(e) = verdict(samples.len(), &errors) {
+                connect_core::logln!("island: mic ({who}): the recording failed ({ms} ms captured): {e}");
+                return Err(e);
+            }
+            if errors.count > 0 {
+                connect_core::logln!("island: mic ({who}): kept {ms} ms of audio despite {}", errors.describe());
+            }
             Ok(Captured { wav: wav(&samples, RATE), ms, pcm: samples })
         }
     }
@@ -372,6 +504,12 @@ mod capture {
         fn drop(&mut self) {
             if let Some(stop) = self.stop.take() {
                 let _ = stop.send(());
+                // Dropped unfinished (a slip, the wake listener closing its
+                // microphone): its errors would go unseen otherwise.
+                let errors = self.shared.lock().map(|s| s.errors.clone()).unwrap_or_default();
+                if errors.count > 1 {
+                    connect_core::logln!("island: mic ({}): closed after {}", self.who, errors.describe());
+                }
             }
         }
     }
@@ -406,6 +544,10 @@ mod capture {
     impl Recording {
         pub fn tap(&self) -> Tap {
             Tap
+        }
+
+        pub fn take_errors(&self) -> super::StreamErrors {
+            super::StreamErrors::default()
         }
 
         pub fn finish(self) -> Result<Captured, String> {
@@ -533,6 +675,69 @@ mod tests {
         }
         assert_eq!(open_error("mic_failed: sample format x".into()), "mic_failed: sample format x");
         assert_eq!(open_error("no device".into()), "mic_failed: no device");
+    }
+
+    const XRUN: &str = "A buffer underrun or overrun occurred. (Xrun)";
+
+    #[test]
+    fn a_glitch_in_a_good_recording_does_not_throw_it_away() {
+        // Sasha's report (Windows, Parakeet + wake by name): the words came
+        // live, then "the microphone did not start". WASAPI's data
+        // discontinuity is a cpal Xrun, a glitch the stream goes on after.
+        let mut errors = StreamErrors::default();
+        errors.add(XRUN.into(), is_glitch("Xrun"));
+        assert_eq!(verdict(3 * RATE as usize, &errors), Ok(()));
+        // Many glitches, and a fatal error when the stream stopped: what
+        // was heard still goes.
+        for _ in 0..40 {
+            errors.add(XRUN.into(), true);
+        }
+        errors.add("The stream configuration is no longer valid and must be rebuilt. (StreamInvalidated)".into(), is_glitch("StreamInvalidated"));
+        assert_eq!(verdict(USABLE_AFTER_ERROR, &errors), Ok(()));
+        assert_eq!((errors.count, errors.glitches), (42, 41));
+        let line = errors.describe();
+        assert!(line.starts_with("42 stream error(s), 41 of them glitches; first: A buffer underrun"), "{line}");
+        assert!(line.contains("last: The stream configuration"), "{line}");
+    }
+
+    #[test]
+    fn an_error_with_nothing_usable_fails_and_says_why() {
+        let mut errors = StreamErrors::default();
+        errors.add("The requested audio device is not available. (DeviceNotAvailable)".into(), is_glitch("DeviceNotAvailable"));
+        let e = verdict(0, &errors).unwrap_err();
+        assert!(e.starts_with("mic_failed: The requested audio device is not available."), "{e}");
+        assert!(e.contains("1 stream error(s), 0 of them glitches") && e.contains("0 samples"), "{e}");
+        assert!(verdict(USABLE_AFTER_ERROR - 1, &errors).is_err());
+        // A glitch with nothing recorded is a microphone that did not run.
+        let mut glitch = StreamErrors::default();
+        glitch.add(XRUN.into(), true);
+        assert!(verdict(100, &glitch).is_err());
+    }
+
+    #[test]
+    fn no_error_is_no_failure_whatever_the_length() {
+        let none = StreamErrors::default();
+        assert_eq!(verdict(0, &none), Ok(()));
+        assert_eq!(verdict(10, &none), Ok(()));
+        assert_eq!(verdict(120 * RATE as usize, &none), Ok(()));
+        assert_eq!(none.describe(), "0 stream error(s), 0 of them glitches");
+    }
+
+    #[test]
+    fn glitches_are_told_from_errors_that_stop_the_stream() {
+        for k in ["Xrun", "DeviceChanged", "RealtimeDenied"] {
+            assert!(is_glitch(k), "{k}");
+        }
+        for k in ["DeviceNotAvailable", "StreamInvalidated", "BackendError", "PermissionDenied", "Other"] {
+            assert!(!is_glitch(k), "{k}");
+        }
+        // The kinds as cpal 0.18 names them (`{:?}` of ErrorKind).
+        #[cfg(any(target_os = "macos", windows))]
+        {
+            assert!(is_glitch(&format!("{:?}", cpal::ErrorKind::Xrun)));
+            assert!(is_glitch(&format!("{:?}", cpal::ErrorKind::DeviceChanged)));
+            assert!(!is_glitch(&format!("{:?}", cpal::ErrorKind::StreamInvalidated)));
+        }
     }
 
     #[test]

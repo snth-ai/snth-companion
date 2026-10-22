@@ -143,7 +143,7 @@ URL parameters stage a screen or a state directly:
 | `account` | the platform account: `signed_out` (first run, nothing linked: "Sign in with SNTH" waits about 2 s in the "browser", then shows the consent screen for Mia and Maya), `consent` (signed in, the consent screen), `two` (signed in, Mia and Maya linked), `none` (signed in, no synths: the code field), `repair` (two linked, Maya refused her token). Without it: signed out, Mia linked with a code, as before |
 | `login` | with `account=signed_out`: the sign-in fails, `denied` (Cancel in the browser) or `expired` |
 | `connectfail` | with `account=consent`: linking Maya fails, `connect_unavailable`, `synth_outdated`, `synth_unreachable` |
-| `island` | the Island screen (with `screen=island`): `off` (default), `on`, `outdated` (the synth is older than the island), `taken` (another app holds the talk key), `micdenied`, `two` (with `account=two`: Maya listens to the keys), `nolink` (on, Mia offline: the keys are released). On `island.html` (the island window on a pretend desktop): `idle` (default), `hover`, `listening`, `screen`, `sending`, `accepted`, `thinking`, `working`, `driving`, `done`, `error`, `approval`, `text`, `offline`, `outdated`, `micdenied`, `asking`, `paused`, `two`, `shot`, and for speech on this computer `live` (the words of a hold), `livesent` (the text going), `offer` (the synth's offer), `offerdl`, `offerready`, `offerfail` (the model's download after "Turn on"), and for wake by name `wakeidle` (the dot), `wakepaused` (paused for a call), `woke` (a wake recording with its words), `wokename` (the name alone); with `notch=0` (a Mac without a notch) and `os=windows` (the Windows desktop: the island floats above a taskbar at the bottom; add `taskbar=top` for a taskbar on the top edge); `pos=<vertical>-<horizontal>` (`top-left`, `top-center`, `top-right`, `middle-left`, `middle-right`, `bottom-left`, `bottom-center`, `bottom-right`) puts the island at the owner's spot on either system (a Dock is drawn on the Mac), and on the Island screen (`screen=island&island=on&pos=...`) the position picker shows it. The strip under the desktop plays a hold, a hold with its words, the offer, a wake by name (with a request, or the name alone), a call pausing it, a line of text, an answer, a request. Speech recognition on the Island screen: `stt` (on, the model here), `sttdl` (downloading), `sttspace` (the disk is too full), `sttold` (the synth does not take text yet), `sttintel` (not available), and with `os=windows` the same scenarios with Windows' single engine (Parakeet, no choice); wake by name: `wake` (on, listening), `wakedl` (its model downloading), `wakecall` (paused: the microphone is in use), `wakebt` (paused: the only microphone is in AirPods), `wakemic` (waiting for the microphone; with `os=windows` the Windows texts and sizes); `sttnospace=1` makes the mock download fail for lack of space |
+| `island` | the Island screen (with `screen=island`): `off` (default), `on`, `outdated` (the synth is older than the island), `taken` (another app holds the talk key), `micdenied`, `two` (with `account=two`: Maya listens to the keys), `nolink` (on, Mia offline: the keys are released). On `island.html` (the island window on a pretend desktop): `idle` (default), `hover`, `listening`, `screen`, `sending`, `accepted`, `thinking`, `working`, `driving`, `done`, `error`, `approval`, `text`, `offline`, `outdated`, `micdenied`, `asking`, `paused`, `two`, `shot`, and for speech on this computer `live` (the words of a hold), `livesent` (the text going), `offer` (the synth's offer), `offerdl`, `offerready`, `offerfail` (the model's download after "Turn on"), and for wake by name `wakeidle` (the dot), `wakepaused` (paused for a call), `woke` (a wake recording with its words), `wokename` (the name alone); with `notch=0` (a Mac without a notch) and `os=windows` (the Windows desktop: the island floats above a taskbar at the bottom; add `taskbar=top` for a taskbar on the top edge); `pos=<vertical>-<horizontal>` (`top-left`, `top-center`, `top-right`, `middle-left`, `middle-right`, `bottom-left`, `bottom-center`, `bottom-right`) puts the island at the owner's spot on either system (a Dock is drawn on the Mac; `os=windows&pos=top-center` is the drawn notch flush with the top edge), and on the Island screen (`screen=island&island=on&pos=...`) the position picker shows it. The strip under the desktop plays a hold, a hold with its words, the offer, a wake by name (with a request, or the name alone), a call pausing it, a line of text, an answer, a request. Speech recognition on the Island screen: `stt` (on, the model here), `sttdl` (downloading), `sttspace` (the disk is too full), `sttold` (the synth does not take text yet), `sttintel` (not available), and with `os=windows` the same scenarios with Windows' single engine (Parakeet, no choice); wake by name: `wake` (on, listening), `wakedl` (its model downloading), `wakecall` (paused: the microphone is in use), `wakebt` (paused: the only microphone is in AirPods), `wakemic` (waiting for the microphone; with `os=windows` the Windows texts and sizes); `sttnospace=1` makes the mock download fail for lack of space |
 | `faceset` | `invalid`: the synth refuses every face the editor saves |
 | `lang` | `en`, `ru` |
 | `theme` | `light`, `dark` |
@@ -536,7 +536,8 @@ talks to `<platform>/api/app/v1/*` only. There is no override in the UI.
     when no taskbar is below: auto-hidden, or on a side), `edge: bottom`;
     the open island grows upwards from the face (listening and the line of
     text only widen the pill). A taskbar on the top edge puts it 8 pt under
-    the taskbar (`edge: top`, still a floating pill). Pixels to points at
+    the taskbar (`edge: top`, still a floating pill). Top centre chosen
+    in Settings is the drawn notch instead (see Position). Pixels to points at
     the monitor's own scale; the poller asks for the placement again every
     3 s and moves the window only when it changed.
   - Position (Settings, "Where it sits"; `IslandSettings.position`,
@@ -546,7 +547,12 @@ talks to `<platform>/api/app/v1/*` only. There is no override in the UI.
     eight spots, the middle of the screen is not one (middle + center is
     refused by the command and read as the default). The default spot is
     exactly the placement above on each system (macOS top centre at the
-    notch, Windows bottom centre with the top-taskbar rule). Every other
+    notch, Windows bottom centre with the top-taskbar rule). Windows top
+    centre chosen is the macOS no-notch shape, as Windows had it before
+    0.1.25: the drawn 184 pt notch with its two 84 pt ears, 24 pt
+    (`MIN_BAR_H`) tall, flush with the monitor's top edge and centred on
+    the monitor (flush under a taskbar on the top edge: the work area's
+    top), `floating: false`, opening downwards. Every other
     spot, macOS included, is the floating 84 x 28 pill inside the usable
     area (Windows work area; macOS `NSScreen.visibleFrame`, the screen less
     the menu bar and a visible Dock, and never above the menu bar or the
@@ -585,7 +591,22 @@ talks to `<platform>/api/app/v1/*` only. There is no override in the UI.
     after `AVCaptureDevice` says the microphone is allowed (asked once,
     `NSMicrophoneUsageDescription`, entitlement
     `com.apple.security.device.audio-input`, checked by the release
-    script).
+    script). Stream errors (cpal's error callback) are collected
+    (`audio::StreamErrors`, the first one logged as it comes) and judged
+    at the stop (`audio::verdict`): with a quarter of a second or more
+    captured the recording goes on and the log says how many errors it
+    had; only less than that after an error is `mic_failed`. cpal 0.18
+    reports glitches the stream goes on after (WASAPI data discontinuity
+    and CoreAudio overload as `Xrun`, a default-device change): up to
+    0.1.28 any one of them, even hours earlier in the wake listener's
+    stream, threw a finished hold away as "The microphone did not start".
+    A device that does not stop in 5 s gives what it recorded. Every
+    `mic_*` notice logs its path ("key hold, opening the microphone",
+    "wake hold / key hold, stopping the recording at the release") in
+    `stderr.log`; the wake listener's failed opens are never a notice,
+    retried quietly with a growing wait (0.5 s up to 30 s,
+    `wake::reopen_backoff`) and logged with why it was opening ("first
+    open", "reopen after a wake", "after a stall", ...).
   - Screenshot (`shot.rs`): at the press, the app's own helper runtime
     (`get_desktop_state`, the same direct runtime that reads the list of
     apps, never the synth's pipe); macOS falls back to `screencapture -D`

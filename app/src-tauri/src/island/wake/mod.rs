@@ -135,6 +135,28 @@ const TRIM_AT: usize = listen::KEEP + 6 * stt::vad::RATE;
 /// nothing up front, so trying is the only way to know.
 const DENIED_RETRY: Duration = Duration::from_secs(60);
 
+/// The microphone did not open for the listener (any reason but a
+/// refusal): how long to wait before try `fails + 1`. Quiet and growing:
+/// the owner did nothing, so nothing is shown; a device that comes back
+/// is found within half a minute.
+fn reopen_backoff(fails: u32) -> Duration {
+    match fails {
+        0 => Duration::ZERO,
+        1 => Duration::from_millis(500),
+        2 => Duration::from_secs(1),
+        3 => Duration::from_secs(2),
+        4 => Duration::from_secs(5),
+        5 => Duration::from_secs(10),
+        _ => Duration::from_secs(30),
+    }
+}
+
+/// Which failed tries are logged: the first three, then every tenth (the
+/// log keeps the story without a line every half minute for hours).
+fn log_open_failure(fails: u32) -> bool {
+    fails <= 3 || fails % 10 == 0
+}
+
 /// What the Island screen shows of the mode.
 #[derive(Debug, Clone, Serialize)]
 pub struct WakeDto {
@@ -347,6 +369,12 @@ fn start(ctx: &Arc<Ctx>, recording: audio::Recording) -> Result<u64, (audio::Rec
         stt::Route::Synth(why) => super::Speech::Synth(why),
     };
     let tone = super::start_tone(ctx, toned, &recording, &speech);
+    // The listening stream may have run for hours: what it reported
+    // before the name is logged here, not counted against the request.
+    let before = recording.take_errors();
+    if before.count > 0 {
+        connect_core::logln!("island: wake: the listening stream had {} before the name", before.describe());
+    }
     {
         let mut running = ctx.island.running.lock().unwrap();
         let mut inner = ctx.island.inner.lock().unwrap();
@@ -455,6 +483,11 @@ fn run(ctx: &Arc<Ctx>) {
     let mut busy_with: Vec<String> = Vec::new();
     let mut woke_at: Option<Instant> = None;
     let mut denied_at: Option<Instant> = None;
+    // Why the microphone is opened next (for the log), and the failed
+    // tries since it last opened (`reopen_backoff`).
+    let mut open_why: &'static str = "first open";
+    let mut open_fails: u32 = 0;
+    let mut open_retry_at: Option<Instant> = None;
     loop {
         let settings = ctx.core.island();
         let on = settings.wake && available();
@@ -468,6 +501,7 @@ fn run(ctx: &Arc<Ctx>) {
         if listener.woke() && wake.active.load(Ordering::Acquire) == 0 {
             listener.cooldown();
             capture = None;
+            open_why = "reopen after a wake";
         }
         let woke = wake.active.load(Ordering::Acquire) != 0;
         refreshed = false;
@@ -550,7 +584,10 @@ fn run(ctx: &Arc<Ctx>) {
         if !status.listens() {
             if capture.take().is_some() {
                 listener.reset();
+                open_why = "reopen after a pause";
             }
+            open_fails = 0;
+            open_retry_at = None;
             woke_at = None;
             wake.sleep(IDLE_TICK);
             continue;
@@ -564,20 +601,32 @@ fn run(ctx: &Arc<Ctx>) {
         if capture.as_ref().is_some_and(|c| c.recording.is_some() && c.last_data.elapsed() > STALL) {
             connect_core::logln!("island: wake: the microphone went quiet; opening it again");
             capture = None;
+            open_why = "reopen after a stall";
         }
         // Another microphone was chosen: open that one (never during a
         // wake, whose recording is the hold's now).
         if capture.as_ref().is_some_and(|c| c.recording.is_some() && c.uid.as_deref() != mic.uid()) {
             capture = None;
             listener.reset();
+            open_why = "another microphone";
         }
         if capture.is_none() {
+            // A failed open waits its turn, quietly.
+            if open_retry_at.is_some_and(|t| Instant::now() < t) {
+                wake.sleep(IDLE_TICK);
+                continue;
+            }
             let uid = mic.uid().map(String::from);
             match audio::start_on(uid.clone(), level_to_island(ctx)) {
                 Ok(recording) => {
                     let tap = recording.tap();
                     capture = Some(Capture { recording: Some(recording), uid, tap, off: listener.now(), last_data: Instant::now() });
                     denied_at = None;
+                    if open_fails > 0 {
+                        connect_core::logln!("island: wake: the microphone opened ({open_why}) after {open_fails} failed tries");
+                    }
+                    open_fails = 0;
+                    open_retry_at = None;
                 }
                 Err(e) if e.starts_with("mic_denied") => {
                     // Windows: the microphone is off for apps. Waiting
@@ -592,8 +641,19 @@ fn run(ctx: &Arc<Ctx>) {
                     continue;
                 }
                 Err(e) => {
-                    connect_core::logln!("island: wake: the microphone did not open: {e}");
-                    wake.sleep(Duration::from_secs(5));
+                    // Never a notice: the owner did nothing. Tried again
+                    // later and later (`reopen_backoff`), logged with the
+                    // path so a report can be read.
+                    open_fails = open_fails.saturating_add(1);
+                    let wait = reopen_backoff(open_fails);
+                    if log_open_failure(open_fails) {
+                        connect_core::logln!(
+                            "island: wake: the microphone did not open ({open_why}, try {open_fails}, again in {:.1} s): {e}",
+                            wait.as_secs_f32()
+                        );
+                    }
+                    open_retry_at = Some(Instant::now() + wait);
+                    wake.sleep(IDLE_TICK);
                     continue;
                 }
             }
@@ -645,6 +705,7 @@ fn run(ctx: &Arc<Ctx>) {
                 connect_core::logln!("island: wake: sent after {why} ({secs:.1} s after the name)");
                 end(ctx, seq, true);
                 capture = None;
+                open_why = "reopen after a wake";
             }
             Some(Event::Drop(why)) => {
                 let seq = wake.active.load(Ordering::Acquire);
@@ -653,6 +714,7 @@ fn run(ctx: &Arc<Ctx>) {
                 connect_core::logln!("island: wake: sent nothing: {why}");
                 end(ctx, seq, false);
                 capture = None;
+                open_why = "reopen after a wake";
             }
             None => {}
         }
@@ -662,3 +724,19 @@ fn run(ctx: &Arc<Ctx>) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod reopen_tests {
+    use super::*;
+
+    #[test]
+    fn a_microphone_that_does_not_open_is_tried_again_later_and_later_and_quietly() {
+        assert_eq!(reopen_backoff(0), Duration::ZERO);
+        let waits: Vec<Duration> = (1..=8).map(reopen_backoff).collect();
+        assert!(waits.windows(2).all(|w| w[0] <= w[1]), "never sooner: {waits:?}");
+        assert!(waits[0] <= Duration::from_secs(1), "the first retry is quick (a device busy for a moment)");
+        assert_eq!(reopen_backoff(1000), Duration::from_secs(30), "capped: a device that comes back is found");
+        let logged: Vec<u32> = (1..=40).filter(|n| log_open_failure(*n)).collect();
+        assert_eq!(logged, vec![1, 2, 3, 10, 20, 30, 40]);
+    }
+}
