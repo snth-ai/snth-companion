@@ -522,6 +522,13 @@ export interface IslandPlacement {
   pill: IslandRect;
   /** A real notch (the shape merges with it) or one drawn as if. */
   real_notch: boolean;
+  /** The screen edge the island keeps to; the open island grows away
+   * from it. macOS: always top. Windows: bottom (above the taskbar), top
+   * under a taskbar on the top edge. Missing from an older shell: top. */
+  edge?: "top" | "bottom";
+  /** A free-standing pill with every corner rounded (Windows), not a
+   * shape flush with the screen's top edge. */
+  floating?: boolean;
 }
 
 export interface IslandSynth {

@@ -1,10 +1,14 @@
 // Only in a plain browser (island.html): the island window on a pretend
-// desktop with a menu bar and, on a Mac with one, the notch. The pointer
-// over the desktop is the gaze; the strip under it plays the island's
-// moments. None of this ships in the app.
+// desktop with a menu bar and, on a Mac with one, the notch, or (with
+// &os=windows) a Windows desktop with the taskbar at the bottom, the
+// island floating just above it (&taskbar=top: the taskbar on the top
+// edge, the island under it). The pointer over the desktop is the gaze;
+// the strip under it plays the island's moments. None of this ships in
+// the app.
 
 import { useEffect, useState } from "react";
 import { mockBackend } from "../backend";
+import { STAGE_H, STAGE_W } from "../backend/mockIsland";
 import { IslandApp } from "./IslandApp";
 
 const params = new URLSearchParams(window.location.search);
@@ -57,21 +61,25 @@ export function IslandStage() {
   const [, setTick] = useState(0);
   useEffect(() => win.subscribe(() => setTick((t) => t + 1)), [win]);
   const barAway = win.fullScreen && !win.barShown;
-  const desktopW = 1512;
+  const desktopW = STAGE_W;
   const frameLeft = desktopW / 2 - p.window.w / 2;
+  const frameTop = p.window.y;
   const mac = win.view.os === "macos";
+  const windows = win.view.os === "windows";
+  const taskbarTop = windows && p.edge === "top";
 
   return (
     <div className="isl-stage">
       <div
         className={`isl-desktop${mac ? "" : " win"}${win.fullScreen ? " full" : ""}`}
-        style={{ width: desktopW }}
+        style={{ width: desktopW, height: STAGE_H }}
         onMouseMove={(e) => {
           const box = e.currentTarget.getBoundingClientRect();
           const x = e.clientX - box.left;
           const y = e.clientY - box.top;
           setPointer({ x, y });
-          win.pointer(x - frameLeft, y);
+          // Windows has no menu bar to bring the island back.
+          win.pointer(x - frameLeft, y - frameTop, windows ? Infinity : y);
           win.setHover(Boolean((e.target as HTMLElement).closest(".isl-shape")));
         }}
         onMouseLeave={() => win.setHover(false)}
@@ -86,13 +94,29 @@ export function IslandStage() {
           </div>
         ) : null}
         {p.real_notch ? <div className="isl-hw-notch" style={{ width: p.notch.w, height: p.notch.h, left: desktopW / 2 - p.notch.w / 2 }} /> : null}
-        <div className="isl-frame" style={{ left: frameLeft, width: p.window.w, height: p.window.h }}>
+        {windows ? (
+          <div className={`isl-taskbar${taskbarTop ? " top" : ""}`} style={taskbarTop ? { top: 0 } : { bottom: 0 }}>
+            <i />
+            <i />
+            <i />
+            <i />
+            <i />
+            <span className="isl-taskbar-tray">
+              14:32
+              <br />
+              22.10.2026
+            </span>
+          </div>
+        ) : null}
+        <div className="isl-frame" style={{ left: frameLeft, top: frameTop, width: p.window.w, height: p.window.h }}>
           <IslandApp />
         </div>
         {pointer ? null : (
-          <div className="isl-stage-hint">
+          <div className="isl-stage-hint" style={windows && !taskbarTop ? { top: 40, bottom: "auto" } : undefined}>
             {win.fullScreen
-              ? "Full screen: the island is away. Move the pointer to the very top edge: the menu bar and the island come in."
+              ? windows
+                ? "Full screen: the island is away until a key is held, a request or an answer comes."
+                : "Full screen: the island is away. Move the pointer to the very top edge: the menu bar and the island come in."
               : "Move the pointer over the desktop: the eyes follow it. Hover the island to open it."}
           </div>
         )}
@@ -156,6 +180,9 @@ export function IslandStage() {
         </button>
         <button type="button" className="btn small" onClick={() => setParam("os", params.get("os") === "windows" ? null : "windows")}>
           macOS / Windows
+        </button>
+        <button type="button" className="btn small" aria-pressed={taskbarTop} onClick={() => setParam("taskbar", params.get("taskbar") === "top" ? null : "top")}>
+          Windows taskbar on top
         </button>
         <button type="button" className="btn small" onClick={() => setParam("lang", params.get("lang") === "ru" ? "en" : "ru")}>
           EN / RU

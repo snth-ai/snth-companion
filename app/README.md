@@ -143,7 +143,7 @@ URL parameters stage a screen or a state directly:
 | `account` | the platform account: `signed_out` (first run, nothing linked: "Sign in with SNTH" waits about 2 s in the "browser", then shows the consent screen for Mia and Maya), `consent` (signed in, the consent screen), `two` (signed in, Mia and Maya linked), `none` (signed in, no synths: the code field), `repair` (two linked, Maya refused her token). Without it: signed out, Mia linked with a code, as before |
 | `login` | with `account=signed_out`: the sign-in fails, `denied` (Cancel in the browser) or `expired` |
 | `connectfail` | with `account=consent`: linking Maya fails, `connect_unavailable`, `synth_outdated`, `synth_unreachable` |
-| `island` | the Island screen (with `screen=island`): `off` (default), `on`, `outdated` (the synth is older than the island), `taken` (another app holds the talk key), `micdenied`, `two` (with `account=two`: Maya listens to the keys), `nolink` (on, Mia offline: the keys are released). On `island.html` (the island window on a pretend desktop): `idle` (default), `hover`, `listening`, `screen`, `sending`, `accepted`, `thinking`, `working`, `driving`, `done`, `error`, `approval`, `text`, `offline`, `outdated`, `micdenied`, `asking`, `paused`, `two`, `shot`, and for speech on this computer `live` (the words of a hold), `livesent` (the text going), `offer` (the synth's offer), `offerdl`, `offerready`, `offerfail` (the model's download after "Turn on"), and for wake by name `wakeidle` (the dot), `wakepaused` (paused for a call), `woke` (a wake recording with its words), `wokename` (the name alone); with `notch=0` (a Mac without a notch) and `os=windows`. The strip under the desktop plays a hold, a hold with its words, the offer, a wake by name (with a request, or the name alone), a call pausing it, a line of text, an answer, a request. Speech recognition on the Island screen: `stt` (on, the model here), `sttdl` (downloading), `sttspace` (the disk is too full), `sttold` (the synth does not take text yet), `sttintel` (not available); wake by name: `wake` (on, listening), `wakedl` (its model downloading), `wakecall` (paused: the microphone is in use), `wakebt` (paused: the only microphone is in AirPods); `sttnospace=1` makes the mock download fail for lack of space |
+| `island` | the Island screen (with `screen=island`): `off` (default), `on`, `outdated` (the synth is older than the island), `taken` (another app holds the talk key), `micdenied`, `two` (with `account=two`: Maya listens to the keys), `nolink` (on, Mia offline: the keys are released). On `island.html` (the island window on a pretend desktop): `idle` (default), `hover`, `listening`, `screen`, `sending`, `accepted`, `thinking`, `working`, `driving`, `done`, `error`, `approval`, `text`, `offline`, `outdated`, `micdenied`, `asking`, `paused`, `two`, `shot`, and for speech on this computer `live` (the words of a hold), `livesent` (the text going), `offer` (the synth's offer), `offerdl`, `offerready`, `offerfail` (the model's download after "Turn on"), and for wake by name `wakeidle` (the dot), `wakepaused` (paused for a call), `woke` (a wake recording with its words), `wokename` (the name alone); with `notch=0` (a Mac without a notch) and `os=windows` (the Windows desktop: the island floats above a taskbar at the bottom; add `taskbar=top` for a taskbar on the top edge). The strip under the desktop plays a hold, a hold with its words, the offer, a wake by name (with a request, or the name alone), a call pausing it, a line of text, an answer, a request. Speech recognition on the Island screen: `stt` (on, the model here), `sttdl` (downloading), `sttspace` (the disk is too full), `sttold` (the synth does not take text yet), `sttintel` (not available); wake by name: `wake` (on, listening), `wakedl` (its model downloading), `wakecall` (paused: the microphone is in use), `wakebt` (paused: the only microphone is in AirPods); `sttnospace=1` makes the mock download fail for lack of space |
 | `faceset` | `invalid`: the synth refuses every face the editor saves |
 | `lang` | `en`, `ru` |
 | `theme` | `light`, `dark` |
@@ -528,7 +528,17 @@ talks to `<platform>/api/app/v1/*` only. There is no override in the UI.
     plus two 84 pt ears (face left, status right), as tall as the notch;
     without one the same shape is drawn as if there were a 184 pt notch, as
     tall as the menu bar. Placed again on
-    `NSApplicationDidChangeScreenParametersNotification`.
+    `NSApplicationDidChangeScreenParametersNotification`. Windows (no menu
+    bar; the top is tabs and title bars): the island floats at the bottom
+    centre of the primary monitor's work area (`Monitor::work_area`, the
+    screen less the taskbar), a free-standing 84 x 28 pt pill with every
+    corner rounded, 8 pt above the taskbar (12 pt above the screen's edge
+    when no taskbar is below: auto-hidden, or on a side), `edge: bottom`;
+    the open island grows upwards from the face (listening and the line of
+    text only widen the pill). A taskbar on the top edge puts it 8 pt under
+    the taskbar (`edge: top`, still a floating pill). Pixels to points at
+    the monitor's own scale; the poller asks for the placement again every
+    3 s and moves the window only when it changed.
   - Clicks: the webview reports the shape and the face centre
     (`island_layout`); a poller in Rust reads the pointer (macOS
     `CGEventGetLocation`, Windows `GetCursorPos`) only while the island is

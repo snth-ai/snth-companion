@@ -23,6 +23,17 @@
 // island's right ear (a hollow ring while it paused by itself; hovering
 // says why). The name heard, the island opens as for a hold; a click on
 // it cancels the wake.
+//
+// Floating (Windows, `placement.floating`): no notch to merge with, so
+// the closed island is a small free-standing pill with the face, every
+// corner rounded, kept to the bottom edge above the taskbar
+// (`placement.edge` "bottom"; "top" under a taskbar on the top edge).
+// The face and a one-line row (the name and the status, or the line of
+// text) stay at that edge: listening and the line of text only widen the
+// pill sideways; everything else (a summary, a request, the words of a
+// hold, the buttons) is a card that grows away from the edge, upwards
+// at the bottom. The shape reported to the shell is the drawn shape, so
+// the rest of the window stays click-through whichever way it grows.
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { quickAnswer } from "../approval/ApprovalView";
@@ -50,20 +61,32 @@ const GAZE_REACH = 600;
 const NEAR_AROUND = 10;
 const NEAR_BELOW = 48;
 
-/** Is the pointer on the island's shape or just below it? Rebuilt from the
- * gaze vector and the face centre the shell measures it from. */
-function pointerOnIsland(g: { x: number; y: number }, shape: HTMLElement, face: HTMLElement): boolean {
+/** Is the pointer on the island's shape or just below it (above it, for
+ * an island at the bottom edge)? Rebuilt from the gaze vector and the
+ * face centre the shell measures it from. */
+function pointerOnIsland(g: { x: number; y: number }, shape: HTMLElement, face: HTMLElement, atBottom = false): boolean {
   if (Math.hypot(g.x, g.y) >= 0.999) return false; // clamped: farther than the reach
   const box = shape.getBoundingClientRect();
   const f = face.getBoundingClientRect();
   const px = f.x + f.width / 2 + g.x * GAZE_REACH;
   const py = f.y + f.height / 2 + g.y * GAZE_REACH;
-  return px >= box.left - NEAR_AROUND && px <= box.right + NEAR_AROUND && py >= box.top - NEAR_AROUND && py <= box.bottom + NEAR_BELOW;
+  const above = atBottom ? NEAR_BELOW : NEAR_AROUND;
+  const below = atBottom ? NEAR_AROUND : NEAR_BELOW;
+  return px >= box.left - NEAR_AROUND && px <= box.right + NEAR_AROUND && py >= box.top - above && py <= box.bottom + below;
 }
 
 /** How long the island takes to open or close: the shape and the face
  * together, on one clock and one curve (`useMotion`). */
 const MOVE_MS = 420;
+
+/** The floating island (Windows): the open row at the edge (the face and
+ * one line), the width when only that row is open (listening, the line
+ * of text), the width of the open card, and the slot at the closed
+ * pill's right end for the status glyph or the wake dot. */
+const FLOAT_ROW = 34;
+const FLOAT_WIDE_W = 300;
+const FLOAT_CARD_W = 360;
+const FLOAT_SLOT = 22;
 
 /** What the face shows, from what the island knows. */
 export function faceStateOf(v: IslandView, now: number): FaceState {
@@ -92,6 +115,25 @@ function useClock(active: boolean): number {
     return () => window.clearInterval(id);
   }, [active]);
   return active ? now : Date.now();
+}
+
+/** Does the right ear (`Glyph`) show anything in this state? */
+function glyphShows(state: FaceState, sending: boolean): boolean {
+  switch (state) {
+    case "listening":
+    case "approval":
+    case "error":
+    case "driving":
+      return false;
+    case "accepted":
+    case "done":
+    case "thinking":
+    case "working":
+    case "offline":
+      return true;
+    default:
+      return sending;
+  }
 }
 
 /** The right ear. Listening, a request, an error and driving have their
@@ -195,11 +237,23 @@ function reducedMotion(): boolean {
  * as the shape shows it. Every size on the island (the shape's width,
  * height and corners, the face's size and place) is read from these in
  * the same frame, so the face never runs ahead of the shape or lags it.
- * `moving` is false once everything has arrived. */
-function useMotion(open: boolean, bodyH: number): { open: number; body: number; moving: boolean } {
+ * `moving` is false once everything has arrived.
+ *
+ * Floating only (`floating`): `openW` (the open width: the row alone or
+ * the card) follows the body's rule, and `closedW` (the closed width:
+ * the pill makes room for its glyph) slides once the pill was placed.
+ * For the notch both are constants of the placement and are taken as
+ * they come, the way they always were. */
+function useMotion(
+  open: boolean,
+  bodyH: number,
+  openW: number,
+  closedW: number,
+  floating: boolean,
+): { open: number; body: number; openW: number; closedW: number; moving: boolean } {
   const target = open ? 1 : 0;
-  const tw = useRef<{ open: Tween; body: Tween } | null>(null);
-  if (tw.current === null) tw.current = { open: still(target), body: still(bodyH) };
+  const tw = useRef<{ open: Tween; body: Tween; openW: Tween; closedW: Tween } | null>(null);
+  if (tw.current === null) tw.current = { open: still(target), body: still(bodyH), openW: still(openW), closedW: still(closedW) };
   const [now, setNow] = useState(() => performance.now());
 
   // New targets, before the frame is drawn: from wherever the island is.
@@ -224,18 +278,27 @@ function useMotion(open: boolean, bodyH: number): { open: number; body: number; 
       c.body = reduce || !settledOpen ? still(bodyH) : { from: valueAt(c.body, t), to: bodyH, start: t, ms: MOVE_MS };
       changed = true;
     }
+    if (open && c.openW.to !== openW) {
+      const settledOpen = c.open.to === 1 && !moving(c.open, t);
+      c.openW = reduce || !settledOpen || !floating ? still(openW) : { from: valueAt(c.openW, t), to: openW, start: t, ms: MOVE_MS };
+      changed = true;
+    }
+    if (c.closedW.to !== closedW) {
+      c.closedW = reduce || !floating || c.closedW.to <= 0 ? still(closedW) : { from: valueAt(c.closedW, t), to: closedW, start: t, ms: MOVE_MS };
+      changed = true;
+    }
     if (changed) setNow(t);
-  }, [target, open, bodyH]);
+  }, [target, open, bodyH, openW, closedW, floating]);
 
   const c = tw.current;
-  const busy = moving(c.open, now) || moving(c.body, now);
+  const busy = moving(c.open, now) || moving(c.body, now) || moving(c.openW, now) || moving(c.closedW, now);
   // A frame after a frame while anything moves.
   useEffect(() => {
     if (!busy) return;
     const id = requestAnimationFrame(() => setNow(performance.now()));
     return () => cancelAnimationFrame(id);
   });
-  return { open: valueAt(c.open, now), body: valueAt(c.body, now), moving: busy };
+  return { open: valueAt(c.open, now), body: valueAt(c.body, now), openW: valueAt(c.openW, now), closedW: valueAt(c.closedW, now), moving: busy };
 }
 
 function SttCardView(props: { card: SttCard; t: ReturnType<typeof stringsFor>["island"]["w"] }) {
@@ -368,7 +431,20 @@ export function IslandApp() {
     view && (view.hover || view.approval || view.text_open || view.hold || summaryShown || noticeShown || transcriptShown || card),
   );
 
-  const motion = useMotion(open, bodyH);
+  // Floating (Windows): the pill keeps to an edge and grows away from it.
+  const placed = view?.placement ?? null;
+  const floating = Boolean(placed?.floating);
+  const atBottom = floating && placed?.edge === "bottom";
+  const winW = placed?.window.w ?? 480;
+  const pillW = placed?.pill.w ?? 0;
+  const wakeNow: WakeStatus = view?.wake ?? { state: "off" };
+  const wakeDot = state === "idle" && !open && (wakeNow.state === "listening" || wakeNow.state === "paused");
+  const slot = floating && (glyphShows(state, Boolean(view?.sending)) || wakeDot);
+  // Open: only the row (listening, the line of text) widens sideways; a
+  // card (anything in the body) is wider.
+  const openWTarget = floating ? Math.min(bodyH > 0 ? FLOAT_CARD_W : FLOAT_WIDE_W, winW - 8) : Math.min(OPEN_W, winW - 8);
+  const closedWTarget = pillW + (slot ? FLOAT_SLOT : 0);
+  const motion = useMotion(open, bodyH, openWTarget, closedWTarget, floating);
   const settled = !motion.moving;
 
   // The line of text takes the keyboard when it opens.
@@ -417,7 +493,7 @@ export function IslandApp() {
   useLayoutEffect(() => {
     const shape = shapeRef.current;
     const faceEl = faceRef.current;
-    setPointerOn(Boolean(gaze && !gazeAgent && shape && faceEl && pointerOnIsland(gaze, shape, faceEl)));
+    setPointerOn(Boolean(gaze && !gazeAgent && shape && faceEl && pointerOnIsland(gaze, shape, faceEl, atBottom)));
   });
 
   if (!view || !view.placement) return null;
@@ -428,7 +504,7 @@ export function IslandApp() {
   // The shape, from the one motion: closed is the pill, open is the
   // wide island as tall as its body.
   const k = motion.open;
-  const openW = Math.min(OPEN_W, p.window.w - 8);
+  const openW = motion.openW;
   const width = p.pill.w + (openW - p.pill.w) * k;
   const height = p.pill.h + (notchH + motion.body - p.pill.h) * k;
   const closedR = Math.min(12, p.pill.h / 2);
@@ -485,6 +561,201 @@ export function IslandApp() {
   const faceLeft = 8 + 8 * k;
   const faceTop = ((notchH - small) / 2) * (1 - k) + (notchH + 2) * k;
 
+  // The parts both layouts show, the same elements in both.
+  const wakeDotNode = wakeDot ? (
+    <span
+      className={`isl-wake${wake.state === "paused" ? " paused" : ""}`}
+      title={wake.state === "paused" ? t.wakePaused[wake.reason] : t.wakeHint(name)}
+      aria-label={wake.state === "paused" ? t.wakePaused[wake.reason] : t.wakeHint(name)}
+    />
+  ) : null;
+  const wakeNoteNode = wakeNote ? <div className="isl-wake-note">{wakeNote}</div> : null;
+  const liveNode = transcriptShown ? (
+    <div className={`isl-live${view.hold ? "" : " sent"}`} aria-live="polite">
+      {tailOf(transcript)}
+    </div>
+  ) : sttLoadingShown ? (
+    <div className="isl-live loading">{t.sttLoading}</div>
+  ) : null;
+  const noticeNode = notice ? (
+    <div className="isl-notice" role="alert">
+      {notice}
+      {view.notice?.code === "mic_denied" ? (
+        <button type="button" className="isl-btn" onClick={() => void backend.islandMic()}>
+          {t.micOpen}
+        </button>
+      ) : null}
+    </div>
+  ) : null;
+  const cardNode = card && !approval ? <SttCardView card={card} t={t} /> : null;
+  const approvalNode =
+    approval && quick ? (
+      <div className="isl-approval">
+        <div className="isl-ask-title">{quick.title}</div>
+        <div className="isl-row">
+          <button type="button" className="isl-btn" onClick={() => void backend.approvalAnswer(approval.id, false, "once").finally(refresh)}>
+            {t.deny}
+          </button>
+          {quick.unknown ? null : (
+            <button type="button" className="isl-btn primary" onClick={() => void backend.approvalAnswer(approval.id, true, quick.duration, quick.hours).finally(refresh)}>
+              {t.allow}
+            </button>
+          )}
+        </div>
+      </div>
+    ) : null;
+  const inputNode = view.text_open ? (
+    <input
+      ref={inputRef}
+      value={text}
+      maxLength={4000}
+      placeholder={t.textPlaceholder(name)}
+      title={floating ? t.textHint : undefined}
+      onChange={(e) => setText(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+          e.preventDefault();
+          void backend.islandTextSubmit(text);
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          void backend.islandTextCancel();
+        }
+      }}
+    />
+  ) : null;
+  const buttonsNode =
+    view.hover && !view.text_open && !approval ? (
+      <div className="isl-row">
+        {view.synths.length > 1 ? (
+          <div className="isl-synths" role="radiogroup" aria-label={t.switchSynth}>
+            {view.synths.map((sy) => (
+              <button
+                key={sy.id}
+                type="button"
+                role="radio"
+                aria-checked={sy.id === view.synth?.id}
+                className={`isl-chip${sy.online ? "" : " off"}`}
+                onClick={() => void backend.islandSelectSynth(sy.id)}
+              >
+                {sy.name}
+              </button>
+            ))}
+          </div>
+        ) : null}
+        <span className="isl-spacer" />
+        {!view.paused && (view.driving || m?.stage === "working" || m?.stage === "accepted") ? (
+          <button type="button" className="isl-btn danger" onClick={() => void backend.islandStop()}>
+            {t.stop}
+          </button>
+        ) : null}
+        <button type="button" className="isl-btn" onClick={() => void backend.islandOpenApp()}>
+          {t.openApp}
+        </button>
+      </div>
+    ) : null;
+  const faceNode = (size: number) => (
+    <Face
+      config={face}
+      state={state}
+      gaze={gaze}
+      level={level}
+      size={size}
+      label={name}
+      attention={{ near: pointerOn, engaged, agent: gazeAgent }}
+      paused={view.hidden}
+    />
+  );
+
+  if (floating) {
+    // A free-standing pill at the edge (see the notes at the top): the
+    // row with the face stays at the edge, the card grows away from it.
+    const closedH = p.pill.h;
+    const rowH = closedH + (FLOAT_ROW - closedH) * k;
+    const room = atBottom ? p.pill.y + p.pill.h : p.window.h - p.pill.y;
+    const fHeight = Math.max(0, Math.min(room - 2, rowH + motion.body * k));
+    const fWidth = motion.closedW + (openW - motion.closedW) * k;
+    const fLeft = Math.max(0, Math.min(p.window.w - fWidth, p.pill.x + p.pill.w / 2 - fWidth / 2));
+    const fTop = atBottom ? p.pill.y + p.pill.h - fHeight : p.pill.y;
+    const rowTop = atBottom ? fHeight - rowH : 0;
+    const fRadius = Math.max(0, Math.min(fHeight / 2, 18));
+    const fSmall = Math.max(22, Math.min(closedH + 2, 36));
+    const fFaceSize = fSmall + (FLOAT_ROW + 2 - fSmall) * k;
+    // Closed: centred in the pill (left of the glyph's slot); open: at
+    // the row's start.
+    const closedFaceLeft = (p.pill.w - faceWidth(fSmall)) / 2;
+    const fFaceLeft = closedFaceLeft + (8 - closedFaceLeft) * k;
+    const fFaceTop = rowTop + (rowH - fFaceSize) / 2;
+    const cardW = Math.min(FLOAT_CARD_W, p.window.w - 8);
+    const hasBody = open && [liveNode, wakeNoteNode, detail, noticeNode, cardNode, approvalNode, buttonsNode].some(Boolean);
+    // Out of a full-screen app's way: off the window, past the edge it
+    // keeps to.
+    const hideY = atBottom ? p.window.h - p.pill.y + 8 : -(p.pill.y + p.pill.h + 8);
+
+    return (
+      <div
+        ref={rootRef}
+        className={`isl-root${open ? " open" : ""}${view.hidden ? " hidden" : ""}`}
+        style={{ ["--hide-y" as string]: `${hideY}px` }}
+        aria-hidden={view.hidden}
+      >
+        <div
+          ref={shapeRef}
+          className={`isl-shape float ${atBottom ? "edge-bottom" : "edge-top"} state-${state}`}
+          style={{ ["--accent" as string]: accent, left: fLeft, top: fTop, width: fWidth, height: fHeight, borderRadius: fRadius }}
+          onClick={woke ? () => void backend.islandWakeCancel() : undefined}
+        >
+          {/* The card shows as far as the shape has grown, from the row out. */}
+          <div className={`isl-clip isl-fclip${atBottom ? " up" : ""}`} style={{ top: atBottom ? 0 : rowH, height: Math.max(0, fHeight - rowH) }}>
+            {/* Laid out at the card's own width whatever the shape's width
+                on the way, so its height is measured once, not as the
+                text rewraps while the pill widens. */}
+            <div ref={bodyRef} className="isl-fbody" style={{ width: cardW, marginLeft: (fWidth - cardW) / 2 }} aria-hidden={!open}>
+              {hasBody ? (
+                <div className="isl-fpad">
+                  {liveNode}
+                  {wakeNoteNode}
+                  {detail}
+                  {noticeNode}
+                  {cardNode}
+                  {approvalNode}
+                  {buttonsNode}
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          <div ref={faceRef} className="isl-face" style={{ left: fFaceLeft, top: fFaceTop, height: fFaceSize }}>
+            {faceNode(fFaceSize)}
+          </div>
+
+          {open ? (
+            <div className="isl-frow" style={{ top: rowTop, height: rowH, left: fFaceLeft + faceWidth(fFaceSize) + 4, right: slot ? FLOAT_SLOT + 4 : 12 }}>
+              {inputNode ? (
+                <div className="isl-finput">{inputNode}</div>
+              ) : (
+                <>
+                  {/* Holding: the clock first, it must not be cut off. */}
+                  {view.hold ? null : <span className="isl-fname">{approval?.synth ?? name}</span>}
+                  <span className="isl-fstatus" role="status">
+                    {view.hold ? <span className="isl-timer">{mmss(now - view.hold_since_ms)}</span> : null}
+                    {view.hold ? (woke ? t.wakeListening : view.hold === "screen_voice" ? t.releaseShot : t.release) : status}
+                  </span>
+                </>
+              )}
+            </div>
+          ) : null}
+
+          {slot ? (
+            <div className="isl-fslot" style={{ top: rowTop, height: rowH, width: FLOAT_SLOT }}>
+              <Glyph state={state} sending={view.sending} />
+              {wakeDotNode}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       ref={rootRef}
@@ -503,27 +774,12 @@ export function IslandApp() {
           <div className="isl-notch" style={{ width: p.notch.w }} />
           <div className="isl-ear right" style={{ width: (p.pill.w - p.notch.w) / 2 }}>
             <Glyph state={state} sending={view.sending} />
-            {state === "idle" && !open && (wake.state === "listening" || wake.state === "paused") ? (
-              <span
-                className={`isl-wake${wake.state === "paused" ? " paused" : ""}`}
-                title={wake.state === "paused" ? t.wakePaused[wake.reason] : t.wakeHint(name)}
-                aria-label={wake.state === "paused" ? t.wakePaused[wake.reason] : t.wakeHint(name)}
-              />
-            ) : null}
+            {wakeDotNode}
           </div>
         </div>
 
         <div ref={faceRef} className="isl-face" style={{ left: faceLeft, top: faceTop, height: faceSize }}>
-          <Face
-            config={face}
-            state={state}
-            gaze={gaze}
-            level={level}
-            size={faceSize}
-            label={name}
-            attention={{ near: pointerOn, engaged, agent: gazeAgent }}
-            paused={view.hidden}
-          />
+          {faceNode(faceSize)}
         </div>
 
         {/* The body shows as far as the shape has grown. */}
@@ -538,97 +794,25 @@ export function IslandApp() {
                     <div className="isl-status" role="status">
                       {status}
                     </div>
-                    {wakeNote ? <div className="isl-wake-note">{wakeNote}</div> : null}
-                    {transcriptShown ? (
-                      <div className={`isl-live${view.hold ? "" : " sent"}`} aria-live="polite">
-                        {tailOf(transcript)}
-                      </div>
-                    ) : sttLoadingShown ? (
-                      <div className="isl-live loading">{t.sttLoading}</div>
-                    ) : null}
+                    {wakeNoteNode}
+                    {liveNode}
                   </div>
                 </div>
                 {detail}
-                {notice ? (
-                  <div className="isl-notice" role="alert">
-                    {notice}
-                    {view.notice?.code === "mic_denied" ? (
-                      <button type="button" className="isl-btn" onClick={() => void backend.islandMic()}>
-                        {t.micOpen}
-                      </button>
-                    ) : null}
-                  </div>
-                ) : null}
+                {noticeNode}
 
-                {card && !approval ? <SttCardView card={card} t={t} /> : null}
+                {cardNode}
 
-                {approval && quick ? (
-                  <div className="isl-approval">
-                    <div className="isl-ask-title">{quick.title}</div>
-                    <div className="isl-row">
-                      <button type="button" className="isl-btn" onClick={() => void backend.approvalAnswer(approval.id, false, "once").finally(refresh)}>
-                        {t.deny}
-                      </button>
-                      {quick.unknown ? null : (
-                        <button type="button" className="isl-btn primary" onClick={() => void backend.approvalAnswer(approval.id, true, quick.duration, quick.hours).finally(refresh)}>
-                          {t.allow}
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                ) : null}
+                {approvalNode}
 
-                {view.text_open ? (
+                {inputNode ? (
                   <div className="isl-input">
-                    <input
-                      ref={inputRef}
-                      value={text}
-                      maxLength={4000}
-                      placeholder={t.textPlaceholder(name)}
-                      onChange={(e) => setText(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                          e.preventDefault();
-                          void backend.islandTextSubmit(text);
-                        } else if (e.key === "Escape") {
-                          e.preventDefault();
-                          void backend.islandTextCancel();
-                        }
-                      }}
-                    />
+                    {inputNode}
                     <div className="isl-hint">{t.textHint}</div>
                   </div>
                 ) : null}
 
-                {view.hover && !view.text_open && !approval ? (
-                  <div className="isl-row">
-                    {view.synths.length > 1 ? (
-                      <div className="isl-synths" role="radiogroup" aria-label={t.switchSynth}>
-                        {view.synths.map((sy) => (
-                          <button
-                            key={sy.id}
-                            type="button"
-                            role="radio"
-                            aria-checked={sy.id === view.synth?.id}
-                            className={`isl-chip${sy.online ? "" : " off"}`}
-                            onClick={() => void backend.islandSelectSynth(sy.id)}
-                          >
-                            {sy.name}
-                          </button>
-                        ))}
-                      </div>
-                    ) : null}
-                    <span className="isl-spacer" />
-                    {!view.paused && (view.driving || m?.stage === "working" || m?.stage === "accepted") ? (
-                      <button type="button" className="isl-btn danger" onClick={() => void backend.islandStop()}>
-                        {t.stop}
-                      </button>
-                    ) : null}
-                    <button type="button" className="isl-btn" onClick={() => void backend.islandOpenApp()}>
-                      {t.openApp}
-                    </button>
-                  </div>
-                ) : null}
+                {buttonsNode}
               </>
             ) : null}
           </div>

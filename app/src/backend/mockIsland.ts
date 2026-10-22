@@ -31,7 +31,9 @@
 //         paused for a call; woke = "Мия, ..." heard, the request being
 //         recorded with its words; wokename = "Мия" alone, waiting)
 //        (the island window on a desktop; &notch=0 draws a Mac without a
-//         notch, &os=windows a Windows screen. The pointer over the desktop
+//         notch, &os=windows a Windows screen: the island floats at the
+//         bottom above a taskbar and grows upwards, &taskbar=top puts the
+//         taskbar on the top edge and the island under it. The pointer over the desktop
 //         is the gaze; the strip under it plays a hold, a line of text, a
 //         request, an answer. &full=1 starts in full screen: the island
 //         hides, and the pointer at the desktop's top edge brings the menu
@@ -412,7 +414,30 @@ export class MockIslandScreen {
 
 // --- the island window ---
 
+/** The stage's desktop (IslandStage), in points. */
+export const STAGE_W = 1512;
+export const STAGE_H = 520;
+/** The Windows taskbar on the stage. */
+export const STAGE_TASKBAR = 48;
+
 function placement(os: string): IslandPlacement {
+  if (os === "windows") {
+    // As geometry.rs places it: a floating 84 x 28 pill 8 points above the
+    // taskbar (or under one on the top edge), in a 480 x 300 window kept
+    // inside the work area.
+    const top = params.get("taskbar") === "top";
+    const w = 480;
+    const h = 300;
+    const pill = { x: w / 2 - 42, y: top ? 8 : h - 8 - 28, w: 84, h: 28 };
+    return {
+      window: { x: STAGE_W / 2 - w / 2, y: top ? STAGE_TASKBAR : STAGE_H - STAGE_TASKBAR - h, w, h },
+      notch: pill,
+      pill,
+      real_notch: false,
+      edge: top ? "top" : "bottom",
+      floating: true,
+    };
+  }
   const real = os === "macos" && params.get("notch") !== "0";
   const notchW = real ? 185 : 184;
   const notchH = real ? 32 : os === "macos" ? 25 : 24;
@@ -423,6 +448,8 @@ function placement(os: string): IslandPlacement {
     notch: { x: w / 2 - notchW / 2, y: 0, w: notchW, h: notchH },
     pill: { x: w / 2 - notchW / 2 - ear, y: 0, w: notchW + 2 * ear, h: notchH },
     real_notch: real,
+    edge: "top",
+    floating: false,
   };
 }
 
@@ -639,8 +666,11 @@ export class MockIslandWindow {
   }
 
   /** The reviewer's pointer over the stage, in window coordinates. */
-  pointer(x: number, y: number) {
-    this.pointerY = y;
+  /** The pointer, window-local; `edgeY` is its distance from the top of
+   * the screen (the menu bar comes in at 0), the window-local y when the
+   * window is at the top. */
+  pointer(x: number, y: number, edgeY = y) {
+    this.pointerY = edgeY;
     if (this.fullScreen) this.recompute();
     if (!this.face || this.view.hidden) return;
     let dx = (x - this.face.x) / 600;
