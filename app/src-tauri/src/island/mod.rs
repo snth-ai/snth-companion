@@ -1,5 +1,6 @@
 //! The island (TZ tz-island.md, section 5): the synth's face at the top
-//! of the screen, merged with the notch, and the owner's hold keys.
+//! of the screen, merged with the notch (macOS), or floating just above
+//! the taskbar (Windows, `geometry.rs`), and the owner's hold keys.
 //!
 //! One more window, `island` (island.html): transparent, always on top,
 //! never activated (`panel.rs`), placed by `geometry.rs`. The webview draws
@@ -99,6 +100,11 @@ const STT_READY_FOR: Duration = Duration::from_secs(6);
 /// the menu bar comes in, so the island comes in with it.
 const COVER_EVERY: Duration = Duration::from_millis(190);
 const COVER_FAST: Duration = Duration::from_millis(90);
+/// Windows (and Linux): how often the poller asks where the island goes
+/// (the taskbar moved or hides itself now, another resolution or scale).
+/// macOS hears of every change (`panel::watch_screens`) and never polls.
+#[cfg(not(target_os = "macos"))]
+const REPLACE_EVERY: Duration = Duration::from_secs(3);
 
 /// A debug build started with `SNTH_ISLAND_DEMO=1` shows the island
 /// without a linked synth, with no main window and no helper install: to
@@ -587,16 +593,29 @@ fn relayout_main_thread(ctx: &Arc<Ctx>) {
         inner.placement != Some(placement)
     };
     if changed {
-        connect_core::logln!(
-            "island: placed at {:.0},{:.0} {:.0}x{:.0}, {} notch {:.0}x{:.0}",
-            placement.window.x,
-            placement.window.y,
-            placement.window.w,
-            placement.window.h,
-            if placement.real_notch { "real" } else { "drawn" },
-            placement.notch.w,
-            placement.notch.h
-        );
+        if placement.floating {
+            connect_core::logln!(
+                "island: placed at {:.0},{:.0} {:.0}x{:.0}, floating at the {:?} edge, pill {:.0}x{:.0}",
+                placement.window.x,
+                placement.window.y,
+                placement.window.w,
+                placement.window.h,
+                placement.edge,
+                placement.pill.w,
+                placement.pill.h
+            );
+        } else {
+            connect_core::logln!(
+                "island: placed at {:.0},{:.0} {:.0}x{:.0}, {} notch {:.0}x{:.0}",
+                placement.window.x,
+                placement.window.y,
+                placement.window.w,
+                placement.window.h,
+                if placement.real_notch { "real" } else { "drawn" },
+                placement.notch.w,
+                placement.notch.h
+            );
+        }
         panel::place(&w, &placement);
         ctx.island.inner.lock().unwrap().placement = Some(placement);
         let _ = w.emit_to(WINDOW, VIEW_EVENT, view(ctx));
@@ -1521,11 +1540,24 @@ fn on_event(ctx: &Arc<Ctx>, e: IslandEvent) {
 // --- the pointer ---
 
 async fn poll(ctx: Arc<Ctx>) {
+    #[cfg(not(target_os = "macos"))]
+    let mut placed_at = Instant::now();
     loop {
         let shown = ctx.island.inner.lock().unwrap().shown;
         if !shown {
             ctx.island.wake.notified().await;
             continue;
+        }
+        // No word from the system when the taskbar or the screen changes
+        // here: look again now and then (the window moves only when the
+        // placement changed, `relayout_main_thread`).
+        #[cfg(not(target_os = "macos"))]
+        {
+            if placed_at.elapsed() >= REPLACE_EVERY {
+                placed_at = Instant::now();
+                let ctx2 = ctx.clone();
+                let _ = ctx.app.run_on_main_thread(move || relayout_main_thread(&ctx2));
+            }
         }
         let moving = ctx.island.inner.lock().unwrap().last_move.is_some_and(|t| t.elapsed() < MOVING_FOR);
         // A Space switch wakes it early (`watch_spaces`).

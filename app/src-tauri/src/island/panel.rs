@@ -29,6 +29,22 @@
 //! of text lifts that for as long as it is open. Out of screen capture
 //! (`WDA_EXCLUDEFROMCAPTURE`, through Tauri's `content_protected`).
 //!
+//! Where it goes on Windows: there is no menu bar and the top of the
+//! screen is browser tabs and title bars, so the island floats at the
+//! bottom centre of the primary monitor, just above the taskbar
+//! (`geometry::place`, `edge: Bottom`; a taskbar on the top edge puts it
+//! just under the taskbar, `edge: Top`). `screen_info` reads the
+//! monitor's frame and its work area (Tauri's `Monitor::work_area`, the
+//! `rcWork` of `GetMonitorInfoW`: the screen less the taskbar) in
+//! physical pixels and turns both into logical points at the monitor's
+//! own scale (`geometry::from_physical`); `place` turns the window's
+//! rectangle back into pixels at that same scale (not the window's
+//! current one: before the first move the window may sit on another
+//! monitor with another DPI). The taskbar moving, auto-hide switched,
+//! a resolution or scale change: the poller in `mod.rs` asks for the
+//! placement again every few seconds (`REPLACE_EVERY`) and the window
+//! moves only when it changed.
+//!
 //! The pointer: macOS `CGEventGetLocation` of a fresh event (any thread,
 //! global points, top-left origin), Windows `GetCursorPos`.
 //!
@@ -53,7 +69,7 @@
 use tauri::WebviewWindow;
 
 #[cfg(not(target_os = "macos"))]
-use super::geometry::Rect;
+use super::geometry;
 use super::geometry::{Cover, Placement, ScreenInfo};
 
 #[cfg(target_os = "macos")]
@@ -251,7 +267,7 @@ mod mac {
                     }
                 }
             }
-            Some(ScreenInfo { frame: top_left(frame), notch, bar_h })
+            Some(ScreenInfo { frame: top_left(frame), notch, bar_h, work: None })
         })
         .flatten()
     }
@@ -528,12 +544,31 @@ pub fn screen_info(window: &WebviewWindow) -> Option<ScreenInfo> {
         let scale = monitor.scale_factor();
         let pos = monitor.position();
         let size = monitor.size();
-        Some(ScreenInfo {
-            frame: Rect { x: f64::from(pos.x) / scale, y: f64::from(pos.y) / scale, w: f64::from(size.width) / scale, h: f64::from(size.height) / scale },
-            notch: None,
-            bar_h: 0.0,
-        })
+        let frame = geometry::from_physical(pos.x, pos.y, size.width, size.height, scale);
+        // Windows: the work area makes the island float above the
+        // taskbar. Elsewhere (Linux) the drawn notch as before.
+        #[cfg(windows)]
+        let work = {
+            let wa = monitor.work_area();
+            Some(geometry::from_physical(wa.position.x, wa.position.y, wa.size.width, wa.size.height, scale))
+        };
+        #[cfg(not(windows))]
+        let work = None;
+        Some(ScreenInfo { frame, notch: None, bar_h: 0.0, work })
     }
+}
+
+/// The primary monitor's scale, the one `screen_info` measured with.
+#[cfg(not(target_os = "macos"))]
+fn primary_scale(window: &WebviewWindow) -> f64 {
+    window
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .map(|m| m.scale_factor())
+        .or_else(|| window.scale_factor().ok())
+        .filter(|s| s.is_finite() && *s > 0.0)
+        .unwrap_or(1.0)
 }
 
 /// Put the window where the placement says. macOS: main thread.
@@ -546,9 +581,15 @@ pub fn place(window: &WebviewWindow, p: &Placement) {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let scale = window.scale_factor().unwrap_or(1.0);
-        let _ = window.set_size(tauri::LogicalSize::new(p.window.w, p.window.h));
-        let _ = window.set_position(tauri::PhysicalPosition::new((p.window.x * scale).round() as i32, (p.window.y * scale).round() as i32));
+        // Pixels at the primary monitor's scale, where the placement was
+        // measured. Moved first: a move onto a monitor with another DPI
+        // resizes the window by itself, the size set after it is the one
+        // that stays; moved again in case the resize shifted it.
+        let scale = primary_scale(window);
+        let pos = tauri::PhysicalPosition::new((p.window.x * scale).round() as i32, (p.window.y * scale).round() as i32);
+        let _ = window.set_position(pos);
+        let _ = window.set_size(tauri::PhysicalSize::new((p.window.w * scale).round() as u32, (p.window.h * scale).round() as u32));
+        let _ = window.set_position(pos);
     }
 }
 
