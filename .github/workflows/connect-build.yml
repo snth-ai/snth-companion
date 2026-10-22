@@ -57,6 +57,11 @@ jobs:
       - name: Island tests
         run: cargo test -p snth-connect "island::"
 
+      # What wake by name's Windows calls say on the runner (another app
+      # recording, the lock, the input devices and their buses): printed.
+      - name: Wake by name, the system now
+        run: cargo test -p snth-connect "island::wake::system::win_tests::wake_system_now" -- --nocapture
+
       # Then the real thing: the pinned model files downloaded as the app
       # downloads them (resume, sha256, rename; cached between runs), and
       # whole holds through the speech thread on clips the Windows speech
@@ -218,14 +223,16 @@ jobs:
           }
           foreach ($lib in $libs) {
             $dis = & $dumpbin /disasm $lib.FullName
-            # The functions with AVX-512 registers, if any.
-            $fn = ""; $seen = @{}
-            foreach ($line in $dis) {
-              if ($line -match '^(\S+):\s*$') { $fn = $Matches[1] }
-              elseif ($line.Contains("zmm") -and -not $seen.ContainsKey($fn)) { $seen[$fn] = 1; "  zmm in $fn" }
-            }
-            $zmm = @($dis | Select-String -SimpleMatch "zmm").Count
-            $ymm = @($dis | Select-String -SimpleMatch "ymm").Count
+            # Registers as the disassembly writes them (lower case,
+            # numbered): an AVX-512 instruction names a zmm register.
+            $zmmLines = @($dis | Select-String -CaseSensitive -Pattern '\bzmm\d+\b')
+            $ymm = @($dis | Select-String -CaseSensitive -Pattern '\bymm\d+\b').Count
+            $zmm = $zmmLines.Count
+            $zmmLines | Select-Object -First 5 | ForEach-Object { "  $($_.Line.Trim())" }
+            # Other text with "zmm" in it (symbol names), for the record.
+            $other = @($dis | Select-String -SimpleMatch "zmm" | Where-Object { $_.Line -cnotmatch '\bzmm\d+\b' })
+            "  other lines with zmm in any case: $($other.Count)"
+            $other | Select-Object -First 3 | ForEach-Object { "    $($_.Line.Trim())" }
             $init = @(& $dumpbin /headers $lib.FullName | Select-String -SimpleMatch '.CRT$XCU').Count
             "$($lib.FullName): $ymm lines with ymm, $zmm with zmm, $init dynamic initializer sections"
             if ($zmm -gt 0) { throw "AVX-512 code in $($lib.Name)" }
