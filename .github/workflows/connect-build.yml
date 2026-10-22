@@ -211,8 +211,19 @@ jobs:
           if (-not $dumpbin) { throw "dumpbin not found" }
           $libs = @(Get-ChildItem -Recurse -Filter ggml-cpu.lib target\debug\build)
           if ($libs.Count -eq 0) { throw "ggml-cpu.lib not found" }
+          Get-ChildItem -Recurse -Filter snth-ggml-floor.txt target\debug\build | ForEach-Object { "floor mark: $($_.FullName)" }
+          Get-ChildItem -Recurse -Filter CMakeCache.txt target\debug\build | Where-Object { $_.FullName -like "*whisper-rs-sys*" } | ForEach-Object {
+            "$($_.FullName):"
+            Select-String -Path $_.FullName -Pattern '^(GGML_(NATIVE|SSE42|AVX|AVX2|AVX512|AVX512_\w+|AVX_VNNI|BMI2|FMA|F16C)|CMAKE_PROJECT_INCLUDE_BEFORE)[:=]' | ForEach-Object { "  $($_.Line)" }
+          }
           foreach ($lib in $libs) {
             $dis = & $dumpbin /disasm $lib.FullName
+            # The functions with AVX-512 registers, if any.
+            $fn = ""; $seen = @{}
+            foreach ($line in $dis) {
+              if ($line -match '^(\S+):\s*$') { $fn = $Matches[1] }
+              elseif ($line.Contains("zmm") -and -not $seen.ContainsKey($fn)) { $seen[$fn] = 1; "  zmm in $fn" }
+            }
             $zmm = @($dis | Select-String -SimpleMatch "zmm").Count
             $ymm = @($dis | Select-String -SimpleMatch "ymm").Count
             $init = @(& $dumpbin /headers $lib.FullName | Select-String -SimpleMatch '.CRT$XCU').Count
