@@ -422,7 +422,12 @@ mod win {
 
     /// Every app in the store. None when the store cannot be read.
     pub fn consent_entries() -> Option<Vec<Entry>> {
-        let root = open(HKEY_CURRENT_USER, STORE)?;
+        consent_entries_at(STORE)
+    }
+
+    /// The same, from a store at this path under HKCU (the test's own).
+    pub fn consent_entries_at(path: &str) -> Option<Vec<Entry>> {
+        let root = open(HKEY_CURRENT_USER, path)?;
         let mut out = Vec::new();
         entries_under(&root, false, &mut out);
         if let Some(np) = open(root.0, "NonPackaged") {
@@ -812,5 +817,74 @@ mod consent_tests {
         // Case differs between the store and current_exe: still this app.
         let mine = [app("C:#PROGRAM FILES#SNTH Connect#SNTH-CONNECT.EXE", true, 5, 0)];
         assert!(recording(&mine, r"C:\Program Files\SNTH Connect\snth-connect.exe", None).is_empty());
+    }
+}
+
+/// The Windows calls themselves, on the machine the tests run on (the
+/// CI's runner: no microphone, no one at the console).
+#[cfg(all(test, windows))]
+mod win_tests {
+    use super::consent::Entry;
+    use super::*;
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{RegCloseKey, RegCreateKeyW, RegDeleteTreeW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, REG_QWORD};
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    fn put(path: &str, start: u64, stop: u64) {
+        let mut k: HKEY = std::ptr::null_mut();
+        assert_eq!(unsafe { RegCreateKeyW(HKEY_CURRENT_USER, wide(path).as_ptr(), &mut k) }, ERROR_SUCCESS, "{path}");
+        for (name, v) in [("LastUsedTimeStart", start), ("LastUsedTimeStop", stop)] {
+            let rc = unsafe { RegSetValueExW(k, wide(name).as_ptr(), 0, REG_QWORD, (&v as *const u64).cast(), 8) };
+            assert_eq!(rc, ERROR_SUCCESS);
+        }
+        unsafe { RegCloseKey(k) };
+    }
+
+    /// A consent store laid out as Windows lays it out (a Store app, the
+    /// NonPackaged key with programs under it, this test's own program),
+    /// written under a key of the test's own and read back through the
+    /// same code as the real one.
+    #[test]
+    fn the_consent_store_is_read_from_the_registry() {
+        let root = format!(r"Software\SNTH Connect tests\{}\microphone", std::process::id());
+        let me = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+        put(&format!(r"{root}\MSTeams_8wekyb3d8bbwe"), 133_400_000_000_000_000, 0);
+        put(&format!(r"{root}\Microsoft.WindowsSoundRecorder_8wekyb3d8bbwe"), 133_000_000_000_000_000, 133_000_000_100_000_000);
+        put(&format!(r"{root}\NonPackaged\C:#Program Files#Zoom#bin#Zoom.exe"), 133_500_000_000_000_000, 0);
+        put(&format!(r"{root}\NonPackaged\{}", me.replace('\\', "#")), 133_500_000_000_000_000, 0);
+        let entries = win::consent_entries_at(&root);
+        let parent = format!(r"Software\SNTH Connect tests\{}", std::process::id());
+        unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, wide(&parent).as_ptr()) };
+        let entries = entries.expect("the store reads");
+        assert!(entries.contains(&Entry { key: "MSTeams_8wekyb3d8bbwe".into(), desktop: false, start: 133_400_000_000_000_000, stop: 0 }), "{entries:?}");
+        assert!(entries.contains(&Entry { key: "C:#Program Files#Zoom#bin#Zoom.exe".into(), desktop: true, start: 133_500_000_000_000_000, stop: 0 }), "{entries:?}");
+        assert!(!entries.iter().any(|e| e.key == "NonPackaged"), "the folder of programs is not an app: {entries:?}");
+        assert_eq!(entries.len(), 4, "{entries:?}");
+        // Zoom is not running on the runner; this test is, and is left out.
+        let running = win::running().expect("the programs are listed");
+        let exe = std::path::Path::new(&me).file_name().unwrap().to_string_lossy().to_lowercase();
+        assert!(running.contains(&exe), "this program is in the list: {exe}");
+        assert_eq!(consent::recording(&entries, &me, Some(&running)), vec!["MSTeams".to_string()]);
+        assert_eq!(consent::recording(&entries, &me, None), vec!["MSTeams".to_string(), "Zoom.exe".into()]);
+    }
+
+    /// What this machine says (a look: the runner has no audio devices and
+    /// may run outside a console session). The calls must not fail.
+    #[test]
+    fn wake_system_now() {
+        let t = std::time::Instant::now();
+        let busy = mic_busy();
+        println!("mic busy: {busy:?} ({} ms)", t.elapsed().as_millis());
+        println!("locked: {}", locked());
+        for (name, bus) in win::buses() {
+            println!("input: {name:?} on {bus:?}");
+        }
+        for d in input_devices() {
+            println!("input: {:?} {:?} transport {}{}", d.name, d.uid, super::super::device::transport::name(d.transport), if d.is_default { " (default)" } else { "" });
+        }
+        println!("the listener uses: {:?}", super::super::device::choose(&input_devices()));
     }
 }
