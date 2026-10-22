@@ -1034,9 +1034,20 @@ pub fn open_external(ctx: Cx<'_>, target: String) -> Result<(), String> {
 
 // --- the island ---
 
-/// The island's settings: switch it on or off, choose the main synth.
+/// The island's settings: switch it on or off, choose the main synth,
+/// put it elsewhere on the screen (`vertical` "top" | "middle" |
+/// "bottom", `horizontal` "left" | "center" | "right", "default" or ""
+/// for this system's default on that axis; an axis left out stays as it
+/// is). Err: "unsupported", "unknown_synth", "bad_position" (an unknown
+/// word, or the middle of the screen).
 #[tauri::command]
-pub async fn island_set(ctx: Cx<'_>, enabled: Option<bool>, main_synth: Option<String>) -> Result<UiState, String> {
+pub async fn island_set(
+    ctx: Cx<'_>,
+    enabled: Option<bool>,
+    main_synth: Option<String>,
+    vertical: Option<String>,
+    horizontal: Option<String>,
+) -> Result<UiState, String> {
     if enabled == Some(true) && !crate::island::supported_os() {
         return Err("unsupported".into());
     }
@@ -1046,6 +1057,16 @@ pub async fn island_set(ctx: Cx<'_>, enabled: Option<bool>, main_synth: Option<S
         }
     }
     let before = ctx.core.island();
+    let mut position = before.position;
+    if let Some(v) = &vertical {
+        position.vertical = connect_core::island::IslandPosition::parse_vertical(v.trim())?;
+    }
+    if let Some(h) = &horizontal {
+        position.horizontal = connect_core::island::IslandPosition::parse_horizontal(h.trim())?;
+    }
+    if position.is_screen_middle() {
+        return Err("bad_position".into());
+    }
     let now = ctx.core.set_island(|i| {
         if let Some(on) = enabled {
             i.enabled = on;
@@ -1053,6 +1074,7 @@ pub async fn island_set(ctx: Cx<'_>, enabled: Option<bool>, main_synth: Option<S
         if let Some(id) = main_synth {
             i.main_synth = id;
         }
+        i.position = position;
     });
     // Just switched on: read every linked synth's face.
     if now.enabled && !before.enabled {

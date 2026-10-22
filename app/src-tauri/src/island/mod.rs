@@ -1,6 +1,10 @@
 //! The island (TZ tz-island.md, section 5): the synth's face at the top
 //! of the screen, merged with the notch (macOS), or floating just above
-//! the taskbar (Windows, `geometry.rs`), and the owner's hold keys.
+//! the taskbar (Windows, `geometry.rs`), and the owner's hold keys. The
+//! owner may put it elsewhere (the settings' `position`: top, bottom or
+//! the middle of a side, left, centre or right); every spot but the
+//! macOS default is the floating pill (`geometry::place`). A change of
+//! the setting places it again at once (`sync`).
 //!
 //! One more window, `island` (island.html): transparent, always on top,
 //! never activated (`panel.rs`), placed by `geometry.rs`. The webview draws
@@ -18,7 +22,9 @@
 //! Full screen: while the island's screen shows a full-screen app the
 //! island hides (fades out and up) and lets every click through, and it
 //! comes back with the menu bar when the pointer reaches the top edge
-//! (`panel::cover` says when). It stays while the owner is busy with it
+//! (`panel::cover` says when). On macOS that is the notch and the
+//! floating top spots (they sit just under where the bar comes in); a
+//! bottom or middle spot stays hidden while the bar shows (`reveal`). It stays while the owner is busy with it
 //! (a hold, the line of text, a request, a send just made, a fresh
 //! answer, a notice): the owner sees that the key worked. The keys work
 //! the same while it is hidden. The screenshot's own invisibility
@@ -69,7 +75,7 @@ use tokio::sync::Notify;
 
 use crate::approvals::ApprovalDto;
 use crate::state::Ctx;
-use geometry::{Placement, Rect};
+use geometry::{Placement, Rect, Spot};
 
 pub const WINDOW: &str = "island";
 /// What the island's webview listens to (only the island window gets
@@ -100,10 +106,11 @@ const STT_READY_FOR: Duration = Duration::from_secs(6);
 /// the menu bar comes in, so the island comes in with it.
 const COVER_EVERY: Duration = Duration::from_millis(190);
 const COVER_FAST: Duration = Duration::from_millis(90);
-/// Windows (and Linux): how often the poller asks where the island goes
-/// (the taskbar moved or hides itself now, another resolution or scale).
-/// macOS hears of every change (`panel::watch_screens`) and never polls.
-#[cfg(not(target_os = "macos"))]
+/// How often the poller asks where a floating island goes (the taskbar
+/// or the Dock moved or hides itself now, another resolution or scale).
+/// Windows always floats. macOS hears of screen changes
+/// (`panel::watch_screens`) but not for certain of the Dock's, so only a
+/// floating spot polls there; the notch placement never does.
 const REPLACE_EVERY: Duration = Duration::from_secs(3);
 
 /// A debug build started with `SNTH_ISLAND_DEMO=1` shows the island
@@ -226,6 +233,8 @@ struct Inner {
     created: bool,
     shown: bool,
     placement: Option<Placement>,
+    /// The owner's spot the island was last placed at.
+    spot: Option<Spot>,
     /// The part of the window that takes clicks, and the face's centre
     /// (window-local CSS pixels), as the webview last said.
     hit: Option<Rect>,
@@ -503,8 +512,35 @@ pub fn sync(ctx: &Arc<Ctx>) {
     if !want_keys {
         cancel_hold(ctx);
     }
+    // The owner chose another spot: there now.
+    let spot = spot_of(&settings.position);
+    let moved = {
+        let inner = ctx.island.inner.lock().unwrap();
+        inner.shown && inner.spot.is_some_and(|s| s != spot)
+    };
+    if moved {
+        let ctx2 = ctx.clone();
+        let _ = ctx.app.run_on_main_thread(move || relayout_main_thread(&ctx2));
+    }
     ctx.island.wake_word.kick();
     emit_view(ctx);
+}
+
+/// The settings' position as the geometry takes it.
+fn spot_of(p: &core_island::IslandPosition) -> Spot {
+    use core_island::{IslandHorizontal as H, IslandVertical as V};
+    Spot {
+        vertical: p.vertical.map(|v| match v {
+            V::Top => geometry::Edge::Top,
+            V::Middle => geometry::Edge::Middle,
+            V::Bottom => geometry::Edge::Bottom,
+        }),
+        horizontal: p.horizontal.map(|h| match h {
+            H::Left => geometry::Align::Left,
+            H::Center => geometry::Align::Center,
+            H::Right => geometry::Align::Right,
+        }),
+    }
 }
 
 fn ensure_window(ctx: &Arc<Ctx>) {
@@ -583,9 +619,11 @@ fn hide_window(ctx: &Arc<Ctx>) {
 fn relayout_main_thread(ctx: &Arc<Ctx>) {
     let Some(w) = window(ctx) else { return };
     let Some(screen) = panel::screen_info(&w) else { return };
-    let placement = geometry::place(&screen);
+    let spot = spot_of(&ctx.core.island().position);
+    let placement = geometry::place(&screen, spot);
     let changed = {
         let mut inner = ctx.island.inner.lock().unwrap();
+        inner.spot = Some(spot);
         if inner.screen.as_ref() != Some(&screen) {
             inner.screen = Some(screen);
             inner.cover_at = None;
@@ -595,12 +633,13 @@ fn relayout_main_thread(ctx: &Arc<Ctx>) {
     if changed {
         if placement.floating {
             connect_core::logln!(
-                "island: placed at {:.0},{:.0} {:.0}x{:.0}, floating at the {:?} edge, pill {:.0}x{:.0}",
+                "island: placed at {:.0},{:.0} {:.0}x{:.0}, floating at the {:?} edge, {:?}, pill {:.0}x{:.0}",
                 placement.window.x,
                 placement.window.y,
                 placement.window.w,
                 placement.window.h,
                 placement.edge,
+                placement.align,
                 placement.pill.w,
                 placement.pill.h
             );
@@ -1543,7 +1582,6 @@ fn on_event(ctx: &Arc<Ctx>, e: IslandEvent) {
 // --- the pointer ---
 
 async fn poll(ctx: Arc<Ctx>) {
-    #[cfg(not(target_os = "macos"))]
     let mut placed_at = Instant::now();
     loop {
         let shown = ctx.island.inner.lock().unwrap().shown;
@@ -1551,13 +1589,14 @@ async fn poll(ctx: Arc<Ctx>) {
             ctx.island.wake.notified().await;
             continue;
         }
-        // No word from the system when the taskbar or the screen changes
-        // here: look again now and then (the window moves only when the
-        // placement changed, `relayout_main_thread`).
-        #[cfg(not(target_os = "macos"))]
-        {
-            if placed_at.elapsed() >= REPLACE_EVERY {
-                placed_at = Instant::now();
+        // No word from the system when the taskbar (Windows) or the Dock
+        // (macOS, not for certain) changes: a floating island looks again
+        // now and then (the window moves only when the placement changed,
+        // `relayout_main_thread`). The macOS notch never polls.
+        if placed_at.elapsed() >= REPLACE_EVERY {
+            placed_at = Instant::now();
+            let floating = ctx.island.inner.lock().unwrap().placement.is_none_or(|p| p.floating);
+            if floating || !cfg!(target_os = "macos") {
                 let ctx2 = ctx.clone();
                 let _ = ctx.app.run_on_main_thread(move || relayout_main_thread(&ctx2));
             }
@@ -1577,10 +1616,15 @@ async fn poll(ctx: Arc<Ctx>) {
         let tl = (placement.window.x, placement.window.y);
         let Some(cursor) = panel::cursor_local(&w, tl) else { continue };
 
+        // Does the menu bar coming in over a full-screen app bring the
+        // island back? The notch and the top spots (and Windows, where
+        // there is no bar to come); a bottom or middle spot on macOS stays
+        // hidden.
+        let reveal = !(cfg!(target_os = "macos") && placement.floating && placement.edge != geometry::Edge::Top);
         // Full screen: look at the screen again when it is time.
         let look = {
             let inner = ctx.island.inner.lock().unwrap();
-            let near_top = cursor.1 < placement.window.h;
+            let near_top = reveal && cursor.1 < placement.window.h;
             let every = if inner.cover.covered && near_top { COVER_FAST } else { COVER_EVERY };
             inner.cover_at.is_none_or(|t| t.elapsed() >= every).then(|| inner.screen.clone()).flatten()
         };
@@ -1602,7 +1646,7 @@ async fn poll(ctx: Arc<Ctx>) {
             // Shown with the menu bar, it stays while the pointer is on it
             // (the bar itself goes once the pointer leaves the bar).
             let held = inside && !inner.hidden;
-            let tucked = inner.cover.covered && !inner.cover.bar && !held;
+            let tucked = inner.cover.covered && !(reveal && inner.cover.bar) && !held;
             let hidden = tucked && !busy(&inner, holding, approval);
             inner.tucked = tucked;
             let appeared = inner.hidden && !hidden;

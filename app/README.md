@@ -143,7 +143,7 @@ URL parameters stage a screen or a state directly:
 | `account` | the platform account: `signed_out` (first run, nothing linked: "Sign in with SNTH" waits about 2 s in the "browser", then shows the consent screen for Mia and Maya), `consent` (signed in, the consent screen), `two` (signed in, Mia and Maya linked), `none` (signed in, no synths: the code field), `repair` (two linked, Maya refused her token). Without it: signed out, Mia linked with a code, as before |
 | `login` | with `account=signed_out`: the sign-in fails, `denied` (Cancel in the browser) or `expired` |
 | `connectfail` | with `account=consent`: linking Maya fails, `connect_unavailable`, `synth_outdated`, `synth_unreachable` |
-| `island` | the Island screen (with `screen=island`): `off` (default), `on`, `outdated` (the synth is older than the island), `taken` (another app holds the talk key), `micdenied`, `two` (with `account=two`: Maya listens to the keys), `nolink` (on, Mia offline: the keys are released). On `island.html` (the island window on a pretend desktop): `idle` (default), `hover`, `listening`, `screen`, `sending`, `accepted`, `thinking`, `working`, `driving`, `done`, `error`, `approval`, `text`, `offline`, `outdated`, `micdenied`, `asking`, `paused`, `two`, `shot`, and for speech on this computer `live` (the words of a hold), `livesent` (the text going), `offer` (the synth's offer), `offerdl`, `offerready`, `offerfail` (the model's download after "Turn on"), and for wake by name `wakeidle` (the dot), `wakepaused` (paused for a call), `woke` (a wake recording with its words), `wokename` (the name alone); with `notch=0` (a Mac without a notch) and `os=windows` (the Windows desktop: the island floats above a taskbar at the bottom; add `taskbar=top` for a taskbar on the top edge). The strip under the desktop plays a hold, a hold with its words, the offer, a wake by name (with a request, or the name alone), a call pausing it, a line of text, an answer, a request. Speech recognition on the Island screen: `stt` (on, the model here), `sttdl` (downloading), `sttspace` (the disk is too full), `sttold` (the synth does not take text yet), `sttintel` (not available), and with `os=windows` the same scenarios with Windows' single engine (Parakeet, no choice); wake by name: `wake` (on, listening), `wakedl` (its model downloading), `wakecall` (paused: the microphone is in use), `wakebt` (paused: the only microphone is in AirPods), `wakemic` (waiting for the microphone; with `os=windows` the Windows texts and sizes); `sttnospace=1` makes the mock download fail for lack of space |
+| `island` | the Island screen (with `screen=island`): `off` (default), `on`, `outdated` (the synth is older than the island), `taken` (another app holds the talk key), `micdenied`, `two` (with `account=two`: Maya listens to the keys), `nolink` (on, Mia offline: the keys are released). On `island.html` (the island window on a pretend desktop): `idle` (default), `hover`, `listening`, `screen`, `sending`, `accepted`, `thinking`, `working`, `driving`, `done`, `error`, `approval`, `text`, `offline`, `outdated`, `micdenied`, `asking`, `paused`, `two`, `shot`, and for speech on this computer `live` (the words of a hold), `livesent` (the text going), `offer` (the synth's offer), `offerdl`, `offerready`, `offerfail` (the model's download after "Turn on"), and for wake by name `wakeidle` (the dot), `wakepaused` (paused for a call), `woke` (a wake recording with its words), `wokename` (the name alone); with `notch=0` (a Mac without a notch) and `os=windows` (the Windows desktop: the island floats above a taskbar at the bottom; add `taskbar=top` for a taskbar on the top edge); `pos=<vertical>-<horizontal>` (`top-left`, `top-center`, `top-right`, `middle-left`, `middle-right`, `bottom-left`, `bottom-center`, `bottom-right`) puts the island at the owner's spot on either system (a Dock is drawn on the Mac), and on the Island screen (`screen=island&island=on&pos=...`) the position picker shows it. The strip under the desktop plays a hold, a hold with its words, the offer, a wake by name (with a request, or the name alone), a call pausing it, a line of text, an answer, a request. Speech recognition on the Island screen: `stt` (on, the model here), `sttdl` (downloading), `sttspace` (the disk is too full), `sttold` (the synth does not take text yet), `sttintel` (not available), and with `os=windows` the same scenarios with Windows' single engine (Parakeet, no choice); wake by name: `wake` (on, listening), `wakedl` (its model downloading), `wakecall` (paused: the microphone is in use), `wakebt` (paused: the only microphone is in AirPods), `wakemic` (waiting for the microphone; with `os=windows` the Windows texts and sizes); `sttnospace=1` makes the mock download fail for lack of space |
 | `faceset` | `invalid`: the synth refuses every face the editor saves |
 | `lang` | `en`, `ru` |
 | `theme` | `light`, `dark` |
@@ -539,6 +539,29 @@ talks to `<platform>/api/app/v1/*` only. There is no override in the UI.
     the taskbar (`edge: top`, still a floating pill). Pixels to points at
     the monitor's own scale; the poller asks for the placement again every
     3 s and moves the window only when it changed.
+  - Position (Settings, "Where it sits"; `IslandSettings.position`,
+    `{vertical: top|middle|bottom, horizontal: left|center|right}`, each
+    `#[serde(default)]`, absent = this system's default; saved through
+    `island_set` with `vertical` / `horizontal`, "default" for an axis):
+    eight spots, the middle of the screen is not one (middle + center is
+    refused by the command and read as the default). The default spot is
+    exactly the placement above on each system (macOS top centre at the
+    notch, Windows bottom centre with the top-taskbar rule). Every other
+    spot, macOS included, is the floating 84 x 28 pill inside the usable
+    area (Windows work area; macOS `NSScreen.visibleFrame`, the screen less
+    the menu bar and a visible Dock, and never above the menu bar or the
+    notch): top spots 8 pt under the bar / taskbar (12 pt off a bare
+    edge), bottom spots 8 pt above the Dock / taskbar (12 pt off a bare
+    edge), middle spots centred vertically; left / right spots 12 pt from
+    that side. The window (480 x 300) is flush with the pill's side, so
+    the open island is anchored to the pill's side edge and grows inwards
+    (the row mirrored at the right: the face at the right end), and in the
+    middle of a side it is centred on the pill with the face kept at the
+    pill's height. A floating spot on macOS polls the placement every 3 s
+    as Windows does (the Dock may move without a screen-parameters
+    notification); the notch never polls. Full screen: the notch and the
+    top spots come back with the menu bar, bottom and middle spots stay
+    hidden. Changing the setting places the island again at once.
   - Clicks: the webview reports the shape and the face centre
     (`island_layout`); a poller in Rust reads the pointer (macOS
     `CGEventGetLocation`, Windows `GetCursorPos`) only while the island is

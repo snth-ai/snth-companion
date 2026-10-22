@@ -2,13 +2,15 @@
 // desktop with a menu bar and, on a Mac with one, the notch, or (with
 // &os=windows) a Windows desktop with the taskbar at the bottom, the
 // island floating just above it (&taskbar=top: the taskbar on the top
-// edge, the island under it). The pointer over the desktop is the gaze;
+// edge, the island under it; &pos=bottom-right and the like: the owner's
+// spot, every spot but the macOS default floating, with a Dock drawn on
+// the Mac). The pointer over the desktop is the gaze;
 // the strip under it plays the island's moments. None of this ships in
 // the app.
 
 import { useEffect, useState } from "react";
 import { mockBackend } from "../backend";
-import { STAGE_H, STAGE_W } from "../backend/mockIsland";
+import { STAGE_DOCK, STAGE_H, STAGE_TASKBAR, STAGE_W, stageBar, stageNotch } from "../backend/mockIsland";
 import { IslandApp } from "./IslandApp";
 
 const params = new URLSearchParams(window.location.search);
@@ -46,6 +48,18 @@ const SCENARIOS = [
   "wokename",
 ];
 
+const POSITIONS = [
+  "default",
+  "top-left",
+  "top-center",
+  "top-right",
+  "middle-left",
+  "middle-right",
+  "bottom-left",
+  "bottom-center",
+  "bottom-right",
+];
+
 function setParam(key: string, value: string | null) {
   const next = new URLSearchParams(window.location.search);
   if (value === null) next.delete(key);
@@ -62,11 +76,24 @@ export function IslandStage() {
   useEffect(() => win.subscribe(() => setTick((t) => t + 1)), [win]);
   const barAway = win.fullScreen && !win.barShown;
   const desktopW = STAGE_W;
-  const frameLeft = desktopW / 2 - p.window.w / 2;
+  const frameLeft = p.window.x;
   const frameTop = p.window.y;
   const mac = win.view.os === "macos";
   const windows = win.view.os === "windows";
-  const taskbarTop = windows && p.edge === "top";
+  const taskbarTop = windows && params.get("taskbar") === "top";
+  // A floating spot on the Mac: the Dock is drawn (the default stage is
+  // left as it always was).
+  const dock = mac && Boolean(p.floating);
+  const spot = params.get("pos");
+  // The hint keeps off the island: under the top, or above the bottom.
+  const hintStyle =
+    p.edge === "top"
+      ? dock
+        ? { bottom: STAGE_DOCK + 12 }
+        : windows && !taskbarTop
+          ? { bottom: STAGE_TASKBAR + 12 }
+          : undefined
+      : { top: mac ? 60 : 40, bottom: "auto" };
 
   return (
     <div className="isl-stage">
@@ -85,7 +112,7 @@ export function IslandStage() {
         onMouseLeave={() => win.setHover(false)}
       >
         {mac ? (
-          <div className={`isl-menubar${barAway ? " away" : ""}`} style={{ height: p.notch.h }}>
+          <div className={`isl-menubar${barAway ? " away" : ""}`} style={{ height: stageBar(win.view.os) }}>
             <span>Finder</span>
             <span>File</span>
             <span>Edit</span>
@@ -94,6 +121,17 @@ export function IslandStage() {
           </div>
         ) : null}
         {p.real_notch ? <div className="isl-hw-notch" style={{ width: p.notch.w, height: p.notch.h, left: desktopW / 2 - p.notch.w / 2 }} /> : null}
+        {!p.real_notch && stageNotch(win.view.os) ? <div className="isl-hw-notch" style={{ width: 185, height: 32, left: desktopW / 2 - 185 / 2 }} /> : null}
+        {dock ? (
+          <div className="isl-dock" style={{ height: STAGE_DOCK - 8 }}>
+            <i />
+            <i />
+            <i />
+            <i />
+            <i />
+            <i />
+          </div>
+        ) : null}
         {windows ? (
           <div className={`isl-taskbar${taskbarTop ? " top" : ""}`} style={taskbarTop ? { top: 0 } : { bottom: 0 }}>
             <i />
@@ -112,11 +150,13 @@ export function IslandStage() {
           <IslandApp />
         </div>
         {pointer ? null : (
-          <div className="isl-stage-hint" style={windows && !taskbarTop ? { top: 40, bottom: "auto" } : undefined}>
+          <div className="isl-stage-hint" style={hintStyle}>
             {win.fullScreen
               ? windows
                 ? "Full screen: the island is away until a key is held, a request or an answer comes."
-                : "Full screen: the island is away. Move the pointer to the very top edge: the menu bar and the island come in."
+                : dock && p.edge !== "top"
+                  ? "Full screen: the island is away; at this spot the menu bar does not bring it back."
+                  : "Full screen: the island is away. Move the pointer to the very top edge: the menu bar and the island come in."
               : "Move the pointer over the desktop: the eyes follow it. Hover the island to open it."}
           </div>
         )}
@@ -187,6 +227,13 @@ export function IslandStage() {
         <button type="button" className="btn small" onClick={() => setParam("lang", params.get("lang") === "ru" ? "en" : "ru")}>
           EN / RU
         </button>
+      </div>
+      <div className="mock-bar">
+        {POSITIONS.map((pos) => (
+          <button key={pos} type="button" className="btn small" aria-pressed={(spot ?? "default") === pos} onClick={() => setParam("pos", pos === "default" ? null : pos)}>
+            {pos}
+          </button>
+        ))}
       </div>
     </div>
   );

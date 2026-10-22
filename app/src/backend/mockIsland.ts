@@ -35,7 +35,14 @@
 //        (the island window on a desktop; &notch=0 draws a Mac without a
 //         notch, &os=windows a Windows screen: the island floats at the
 //         bottom above a taskbar and grows upwards, &taskbar=top puts the
-//         taskbar on the top edge and the island under it. The pointer over the desktop
+//         taskbar on the top edge and the island under it. &pos=<v>-<h>
+//         (v top|middle|bottom, h left|center|right, not middle-center)
+//         puts it at the owner's spot, as Settings does: on macOS any
+//         spot but top-center is the floating pill (with a Dock drawn at
+//         the bottom), e.g. island.html?pos=bottom-right&island=done or
+//         island.html?os=windows&pos=middle-left&island=approval; on the
+//         Island screen (index.html?screen=island&island=on&pos=...) the
+//         picker shows that spot. The pointer over the desktop
 //         is the gaze; the strip under it plays a hold, a line of text, a
 //         request, an answer. &full=1 starts in full screen: the island
 //         hides, and the pointer at the desktop's top edge brings the menu
@@ -65,6 +72,8 @@ import type {
   SttModelStatus,
   UiState,
   WakeStatus,
+  IslandPosition,
+  IslandPositionChoice,
 } from "./types";
 
 /** The two model files, as the app pins them (stt/model.rs). */
@@ -137,6 +146,18 @@ function sttModelOf(scenario: string, size: number): SttModelStatus {
         : { state: "missing" };
 }
 
+/** `&pos=<vertical>-<horizontal>` (top-left, middle-right, bottom-center,
+ * ...): the owner's spot; absent or unknown = the system's default. */
+export function stagedPosition(): IslandPosition {
+  const [v, h] = (params.get("pos") ?? "").split("-");
+  const out: IslandPosition = {};
+  if (v === "top" || v === "middle" || v === "bottom") out.vertical = v;
+  if (h === "left" || h === "center" || h === "right") out.horizontal = h;
+  if (h === "centre") out.horizontal = "center";
+  if (out.vertical === "middle" && (out.horizontal ?? "center") === "center") return {};
+  return out;
+}
+
 export function stagedIslandState(os: string, links: LinkBrief[]): IslandState {
   const scenario = params.get("island") ?? "off";
   const enabled = scenario !== "off";
@@ -179,6 +200,7 @@ export function stagedIslandState(os: string, links: LinkBrief[]): IslandState {
       wake: wakeOn,
       wake_phrase: "",
       stt_tone: true,
+      position: stagedPosition(),
     },
     main_synth: mainId,
     faces: scenario === "off" ? {} : { mia: MIA_FACE },
@@ -219,8 +241,17 @@ export class MockIslandScreen {
     private changed: () => Promise<UiState>,
   ) {}
 
-  set(enabled: boolean | null, mainSynth: string | null): Promise<UiState> {
+  set(enabled: boolean | null, mainSynth: string | null, position?: IslandPositionChoice): Promise<UiState> {
     const isl = this.state().island;
+    if (position) {
+      const next: IslandPosition = { ...(isl.settings.position ?? {}) };
+      if (position.vertical === "default") delete next.vertical;
+      else next.vertical = position.vertical;
+      if (position.horizontal === "default") delete next.horizontal;
+      else next.horizontal = position.horizontal;
+      if (next.vertical === "middle" && (next.horizontal ?? "center") === "center") return Promise.reject("bad_position");
+      isl.settings.position = next;
+    }
     if (enabled !== null) {
       if (enabled && !isl.available) return Promise.reject("unsupported");
       isl.settings.enabled = enabled;
@@ -449,8 +480,64 @@ export const STAGE_W = 1512;
 export const STAGE_H = 520;
 /** The Windows taskbar on the stage. */
 export const STAGE_TASKBAR = 48;
+/** The macOS Dock on the stage (drawn only with a floating spot, so the
+ * default stage stays as it always was). */
+export const STAGE_DOCK = 64;
+
+/** The stage's Mac has a notch (&notch=0: it does not). */
+export function stageNotch(os: string): boolean {
+  return os === "macos" && params.get("notch") !== "0";
+}
+
+/** The stage's menu bar (macOS). */
+export function stageBar(os: string): number {
+  return stageNotch(os) ? 32 : os === "macos" ? 25 : 24;
+}
+
+/** The owner's spot on the stage (&pos=), as geometry.rs places it: the
+ * floating pill inside the usable area (the desktop less the menu bar
+ * and the Dock, or the taskbar), 8 points off a bar or the Dock, 12 off a
+ * bare screen edge, 12 from the side at the left and the right, centred
+ * in the middle of a side. Null: the system's default (the code below). */
+function spotPlacement(os: string): IslandPlacement | null {
+  const pos = stagedPosition();
+  const windows = os === "windows";
+  const taskbarTop = params.get("taskbar") === "top";
+  const align = pos.horizontal ?? "center";
+  const edge = pos.vertical ?? (windows ? (taskbarTop ? "top" : "bottom") : "top");
+  if (!windows && edge === "top" && align === "center") return null;
+  if (windows && pos.vertical === undefined && pos.horizontal === undefined) return null;
+  const bar = windows ? 0 : stageBar(os);
+  const area = windows
+    ? { x: 0, y: taskbarTop ? STAGE_TASKBAR : 0, w: STAGE_W, h: STAGE_H - STAGE_TASKBAR }
+    : { x: 0, y: bar, w: STAGE_W, h: STAGE_H - bar - STAGE_DOCK };
+  const above = area.y;
+  const below = STAGE_H - (area.y + area.h);
+  const w = 480;
+  const h = 300;
+  const pw = 84;
+  const ph = 28;
+  const x = align === "left" ? area.x : align === "right" ? area.x + area.w - w : area.x + area.w / 2 - w / 2;
+  const px = align === "left" ? 12 : align === "right" ? w - pw - 12 : w / 2 - pw / 2;
+  let y: number;
+  let py: number;
+  if (edge === "bottom") {
+    y = area.y + area.h - h;
+    py = h - ph - (below > 1 ? 8 : 12);
+  } else if (edge === "top") {
+    y = area.y;
+    py = above > 1 ? 8 : 12;
+  } else {
+    y = area.y + (area.h - h) / 2;
+    py = (h - ph) / 2;
+  }
+  const pill = { x: px, y: py, w: pw, h: ph };
+  return { window: { x, y, w, h }, notch: pill, pill, real_notch: false, edge, floating: true, align };
+}
 
 function placement(os: string): IslandPlacement {
+  const spot = spotPlacement(os);
+  if (spot) return spot;
   if (os === "windows") {
     // As geometry.rs places it: a floating 84 x 28 pill 8 points above the
     // taskbar (or under one on the top edge), in a 480 x 300 window kept
@@ -659,12 +746,15 @@ export class MockIslandWindow {
         }
       }, 250);
     }
-    if (this.barShown && this.pointerY > p.notch.h) {
+    if (this.barShown && this.pointerY > (p.floating ? stageBar(this.view.os) : p.notch.h)) {
       this.barShown = false;
       force = true;
     }
     const held = this.view.hover && !this.view.hidden;
-    const hidden = this.fullScreen && !this.barShown && !held && !this.busy();
+    // The menu bar brings back the notch and a top spot; a macOS bottom or
+    // middle spot stays away (mod.rs `reveal`).
+    const reveal = !(this.view.os === "macos" && p.floating && p.edge !== "top");
+    const hidden = this.fullScreen && !(reveal && this.barShown) && !held && !this.busy();
     if (hidden !== this.view.hidden || force) {
       this.view.hidden = hidden;
       if (hidden) this.view.hover = false;

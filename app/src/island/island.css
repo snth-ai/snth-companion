@@ -34,6 +34,10 @@ html.island #root {
   transform: translateY(var(--hide-y, -40px));
   pointer-events: none;
 }
+/* The middle of a side edge: out sideways. */
+.isl-root.hidden.isl-side {
+  transform: translateX(var(--hide-x, -40px));
+}
 
 /* Its size and corners move on one JS clock with the face (IslandApp,
    useMotion): no CSS transition here, or the two would drift apart. */
@@ -171,6 +175,15 @@ html.island #root {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+/* At the right of the screen the row is mirrored: the face at the right
+   end beside the pill's place, the text hugging it, the slot at the left. */
+.isl-fslot.mirror {
+  right: auto;
+  left: 4px;
+}
+.isl-frow.mirror {
+  justify-content: flex-end;
 }
 
 .isl-band {
@@ -659,4 +672,28 @@ html.island #root:has(.isl-stage) {
   text-align: center;
   font-size: 13px;
   opacity: 0.85;
+}
+/* macOS with a floating spot: the Dock at the bottom of the stage. */
+.isl-dock {
+  position: absolute;
+  bottom: 4px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.22);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  backdrop-filter: blur(20px);
+}
+.isl-dock i {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.55);
+}
+.isl-dock i:first-child {
+  background: linear-gradient(160deg, #6ac3ff, #1f6fe0);
 }
