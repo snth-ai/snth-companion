@@ -1303,6 +1303,7 @@ pub async fn ask_design(ctx: &Arc<Ctx>, synth_id: &str) -> Result<(), String> {
 // --- on-device speech-to-text: the switch, the model, the offer ---
 
 /// The chosen engine's files (the speech thread takes the choice too).
+/// On Windows that is Parakeet's whatever the settings say (`effective`).
 pub fn stt_files(ctx: &Ctx) -> Arc<stt::model::Models> {
     let e = ctx.core.island().stt_engine;
     ctx.island.stt.select(e);
@@ -1338,8 +1339,8 @@ pub fn stt_download(ctx: &Arc<Ctx>, engine: Option<SttEngine>) -> Result<(), Str
     if !stt::available() {
         return Err("unsupported".into());
     }
-    let chosen = ctx.core.island().stt_engine;
-    let e = engine.unwrap_or(chosen);
+    let chosen = stt::effective(ctx.core.island().stt_engine);
+    let e = stt::effective(engine.unwrap_or(chosen));
     let r = ctx.island.stt.models_of(e).download(stt_changed(ctx));
     if e == chosen {
         tone_download(ctx, true);
@@ -1351,7 +1352,8 @@ pub fn stt_download(ctx: &Arc<Ctx>, engine: Option<SttEngine>) -> Result<(), Str
 /// chosen engine's model is fetched if it is not here (the owner asked),
 /// and the other engine is unloaded.
 pub fn stt_engine_set(ctx: &Arc<Ctx>, engine: SttEngine) -> Result<(), String> {
-    if !stt::available() {
+    // Whisper on Windows: not in this build (Settings does not offer it).
+    if !stt::available() || !stt::ENGINES.contains(&engine) {
         return Err("unsupported".into());
     }
     ctx.core.set_island(|i| i.stt_engine = engine);
@@ -1454,11 +1456,12 @@ pub fn stt_card_hide(ctx: &Arc<Ctx>) {
 /// go. The chosen engine's: the speech goes to the synth. The tone's model
 /// goes with the last speech model.
 pub fn stt_delete(ctx: &Arc<Ctx>, engine: Option<SttEngine>) -> Result<(), String> {
-    let chosen = ctx.core.island().stt_engine;
-    let e = engine.unwrap_or(chosen);
+    let chosen = stt::effective(ctx.core.island().stt_engine);
+    let e = stt::effective(engine.unwrap_or(chosen));
     let mut result = ctx.island.stt.models_of(e).delete();
-    let other = if e == SttEngine::Whisper { SttEngine::Parakeet } else { SttEngine::Whisper };
-    if !ctx.island.stt.models_of(other).ready() {
+    // The other engine of this build (none on Windows).
+    let other_ready = stt::ENGINES.iter().any(|o| *o != e && ctx.island.stt.models_of(*o).ready());
+    if !other_ready {
         ctx.island.tone.unload();
         result = result.and(ctx.island.tone.models.delete());
     }

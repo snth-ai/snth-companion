@@ -1,5 +1,6 @@
 # Check for SNTH Connect (app/) on every push to a connect/* branch: core
-# tests, self-tests on a real Windows machine (the computer-control path,
+# tests, the island's tests and on-device speech-to-text on real models,
+# self-tests on a real Windows machine (the computer-control path,
 # the owner's apps: toast, clipboard, open, and the browser link: helper,
 # named pipe, registry), then a Windows installer as a workflow artifact. No release, no signing.
 # The release pipeline lives in connect-release.yml.
@@ -46,6 +47,62 @@ jobs:
 
       - name: Core tests
         run: cargo test -p connect-core
+
+      # The island's on-device speech-to-text on Windows: Parakeet, the
+      # Silero ONNX voice detector and the tone's emotion model, all on
+      # ONNX Runtime (no whisper.cpp on Windows). First the unit tests of
+      # the island (the engine choice, the voice detector's segment logic,
+      # the hold flow with a stand-in engine, the microphone's errors).
+      - name: Island tests
+        run: cargo test -p snth-connect island::
+
+      # Then the real thing: the pinned model files downloaded as the app
+      # downloads them (resume, sha256, rename; cached between runs), and
+      # whole holds through the speech thread on clips the Windows speech
+      # synthesizer speaks, plus one of digital silence (dropped).
+      - name: Speech clips
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force stt-e2e | Out-Null
+          Add-Type -AssemblyName System.Speech
+          $fmt = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo 16000, ([System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen), ([System.Speech.AudioFormat.AudioChannel]::Mono)
+          $lines = @(
+            "Please open the calendar and find a free afternoon next week.",
+            "Send the quarterly report to the design team before Friday.",
+            "What is the weather like in London this morning?"
+          )
+          $refs = @()
+          for ($i = 0; $i -lt $lines.Count; $i++) {
+            $s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+            $s.SetOutputToWaveFile("$PWD\stt-e2e\en$i.wav", $fmt)
+            $s.Speak($lines[$i])
+            $s.Dispose()
+            $refs += "en$i.wav`t$($lines[$i])"
+          }
+          $n = 16000 * 3
+          $w = New-Object System.IO.BinaryWriter([System.IO.File]::Create("$PWD\stt-e2e\zero3.wav"))
+          $w.Write([Text.Encoding]::ASCII.GetBytes("RIFF")); $w.Write([int](36 + 2 * $n))
+          $w.Write([Text.Encoding]::ASCII.GetBytes("WAVEfmt ")); $w.Write([int]16); $w.Write([int16]1); $w.Write([int16]1)
+          $w.Write([int]16000); $w.Write([int]32000); $w.Write([int16]2); $w.Write([int16]16)
+          $w.Write([Text.Encoding]::ASCII.GetBytes("data")); $w.Write([int](2 * $n)); $w.Write((New-Object byte[] (2 * $n)))
+          $w.Close()
+          $refs += "zero3.wav`t"
+          $refs | Set-Content -Encoding utf8 stt-e2e\refs.tsv
+          Get-ChildItem stt-e2e
+
+      - uses: actions/cache@v4
+        with:
+          path: stt-models
+          key: stt-models-${{ hashFiles('app/src-tauri/src/island/stt/model.rs') }}
+
+      - name: Speech-to-text on real models
+        timeout-minutes: 30
+        env:
+          STT_E2E_CLIPS: ${{ github.workspace }}\stt-e2e
+          STT_E2E_MAX: "10"
+          STT_E2E_DOWNLOAD_TO: ${{ github.workspace }}\stt-models\parakeet
+          STT_E2E_TONE_DOWNLOAD_TO: ${{ github.workspace }}\stt-models\tone
+        run: cargo test -p snth-connect -- --ignored stt_e2e_parakeet_onnx --nocapture --test-threads 1
 
       # The computer-control path as the app runs it, on a real Windows
       # machine: install the pinned driver through our installer, start our

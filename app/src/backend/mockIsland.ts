@@ -70,6 +70,9 @@ export const STT_SIZE = 574_041_195 + 885_098;
 /** Parakeet's files: the encoder, the decoder, the tokens, the voice
  * detector. */
 export const PARAKEET_SIZE = 652_183_999 + 18_202_004 + 93_939 + 885_098;
+/** On Windows the voice detector is the Silero ONNX file (model.rs
+ * SILERO_ONNX), Parakeet the only engine. */
+export const PARAKEET_WIN_SIZE = 652_183_999 + 18_202_004 + 93_939 + 2_327_524;
 /** Wake by name's files (wake/mod.rs): the voice detector, whisper tiny. */
 export const WAKE_SIZE = 885_098 + 32_152_673;
 
@@ -118,6 +121,17 @@ const MIA_FACE: FaceConfig = (() => {
   return face;
 })();
 
+/** A model's status in a staged scenario (stt, sttdl, sttspace...). */
+function sttModelOf(scenario: string, size: number): SttModelStatus {
+  return scenario === "stt" || scenario === "sttold" || scenario === "sttparakeet"
+    ? { state: "ready" }
+    : scenario === "sttdl"
+      ? { state: "downloading", done: Math.round(size * 0.34), total: size }
+      : scenario === "sttspace"
+        ? { state: "failed", code: "no_space", detail: `${size + 300 * 1024 * 1024} ${412 * 1024 * 1024}` }
+        : { state: "missing" };
+}
+
 export function stagedIslandState(os: string, links: LinkBrief[]): IslandState {
   const scenario = params.get("island") ?? "off";
   const enabled = scenario !== "off";
@@ -126,16 +140,13 @@ export function stagedIslandState(os: string, links: LinkBrief[]): IslandState {
   for (const l of links) supported[l.synth_id] = !(scenario === "outdated" && l.synth_id === "mia");
   const mainId = main || links[0]?.synth_id || null;
   const stt = scenario.startsWith("stt") && scenario !== "sttintel";
+  // Windows: Parakeet alone (its files, whatever the settings say).
+  const win = os === "windows";
+  const pkSize = win ? PARAKEET_WIN_SIZE : PARAKEET_SIZE;
+  const pkModel: SttModelStatus = win && stt ? sttModelOf(scenario, pkSize) : scenario === "sttparakeet" ? { state: "ready" } : { state: "missing" };
   const deviceStt: Record<string, boolean> = {};
   for (const l of links) deviceStt[l.synth_id] = scenario !== "sttold";
-  const model: SttModelStatus =
-    scenario === "stt" || scenario === "sttold"
-      ? { state: "ready" }
-      : scenario === "sttdl"
-        ? { state: "downloading", done: Math.round(STT_SIZE * 0.34), total: STT_SIZE }
-        : scenario === "sttspace"
-          ? { state: "failed", code: "no_space", detail: `${STT_SIZE + 300 * 1024 * 1024} ${412 * 1024 * 1024}` }
-          : { state: "missing" };
+  const model: SttModelStatus = scenario === "sttparakeet" ? { state: "missing" } : sttModelOf(scenario, STT_SIZE);
   const wakeOn = scenario.startsWith("wake") && scenario !== "wakeintel";
   const wakeModel: SttModelStatus =
     scenario === "wakedl" ? { state: "downloading", done: Math.round(WAKE_SIZE * 0.4), total: WAKE_SIZE } : wakeOn ? { state: "ready" } : { state: "missing" };
@@ -166,12 +177,14 @@ export function stagedIslandState(os: string, links: LinkBrief[]): IslandState {
     supported,
     device_stt: deviceStt,
     stt: {
-      available: os === "macos" && scenario !== "sttintel",
-      model: scenario === "sttparakeet" ? { state: "ready" } : model,
-      size: scenario === "sttparakeet" ? PARAKEET_SIZE : STT_SIZE,
+      available: (os === "macos" && scenario !== "sttintel") || win,
+      choices: win ? ["parakeet"] : ["whisper", "parakeet"],
+      engine: win || scenario === "sttparakeet" ? "parakeet" : "whisper",
+      model: win || scenario === "sttparakeet" ? pkModel : model,
+      size: win || scenario === "sttparakeet" ? pkSize : STT_SIZE,
       engines: {
-        whisper: { model, size: STT_SIZE },
-        parakeet: { model: scenario === "sttparakeet" ? { state: "ready" } : { state: "missing" }, size: PARAKEET_SIZE },
+        whisper: { model: win ? { state: "missing" } : model, size: STT_SIZE },
+        parakeet: { model: pkModel, size: pkSize },
       },
     },
     wake: {
@@ -249,10 +262,19 @@ export class MockIslandScreen {
 
   private sttTimers: Record<SttEngine, number> = { whisper: 0, parakeet: 0 };
 
+  /** The engine that runs for a choice (the settings' when none):
+   * Parakeet on Windows, whatever was chosen (stt/mod.rs `effective`). */
+  private sttEngine(engine?: SttEngine): SttEngine {
+    const isl = this.state().island;
+    const e = engine ?? isl.settings.stt_engine;
+    return isl.stt.choices.includes(e) ? e : isl.stt.choices[0]!;
+  }
+
   /** The chosen engine's model is the one `model` shows. */
   private sttMirror() {
     const stt = this.state().island.stt;
-    const chosen = stt.engines[this.state().island.settings.stt_engine];
+    stt.engine = this.sttEngine();
+    const chosen = stt.engines[stt.engine];
     stt.model = chosen.model;
     stt.size = chosen.size;
   }
@@ -273,7 +295,7 @@ export class MockIslandScreen {
 
   sttEngineSet(engine: SttEngine): Promise<UiState> {
     const isl = this.state().island;
-    if (!isl.stt.available) return Promise.reject("unsupported");
+    if (!isl.stt.available || !isl.stt.choices.includes(engine)) return Promise.reject("unsupported");
     isl.settings.stt_engine = engine;
     if (isl.settings.stt === "device") return this.sttDownload(engine).catch(() => this.sttChanged());
     return this.sttChanged();
@@ -287,7 +309,7 @@ export class MockIslandScreen {
   /** A pretend download: about 6 s to the end, then the check. */
   sttDownload(engine?: SttEngine): Promise<UiState> {
     const isl = this.state().island;
-    const e = engine ?? isl.settings.stt_engine;
+    const e = this.sttEngine(engine);
     const slot = isl.stt.engines[e];
     if (slot.model.state === "ready" || slot.model.state === "downloading") return this.sttChanged();
     if (params.get("sttnospace") === "1") {
@@ -316,7 +338,7 @@ export class MockIslandScreen {
 
   sttCancel(engine?: SttEngine): Promise<UiState> {
     const isl = this.state().island;
-    const e = engine ?? isl.settings.stt_engine;
+    const e = this.sttEngine(engine);
     window.clearInterval(this.sttTimers[e]);
     isl.stt.engines[e].model = { state: "missing" };
     return this.sttChanged();
@@ -324,9 +346,9 @@ export class MockIslandScreen {
 
   sttDelete(engine?: SttEngine): Promise<UiState> {
     const isl = this.state().island;
-    const e = engine ?? isl.settings.stt_engine;
+    const e = this.sttEngine(engine);
     isl.stt.engines[e].model = { state: "missing" };
-    if (e === isl.settings.stt_engine) isl.settings.stt = "synth";
+    if (e === this.sttEngine()) isl.settings.stt = "synth";
     return this.sttChanged();
   }
 

@@ -460,8 +460,14 @@ export type SttModelStatus =
   | { state: "failed"; code: string; detail: string };
 
 export interface SttState {
-  /** The engine is in this build (a Mac with Apple silicon). */
+  /** An engine is in this build (a Mac with Apple silicon, Windows x64). */
   available: boolean;
+  /** The engines of this build: both on a Mac, Parakeet alone on Windows
+   * (no choice is shown there). */
+  choices: SttEngine[];
+  /** The engine that runs for `settings.stt_engine`: Parakeet on Windows
+   * even when the settings say whisper (the default). */
+  engine: SttEngine;
   /** The chosen engine's model (with the tone's model counted in). */
   model: SttModelStatus;
   /** The download, in bytes. */

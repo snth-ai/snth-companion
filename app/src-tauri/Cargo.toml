@@ -82,15 +82,21 @@ block2 = "0.6"
 # features on.
 objc2-foundation = "0.3"
 
-# The island's on-device speech-to-text (island/stt/engine.rs): whisper.cpp
-# with Metal, built from source by cmake. Apple silicon only: the Windows
-# and Linux builds (and the Intel half of a universal build) keep sending
-# the voice to the synth. 0.15 is the line with whisper.cpp 1.7.6 (Silero
-# VAD) that still builds on Rust 1.85; 0.16 needs 1.88.
+# The island's on-device speech-to-text, whisper engine
+# (island/stt/engine.rs): whisper.cpp with Metal, built from source by
+# cmake. Apple silicon only (build.rs: cfg `whisper_stt`). 0.15 is the
+# line with whisper.cpp 1.7.6 (Silero VAD) that still builds on Rust 1.85;
+# 0.16 needs 1.88.
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 whisper-rs = { version = "=0.15.1", features = ["metal"] }
-# The island's tone of voice (island/stt/tone/emotion.rs): emotion2vec+
-# base as ONNX, on the CPU. Statically linked ONNX Runtime 1.22 (the
-# prebuilt library ort's build script fetches). rc.10 is the last line that
-# builds on Rust 1.85; later ones need 1.88.
+
+# ONNX Runtime, on the CPU: the Parakeet engine (island/stt/parakeet.rs),
+# the ONNX voice detector (island/stt/silero.rs, Windows) and the tone of
+# voice (island/stt/tone/emotion.rs). Apple-silicon Macs and Windows x64
+# (build.rs: cfg `device_stt`); Linux and the Intel half of a universal
+# Mac build keep sending the voice to the synth. Statically linked ONNX
+# Runtime 1.22 (the prebuilt library ort's build script fetches for both
+# targets). rc.10 is the last line that builds on Rust 1.85; later ones
+# need 1.88.
+[target.'cfg(any(all(target_os = "macos", target_arch = "aarch64"), all(windows, target_arch = "x86_64")))'.dependencies]
 ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "download-binaries"] }

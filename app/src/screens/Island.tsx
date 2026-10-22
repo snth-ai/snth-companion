@@ -10,6 +10,7 @@ import { useEffect, useRef, useState } from "react";
 import { backend } from "../backend";
 import type { FaceConfig, HotkeyKind, SttEngine, SttMode, UiState } from "../backend/types";
 import { FaceEditor } from "../island/faceApi";
+import { sttEngines } from "../island/sttView";
 import { acceleratorFromEvent, formatBytes, shortcutKeys } from "../lib/format";
 import { linkName, useStore } from "../lib/store";
 import { ChoiceList, Keys, Notice, Row, Section, SwitchRow } from "../ui/controls";
@@ -132,7 +133,9 @@ function SttSection(props: { name: string; takesText: boolean }) {
   const isl = state.island;
   const stt = isl.stt;
   const mode = isl.settings.stt;
-  const chosen: SttEngine = isl.settings.stt_engine ?? "whisper";
+  // The engine that runs (Parakeet on Windows even when the settings say
+  // whisper, the default), and the engines of this build.
+  const { chosen, engines, pick } = sttEngines(stt, isl.settings.stt_engine);
   const [problem, setProblem] = useState<string | null>(null);
   const run = (work: () => Promise<UiState>) => {
     setProblem(null);
@@ -151,7 +154,6 @@ function SttSection(props: { name: string; takesText: boolean }) {
     );
   }
 
-  const engines: SttEngine[] = ["whisper", "parakeet"];
   const slot = (e: SttEngine) => stt.engines?.[e] ?? { model: e === chosen ? stt.model : ({ state: "missing" } as const), size: stt.size };
 
   /** One engine's model: its status and what can be done with it. */
@@ -224,7 +226,7 @@ function SttSection(props: { name: string; takesText: boolean }) {
         onChange={(next) => run(() => backend.islandSttSet(next))}
       />
       {mode === "device" && !props.takesText ? <Notice kind="warn">{t.sttSynthOld(props.name)}</Notice> : null}
-      {mode === "device" ? (
+      {mode === "device" && pick ? (
         <ChoiceList<SttEngine>
           label={t.sttEngine}
           value={chosen}
@@ -234,6 +236,11 @@ function SttSection(props: { name: string; takesText: boolean }) {
           ]}
           onChange={(next) => run(() => backend.islandSttEngineSet(next))}
         />
+      ) : null}
+      {mode === "device" && !pick ? (
+        <div className="group">
+          <Row title={t.sttEngineOnly[chosen]} desc={t.sttEngineOnlyDesc[chosen]} />
+        </div>
       ) : null}
       {mode === "device" ? (
         <div className="group">

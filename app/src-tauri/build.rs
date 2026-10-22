@@ -99,12 +99,38 @@ const COMMANDS: &[&str] = &[
 ];
 
 fn main() {
+    stt_cfgs();
     link_compiler_rt();
     tauri_build::try_build(
         tauri_build::Attributes::new()
             .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS)),
     )
     .expect("tauri build script failed");
+}
+
+/// Two cfg names for the island's on-device speech-to-text, so the code
+/// says `#[cfg(device_stt)]` instead of repeating the target lists. Keep
+/// them in step with the target tables of Cargo.toml:
+///
+///  - `device_stt`: ONNX Runtime (`ort`) is in the build, so Parakeet, the
+///    ONNX voice detector and the tone of voice run here: Apple-silicon
+///    Macs and Windows x64.
+///  - `whisper_stt`: whisper.cpp (`whisper-rs`) is in the build too, so
+///    the whisper engine and its voice detector exist: Apple-silicon Macs
+///    only.
+fn stt_cfgs() {
+    println!("cargo:rustc-check-cfg=cfg(device_stt)");
+    println!("cargo:rustc-check-cfg=cfg(whisper_stt)");
+    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let mac_arm = os == "macos" && arch == "aarch64";
+    let windows_x64 = os == "windows" && arch == "x86_64";
+    if mac_arm || windows_x64 {
+        println!("cargo:rustc-cfg=device_stt");
+    }
+    if mac_arm {
+        println!("cargo:rustc-cfg=whisper_stt");
+    }
 }
 
 /// whisper.cpp's Metal code (island speech-to-text, Apple silicon only)

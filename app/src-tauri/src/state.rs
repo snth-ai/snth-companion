@@ -181,8 +181,14 @@ pub struct IslandDto {
 /// in the settings: `stt`, `stt_offer`, `stt_engine`).
 #[derive(Debug, Clone, Serialize)]
 pub struct SttDto {
-    /// The engine is in this build (Apple silicon).
+    /// An engine is in this build (Apple silicon, Windows x64).
     pub available: bool,
+    /// The engines of this build: whisper and Parakeet on a Mac, Parakeet
+    /// alone on Windows (Settings offers no choice there).
+    pub choices: &'static [connect_core::island::SttEngine],
+    /// The engine that runs for the owner's choice (`stt_engine` in the
+    /// settings): Parakeet on Windows even when the settings say whisper.
+    pub engine: connect_core::island::SttEngine,
     /// The chosen engine's model (with the tone's, see `stt_dto`).
     pub model: crate::island::stt::model::Status,
     /// The download, in bytes.
@@ -212,12 +218,13 @@ fn stt_dto(ctx: &Ctx) -> SttDto {
     use crate::island::stt::model::{self, Status};
     use connect_core::island::SttEngine;
     let s = ctx.core.island();
+    let engine = crate::island::stt::effective(s.stt_engine);
     let raw = |e: SttEngine| {
         let m = ctx.island.stt.models_of(e);
         SttEngineDto { model: m.status(), size: m.size() }
     };
     let chosen = {
-        let SttEngineDto { model: stt, size: stt_size } = raw(s.stt_engine);
+        let SttEngineDto { model: stt, size: stt_size } = raw(engine);
         let tone_on = s.stt_tone && ctx.island.tone.available();
         if !tone_on {
             SttEngineDto { model: stt, size: stt_size }
@@ -236,9 +243,11 @@ fn stt_dto(ctx: &Ctx) -> SttDto {
             SttEngineDto { model, size }
         }
     };
-    let pick = |e: SttEngine| if e == s.stt_engine { chosen.clone() } else { raw(e) };
+    let pick = |e: SttEngine| if e == engine { chosen.clone() } else { raw(e) };
     SttDto {
         available: crate::island::stt::available(),
+        choices: crate::island::stt::ENGINES,
+        engine,
         model: chosen.model.clone(),
         size: chosen.size,
         engines: SttEngines { whisper: pick(SttEngine::Whisper), parakeet: pick(SttEngine::Parakeet) },
