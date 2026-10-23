@@ -94,6 +94,9 @@ pub enum CoreEvent {
     /// The synth told the island about a message the owner sent from here
     /// (island.rs, `island.event`).
     Island(crate::island::IslandEvent),
+    /// The synth's spoken answer to a message sent from here
+    /// (`island.event kind=speech`): the shell plays it.
+    IslandSpeech(crate::island::IslandSpeech),
     /// A synth's face changed in the cache (read from it, set by the owner,
     /// or changed by the synth itself).
     Face { synth_id: String },
@@ -249,6 +252,8 @@ pub struct Shared {
     pub(crate) shell: crate::shell::State,
     /// The synths whose face was read (or set) in this run (island.rs).
     pub(crate) faces_read: Mutex<std::collections::HashSet<String>>,
+    /// Who takes the synth's spoken answers (the shell: `set_speech_sink`).
+    pub(crate) speech_sink: RwLock<Option<crate::island::SpeechSink>>,
     /// Where the synth last put its own pointer on the screen (screen
     /// points, top-left origin, as the driver takes them) and when: the
     /// island's eyes follow it while the synth drives. Memory only.
@@ -1369,6 +1374,7 @@ impl Core {
             transfers: crate::rpc::Transfers::default(),
             shell: crate::shell::State::default(),
             faces_read: Mutex::new(std::collections::HashSet::new()),
+            speech_sink: RwLock::new(None),
             agent_cursor: Mutex::new(None),
         });
         Core { shared }
@@ -1495,11 +1501,21 @@ impl Core {
             faces: self.shared.persisted.read().unwrap().faces.clone(),
             supported: links.iter().map(|l| (l.synth_id.clone(), crate::island::supports(l))).collect(),
             device_stt: links.iter().map(|l| (l.synth_id.clone(), crate::island::supports_device_stt(l))).collect(),
+            voice_reply: links.iter().map(|l| (l.synth_id.clone(), crate::island::supports_voice_reply(l))).collect(),
             settings,
         }
     }
 
     /// The synth the island's keys talk to right now.
+    /// The shell takes the synth's spoken answers here: the sink says at
+    /// once (within the synth's rpc) whether this computer will play one,
+    /// so a synth that lets the model choose can send a voice note to the
+    /// chat instead. Without a sink they go out as
+    /// `CoreEvent::IslandSpeech`.
+    pub fn set_speech_sink(&self, sink: crate::island::SpeechSink) {
+        *self.shared.speech_sink.write().unwrap() = Some(sink);
+    }
+
     pub fn island_main(&self) -> Option<Arc<LinkSlot>> {
         self.shared.island().main_synth_of(&self.shared.slots())
     }

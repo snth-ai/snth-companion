@@ -337,7 +337,7 @@ fn spawn_event_forwarder(ctx: Arc<Ctx>) {
                         ui::emit(&ctx.app, UiEvent::State);
                     }
                     // The island follows its own events (island/mod.rs).
-                    Ok(CoreEvent::Island(_)) => {}
+                    Ok(CoreEvent::Island(_) | CoreEvent::IslandSpeech(_)) => {}
                     Ok(_) | Err(RecvError::Lagged(_)) => {
                         tray::refresh(&ctx);
                         ui::emit(&ctx.app, UiEvent::State);
@@ -491,6 +491,7 @@ fn main() {
             commands::island_text_cancel,
             commands::island_select_synth,
             commands::island_stop,
+            commands::island_speech_stop,
             commands::island_open_app,
             commands::island_mic,
         ])

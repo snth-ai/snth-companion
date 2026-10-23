@@ -40,7 +40,8 @@ app/
     src/windows.rs     main + approval windows, navigation guard
     src/island/        the island: window + panel (panel.rs), notch math
                        (geometry.rs), hold keys (hold.rs), microphone
-                       (audio.rs), screenshot (shot.rs), the rest (mod.rs)
+                       (audio.rs), screenshot (shot.rs), the synth's
+                       spoken answer (speak.rs), the rest (mod.rs)
     src/tray.rs        tray icon and menu
     src/updates.rs     automatic updates of the app itself
     src/menu.rs        macOS application menu (clean Cmd+Q, Edit menu)
@@ -143,7 +144,7 @@ URL parameters stage a screen or a state directly:
 | `account` | the platform account: `signed_out` (first run, nothing linked: "Sign in with SNTH" waits about 2 s in the "browser", then shows the consent screen for Mia and Maya), `consent` (signed in, the consent screen), `two` (signed in, Mia and Maya linked), `none` (signed in, no synths: the code field), `repair` (two linked, Maya refused her token). Without it: signed out, Mia linked with a code, as before |
 | `login` | with `account=signed_out`: the sign-in fails, `denied` (Cancel in the browser) or `expired` |
 | `connectfail` | with `account=consent`: linking Maya fails, `connect_unavailable`, `synth_outdated`, `synth_unreachable` |
-| `island` | the Island screen (with `screen=island`): `off` (default), `on`, `outdated` (the synth is older than the island), `taken` (another app holds the talk key), `micdenied`, `two` (with `account=two`: Maya listens to the keys), `nolink` (on, Mia offline: the keys are released). On `island.html` (the island window on a pretend desktop): `idle` (default), `hover`, `listening`, `screen`, `sending`, `accepted`, `thinking`, `working`, `driving`, `done`, `error`, `approval`, `text`, `offline`, `outdated`, `micdenied`, `asking`, `paused`, `two`, `shot`, and for speech on this computer `live` (the words of a hold), `livesent` (the text going), `offer` (the synth's offer), `offerdl`, `offerready`, `offerfail` (the model's download after "Turn on"), and for wake by name `wakeidle` (the dot), `wakepaused` (paused for a call), `woke` (a wake recording with its words), `wokename` (the name alone); with `notch=0` (a Mac without a notch) and `os=windows` (the Windows desktop: the island floats above a taskbar at the bottom; add `taskbar=top` for a taskbar on the top edge); `pos=<vertical>-<horizontal>` (`top-left`, `top-center`, `top-right`, `middle-left`, `middle-right`, `bottom-left`, `bottom-center`, `bottom-right`) puts the island at the owner's spot on either system (a Dock is drawn on the Mac; `os=windows&pos=top-center` is the drawn notch flush with the top edge), and on the Island screen (`screen=island&island=on&pos=...`) the position picker shows it. The strip under the desktop plays a hold, a hold with its words, the offer, a wake by name (with a request, or the name alone), a call pausing it, a line of text, an answer, a request. Speech recognition on the Island screen: `stt` (on, the model here), `sttdl` (downloading), `sttspace` (the disk is too full), `sttold` (the synth does not take text yet), `sttintel` (not available), and with `os=windows` the same scenarios with Windows' single engine (Parakeet, no choice); wake by name: `wake` (on, listening), `wakedl` (its model downloading), `wakecall` (paused: the microphone is in use), `wakebt` (paused: the only microphone is in AirPods), `wakemic` (waiting for the microphone; with `os=windows` the Windows texts and sizes); `sttnospace=1` makes the mock download fail for lack of space |
+| `island` | the Island screen (with `screen=island`): `off` (default), `on`, `outdated` (the synth is older than the island), `taken` (another app holds the talk key), `micdenied`, `two` (with `account=two`: Maya listens to the keys), `nolink` (on, Mia offline: the keys are released). On `island.html` (the island window on a pretend desktop): `idle` (default), `hover`, `listening`, `screen`, `sending`, `accepted`, `thinking`, `working`, `driving`, `done`, `error`, `approval`, `text`, `offline`, `outdated`, `micdenied`, `asking`, `paused`, `two`, `shot`, and for speech on this computer `live` (the words of a hold), `livesent` (the text going), `offer` (the synth's offer), `offerdl`, `offerready`, `offerfail` (the model's download after "Turn on"), and for wake by name `wakeidle` (the dot), `wakepaused` (paused for a call), `woke` (a wake recording with its words), `wokename` (the name alone), and for the synth's voice reply `speaking` (Mia speaks her answer here: the face talks with the voice's level, a click stops it), `speakingwake` (the same with wake by name paused meanwhile); with `notch=0` (a Mac without a notch) and `os=windows` (the Windows desktop: the island floats above a taskbar at the bottom; add `taskbar=top` for a taskbar on the top edge); `pos=<vertical>-<horizontal>` (`top-left`, `top-center`, `top-right`, `middle-left`, `middle-right`, `bottom-left`, `bottom-center`, `bottom-right`) puts the island at the owner's spot on either system (a Dock is drawn on the Mac; `os=windows&pos=top-center` is the drawn notch flush with the top edge), and on the Island screen (`screen=island&island=on&pos=...`) the position picker shows it. The strip under the desktop plays a hold, a hold with its words, the offer, a wake by name (with a request, or the name alone), a call pausing it, a line of text, an answer, an answer aloud (a hold or a wake during it stops the voice), a request. Reply with voice on the Island screen: `voice=always|auto|off` (the owner's choice, default always), `island=voiceold` (Mia cannot answer with her voice yet: the note). Speech recognition on the Island screen: `stt` (on, the model here), `sttdl` (downloading), `sttspace` (the disk is too full), `sttold` (the synth does not take text yet), `sttintel` (not available), and with `os=windows` the same scenarios with Windows' single engine (Parakeet, no choice); wake by name: `wake` (on, listening), `wakedl` (its model downloading), `wakecall` (paused: the microphone is in use), `wakebt` (paused: the only microphone is in AirPods), `wakemic` (waiting for the microphone; with `os=windows` the Windows texts and sizes); `sttnospace=1` makes the mock download fail for lack of space |
 | `faceset` | `invalid`: the synth refuses every face the editor saves |
 | `lang` | `en`, `ru` |
 | `theme` | `light`, `dark` |
@@ -617,6 +618,60 @@ talks to `<platform>/api/app/v1/*` only. There is no override in the UI.
     client_id after a dropped link). One message at a time. `island.event`
     (rpc) moves the face: accepted, thinking, working, done with the
     summary for 6 s (channel named), error.
+  - The synth's voice reply (`src-tauri/src/island/speak.rs`, TZ
+    `tz-voice-reply.md` in the synth's repo). The Island screen's "Reply
+    with voice" (`IslandSettings.voice_reply`: `always` the default and
+    unset, `auto` the synth decides, `off` text only; saved through
+    `island_set`'s `voiceReply`). A voice message (`voice`,
+    `screen_voice`, with the audio or the device transcript) carries
+    `owner.message` `voice_reply` only to a synth whose hello_ack has
+    `island_voice_reply` (connect-core drops it otherwise); a line of text
+    never does. The synth answers with `island.event kind=speech`
+    (`{message_id, audio: {mime, data (base64)}, text, duration_ms?}`,
+    before or after `done`): mp3, WAV or Ogg Opus (aliases such as
+    `audio/mp3`, `audio/x-wav`, `audio/opus` taken). Ogg Opus is common
+    (Gemini voices, multi-chunk ElevenLabs), WAV only the synth's
+    fallback. The synth sizes the audio to the line the app advertises
+    (`capabilities.files.max_request_bytes`, 6 MB; the WS takes 8 MB), so
+    connect-core takes up to that as base64 (`MAX_SPEECH_BYTES`, 4.5 MB
+    decoded); about 90 s of speech is 1.5 MB. The synth waits for the
+    rpc's answer (up to 30 s): connect-core hands the speech to the
+    shell's sink (`Core::set_speech_sink`, `island::take_speech`, off the
+    async runtime), which decides at once and answers `{"ok":true}` once
+    playback has started (not when it ends), or an error `unavailable:
+    <why>` when it will not play it (the owner chose text only since, not
+    the answer to the last message sent from here, a hold running or being
+    sent, another app records (the wake's `mic_busy`, a call), the audio
+    does not decode). Under "synth decides" the synth then sends a voice
+    note to the chat instead; otherwise only the summary shows, as always.
+    Without a sink it is `CoreEvent::IslandSpeech` (the audio is never
+    printed). Decoded in pure Rust (symphonia 0.5 for mp3 and WAV,
+    `ogg` + `opus-decoder` for Opus, cut at 240 s). The pure-Rust Opus
+    decoder runs only about 15x real time (90 s in 4 to 8 s on Apple
+    silicon, release), so Opus streams: `speak::prepare` decodes the first
+    half second before the rpc is answered (about 50 ms), the rest is
+    decoded on `island-speech-decode` while it plays; mp3 decodes whole
+    (90 s in about 60 ms). Resampled as it comes (linear) to the default
+    output's rate and played through cpal (CoreAudio, WASAPI) on an
+    `island-speaker` thread; a buffer not decoded yet plays silence in
+    place, never a skip. One at a time: a new answer stops the one
+    that plays. The face is in the `speaking` state (mouth or a pill's
+    beans with the voice's level, sent as `island:level` every 50 ms, the
+    meter bars beside the eye); the island does not open for it, the
+    status says "Speaking" when it is open. Barge-in: any island key's
+    press, a wake, a click on the island (`island_speech_stop`, not on a
+    button) or the app's pause stops it at once; the key or the wake then
+    goes on as usual. Wake by name is paused while it plays and 300 ms
+    after (`speak::TAIL`, `Pause::Speaking`), and a wake decoded from audio
+    caught just before the answer began is dropped, so the synth never
+    wakes itself with its name; the price is that a wake cannot barge in
+    over the voice (keys and the click can). Played even when the island
+    is hidden by a full-screen app or was switched off after the message
+    went (connect-core lets `kind=speech` through then; every other kind
+    is refused): the sound does not depend on the window. One log line per
+    answer: `island: speech: <bytes> bytes of <mime>, message <id>:
+    played <s> s` / `stopped after <s> of <s> s: <why>` / `failed after
+    ...: <why>` / `skipped: <why>`.
   - Faces: cached per synth in settings.json (`faces`), read with
     `face.get` when a synth that announces `island` links, saved with
     `face.set` from the editor on the Island screen, replaced live by
@@ -1094,6 +1149,19 @@ then split off), so it waits for the release manager.
   change, the microphone prompt and a real recording, the helper's
   `get_desktop_state` picture (and which display it takes), the island out
   of the picture, the keys on Windows, a whole round trip with a synth.
+- The synth's voice reply, live. Tested: the setting and `voice_reply`
+  (only with a voice message, only to a synth that announces it), the
+  `speech` event's checks, decoding of an mp3, an Ogg Opus and a WAV
+  fixture, the resampling, one answer at a time, the stop and the wake's
+  pause with its tail, the shell answering within the rpc (unit tests);
+  a real playback of the Opus fixture
+  through CoreAudio on an Apple-silicon Mac (`speak_real_device`,
+  ignored, run by hand; with `SPEAK_FILE=<3 s Ogg Opus>` the streamed
+  path, also finished); the same test on the Windows CI machine, which
+  may have no output device. Never done: WASAPI playback on a real
+  Windows PC (shared mode at the device's mix format, a Bluetooth
+  headset), a real answer from a synth end to end, barge-in by a real key
+  over a real voice, a call detected at the moment an answer arrives.
 - On-device speech-to-text, live. Tested: the cutting, stitching, silence,
   hallucination filter, language choice and offer rules (unit tests), and
   the real model through the speech thread on generated Russian and

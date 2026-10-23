@@ -78,6 +78,14 @@ windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_Audio
 # need system headers in the build).
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
 cpal = "0.18"
+# The synth's spoken answer on the island (island/speak.rs, tz-voice-reply
+# .md): decoded here, played through cpal above on the default output.
+# Pure Rust, no C library in the build: symphonia for mp3 and WAV (0.5:
+# Rust 1.53; rodio would bring a second cpal and needs Rust 1.87), the
+# Ogg pages and a pure-Rust Opus decoder for Ogg Opus.
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "wav", "pcm"] }
+ogg = "0.9"
+opus-decoder = "0.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Two calls of SafariServices about the app's own Safari extension: is it

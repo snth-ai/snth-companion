@@ -207,11 +207,11 @@ const RARE_COOLDOWN = 180;
 const TIMELINE: Partial<Record<FaceState, number>> = { accepted: 0.8, done: 1.5, error: 0.6, approval: 0.45 };
 
 /** States worth a blink when the face turns its attention to them. */
-const BLINK_INTO: ReadonlySet<FaceState> = new Set(["idle", "listening", "thinking", "working", "driving"]);
+const BLINK_INTO: ReadonlySet<FaceState> = new Set(["idle", "listening", "speaking", "thinking", "working", "driving"]);
 const BLINK_COOLDOWN = 1.2;
 
 /** States drawn with a symbol beside the eyes (Face.tsx). */
-const SYMBOL_STATES: ReadonlySet<FaceState> = new Set(["driving", "approval", "error", "listening"]);
+const SYMBOL_STATES: ReadonlySet<FaceState> = new Set(["driving", "approval", "error", "listening", "speaking"]);
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
@@ -356,6 +356,24 @@ export function targetPose(input: TargetInput): Pose {
       p.hr = 4;
       p.hx = 0;
       p.hy = -0.5;
+      break;
+    }
+
+    case "speaking": {
+      // The synth's own voice, aloud on the owner's computer: a warm look
+      // at the person, the mouth opening with the voice's level, the head
+      // and brows moving a little with the phrases.
+      p.gx = look.x * 0.4;
+      p.gy = 0.05 + look.y * 0.3;
+      both("u", rest * 0.2);
+      both("l", 0.12 + level * 0.06);
+      p.lowCurve = 0.2;
+      both("s", 1.01 + level * 0.03);
+      brows(0.12 + level * 0.25, 3);
+      p.smile = Math.max(baseSmile, 0.35);
+      p.open = Math.max(baseOpen * 0.4, 0.05 + level * 0.55);
+      p.hy = -0.3 - level * 0.9;
+      p.hr = (look.x * 2 + Math.sin(t * 1.7) * 0.8) * leanAmt;
       break;
     }
 
@@ -574,6 +592,13 @@ function pillPose(p: Pose, state: FaceState, st: number, t: number, level: numbe
       // not bigger, so the meter beside the eye keeps its room.
       p.stretch = 0.06 + level * 0.12;
       p.uL = p.uR = 0;
+      p.sL = p.sR = 1;
+      break;
+    case "speaking":
+      // No mouth to move: the beans bob with the voice (squashed on each
+      // syllable), cheeks a little up.
+      p.stretch = -0.04 - level * 0.14;
+      p.lL = p.lR = 0.1 + level * 0.08;
       p.sL = p.sR = 1;
       break;
     case "accepted":
@@ -852,6 +877,7 @@ function ambientFps(state: FaceState, level: number): number {
     case "thinking":
       return 24;
     case "listening":
+    case "speaking":
       return level > 0.01 ? 60 : 24;
     default:
       return 0;
@@ -1199,8 +1225,9 @@ export class FaceSim {
       if (eff === "idle") this.nextEmote = now + this.emoteGap(now);
     }
 
-    // Microphone level: 30 ms attack, 140 ms release.
-    const lv = this.state === "listening" ? clamp(level, 0, 1) : 0;
+    // Microphone level (or the synth's own voice): 30 ms attack, 140 ms
+    // release.
+    const lv = this.state === "listening" || this.state === "speaking" ? clamp(level, 0, 1) : 0;
     this.level += (lv - this.level) * (1 - Math.exp(-dt / (lv > this.level ? 0.03 : 0.14)));
     this.levelSlow += (this.level - this.levelSlow) * (1 - Math.exp(-dt / 0.22));
 
@@ -1303,7 +1330,8 @@ export class FaceSim {
     const fading = this.fadeFrom !== null && now - this.fadeStart < FADE;
     if (!fading) this.fadeFrom = null;
     const rigFps = this.rig && this.state !== "offline" ? this.rig.ambientFps(reduced) : 0;
-    const fps = reduced ? (this.state === "listening" && this.level > 0.01 ? 30 : 0) : Math.max(ambientFps(this.state, this.level), rigFps);
+    const voiced = this.state === "listening" || this.state === "speaking";
+    const fps = reduced ? (voiced && this.level > 0.01 ? 30 : 0) : Math.max(ambientFps(this.state, this.level), rigFps);
     // Fast things (a blink, an emote, a one-shot timeline, a cross-fade) get
     // every frame; the slow ambient motion of a state gets its capped rate.
     // The symbols beside the eyes fade in over 150 ms after a state change.

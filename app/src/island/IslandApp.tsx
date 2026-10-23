@@ -19,6 +19,12 @@
 // it on (and then the model's download) is a card the shell sends only
 // while the island is idle.
 //
+// The synth's spoken answer (`view.speaking`, tz-voice-reply.md): the
+// face speaks (its mouth, or a pill's beans, move with the voice's level,
+// the meter bars beside the eye), the status says so when the island is
+// open, and a click anywhere on the island but a button stops the voice.
+// The island does not open for it by itself.
+//
 // Wake by name: while it listens a small dim dot sits in the closed
 // island's right ear (a hollow ring while it paused by itself; hovering
 // says why). The name heard, the island opens as for a hold; a click on
@@ -105,6 +111,7 @@ const FLOAT_SLOT = 22;
 export function faceStateOf(v: IslandView, now: number): FaceState {
   if (v.approval) return "approval";
   if (v.hold) return "listening";
+  if (v.speaking) return "speaking";
   if (!v.synth || !v.synth.online || v.paused) return "offline";
   if (v.sending) return "thinking";
   const m = v.message;
@@ -134,6 +141,7 @@ function useClock(active: boolean): number {
 function glyphShows(state: FaceState, sending: boolean): boolean {
   switch (state) {
     case "listening":
+    case "speaking":
     case "approval":
     case "error":
     case "driving":
@@ -155,6 +163,7 @@ function glyphShows(state: FaceState, sending: boolean): boolean {
 function Glyph(props: { state: FaceState; sending: boolean }) {
   switch (props.state) {
     case "listening":
+    case "speaking":
     case "approval":
     case "error":
     case "driving":
@@ -422,7 +431,7 @@ export function IslandApp() {
     };
   }, [refresh]);
 
-  const busy = Boolean(view && (view.hold || view.sending || view.message || view.notice));
+  const busy = Boolean(view && (view.hold || view.sending || view.message || view.notice || view.speaking));
   const now = useClock(busy);
 
   const lang = view?.lang ?? "en";
@@ -531,6 +540,16 @@ export function IslandApp() {
   const keys = view.hotkeys.voice ? shortcutText(view.hotkeys.voice, view.os) : "";
   const wake: WakeStatus = view.wake ?? { state: "off" };
   const woke = Boolean(view.hold && wake.state === "woke");
+  const speaking = Boolean(view.speaking && !view.hold);
+  // A click on the island: cancels a wake that records, stops the synth's
+  // voice (not a click on one of the island's buttons or the line of text).
+  const onShapeClick =
+    woke || speaking
+      ? (e: { target: EventTarget }) => {
+          if (e.target instanceof Element && e.target.closest("button, input")) return;
+          void (woke ? backend.islandWakeCancel() : backend.islandSpeechStop());
+        }
+      : undefined;
 
   // The line under the name.
   let status: ReactNode = null;
@@ -545,7 +564,10 @@ export function IslandApp() {
       <span className="isl-timer">{mmss(now - view.hold_since_ms)}</span>
     </>
   );
-  else if (view.sending) status = t.sending;
+  else if (speaking) {
+    status = t.speaking;
+    detail = m && m.stage === "done" && m.summary ? <p className="isl-summary selectable">{m.summary}</p> : null;
+  } else if (view.sending) status = t.sending;
   else if (m && m.stage === "accepted") status = t.thinking;
   else if (m && m.stage === "working") status = view.driving ? t.driving : t.working;
   else if (m && m.stage === "done" && summaryShown) {
@@ -747,7 +769,8 @@ export function IslandApp() {
           ref={shapeRef}
           className={`isl-shape float ${middle ? "edge-middle" : atBottom ? "edge-bottom" : "edge-top"} align-${align} state-${state}`}
           style={{ ["--accent" as string]: accent, left: fLeft, top: fTop, width: fWidth, height: fHeight, borderRadius: fRadius }}
-          onClick={woke ? () => void backend.islandWakeCancel() : undefined}
+          onClick={onShapeClick}
+          title={speaking ? t.speakingHint : undefined}
         >
           {/* The card shows as far as the shape has grown, from the row out. */}
           <div className={`isl-clip isl-fclip${atBottom ? " up" : ""}`} style={{ top: atBottom ? 0 : rowH, height: Math.max(0, fHeight - rowH) }}>
@@ -812,7 +835,8 @@ export function IslandApp() {
         ref={shapeRef}
         className={`isl-shape state-${state}${p.real_notch ? " notch" : ""}`}
         style={{ ["--accent" as string]: accent, left, width, height, borderBottomLeftRadius: radius, borderBottomRightRadius: radius }}
-        onClick={woke ? () => void backend.islandWakeCancel() : undefined}
+        onClick={onShapeClick}
+        title={speaking ? t.speakingHint : undefined}
       >
         <div className="isl-band" style={{ height: notchH }}>
           <div className="isl-ear left" style={{ width: (p.pill.w - p.notch.w) / 2 }} />

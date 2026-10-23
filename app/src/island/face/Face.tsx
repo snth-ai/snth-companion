@@ -1171,7 +1171,8 @@ function drawFace(face: FaceConfig, fr: Frame, o: DrawOpts): ReactElement {
             <circle cy={3.6} r={1.1} />
           </g>,
         );
-      case "listening": {
+      case "listening":
+      case "speaking": {
         // Three bars, 1.5 px wide with 1.5 px gaps, 3 to 10 px tall; never
         // below 45 % opacity while the microphone is open.
         const lv = [fr.level * 0.85, Math.max(fr.level, fr.levelSlow * 1.1), fr.levelSlow * 0.9];

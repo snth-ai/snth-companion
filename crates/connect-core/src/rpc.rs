@@ -176,7 +176,7 @@ async fn dispatch(shared: &Arc<Shared>, req: &Request) -> Result<Value, String> 
         "permission.request" => permission_request(shared, req).await,
         // The life of a message the owner sent from the island, and the
         // synth's own face changes (island.rs).
-        "island.event" => crate::island::handle_event(shared, &req.params),
+        "island.event" => crate::island::handle_event(shared, &req.params).await,
         "device.info" => Ok(wire::device_info(
             &shared.device_id(),
             &shared.device_name(),

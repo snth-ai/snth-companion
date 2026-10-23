@@ -112,6 +112,7 @@ export const faceEn = {
     idle: "Idle",
     sleeping: "Asleep",
     listening: "Listening",
+    speaking: "Speaking",
     accepted: "Got it",
     thinking: "Thinking",
     working: "Working",
