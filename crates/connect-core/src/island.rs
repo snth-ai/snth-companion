@@ -92,10 +92,12 @@ pub const SEND_TIMEOUT: Duration = Duration::from_secs(90);
 /// before the one retry with the same client_id.
 const RETRY_WAIT: Duration = Duration::from_secs(10);
 
-/// The largest spoken answer (`island.event kind=speech`), decoded. The
-/// synth keeps it to about 90 s of mp3 (1.5 MB); the request line (6 MB,
-/// rpc.rs `MAX_REQUEST_LINE`) holds this much as base64 with room left.
-pub const MAX_SPEECH_BYTES: usize = 4 * 1024 * 1024;
+/// The largest spoken answer (`island.event kind=speech`), decoded: what
+/// the request line (rpc.rs `MAX_REQUEST_LINE`, 6 MB, advertised to the
+/// synth as `capabilities.files.max_request_bytes`, which the synth sizes
+/// the audio by) holds as base64. The synth keeps it to about 90 s of
+/// speech (1.5 MB of mp3) anyway.
+pub const MAX_SPEECH_BYTES: usize = crate::rpc::MAX_REQUEST_LINE / 4 * 3;
 /// The words of a spoken answer kept for the island and the log.
 const MAX_SPEECH_TEXT_CHARS: usize = 2000;
 
@@ -1024,6 +1026,13 @@ pub struct IslandSpeech {
     pub duration_ms: Option<u64>,
 }
 
+/// The shell's answer to a spoken answer, given within the synth's rpc
+/// (which waits for it): Ok = it plays (it was taken; playback goes on
+/// after the answer), Err = this computer will not play it, with the
+/// reason (the synth, when the model chose to speak, sends a voice note
+/// to the chat instead). Called off the async runtime (it may decode).
+pub type SpeechSink = Arc<dyn Fn(IslandSpeech) -> Result<(), String> + Send + Sync>;
+
 /// The kinds of audio the shell plays: mp3 (what the synth sends), WAV
 /// (PCM) and Ogg Opus.
 pub const SPEECH_MIMES: [&str; 3] = ["audio/mpeg", "audio/wav", "audio/ogg"];
@@ -1070,7 +1079,7 @@ fn speech_of(synth_id: String, params: &Value) -> Result<IslandSpeech, String> {
 
 /// The rpc `island.event` (rpc.rs). Answered `{"ok":true}`; the synth
 /// ignores errors, so a refusal is only a labeled line for its log.
-pub(crate) fn handle_event(shared: &Arc<Shared>, params: &Value) -> Result<Value, String> {
+pub(crate) async fn handle_event(shared: &Arc<Shared>, params: &Value) -> Result<Value, String> {
     let kind = params.get("kind").and_then(Value::as_str).unwrap_or("");
     // The spoken answer to a message sent from here plays even when the
     // owner switched the island off since (the sound does not depend on
@@ -1098,7 +1107,11 @@ pub(crate) fn handle_event(shared: &Arc<Shared>, params: &Value) -> Result<Value
     }
     if kind == "speech" {
         let speech = speech_of(synth_id, params)?;
-        shared.emit(CoreEvent::IslandSpeech(speech));
+        let sink = shared.speech_sink.read().unwrap().clone();
+        match sink {
+            Some(sink) => tokio::task::spawn_blocking(move || sink(speech)).await.map_err(|e| format!("unavailable: {e}"))??,
+            None => shared.emit(CoreEvent::IslandSpeech(speech)),
+        }
         return Ok(json!({"ok": true}));
     }
     let text = |key: &str, max: usize| params.get(key).and_then(Value::as_str).map(|s| clip(s, max)).unwrap_or_default();

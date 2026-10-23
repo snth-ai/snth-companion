@@ -629,17 +629,32 @@ talks to `<platform>/api/app/v1/*` only. There is no override in the UI.
     never does. The synth answers with `island.event kind=speech`
     (`{message_id, audio: {mime, data (base64)}, text, duration_ms?}`,
     before or after `done`): mp3, WAV or Ogg Opus (aliases such as
-    `audio/mp3`, `audio/x-wav`, `audio/opus` taken), at most 4 MB decoded
-    (`MAX_SPEECH_BYTES`); the app's WS takes 8 MB, the request line 6 MB,
-    so about 90 s of mp3 (2 MB of base64) fits unchanged. connect-core
-    emits `CoreEvent::IslandSpeech` (the audio is never printed); the
-    shell plays only the answer to the last message sent from here, not
-    while a hold runs or is being sent, and not while another app records
-    (the wake's `mic_busy`, a call): then only the summary shows, as
-    always. Decoded in pure Rust (symphonia 0.5 for mp3 and WAV, `ogg` +
-    `opus-decoder` for Opus, cut at 240 s), resampled once to the default
+    `audio/mp3`, `audio/x-wav`, `audio/opus` taken). Ogg Opus is common
+    (Gemini voices, multi-chunk ElevenLabs), WAV only the synth's
+    fallback. The synth sizes the audio to the line the app advertises
+    (`capabilities.files.max_request_bytes`, 6 MB; the WS takes 8 MB), so
+    connect-core takes up to that as base64 (`MAX_SPEECH_BYTES`, 4.5 MB
+    decoded); about 90 s of speech is 1.5 MB. The synth waits for the
+    rpc's answer (up to 30 s): connect-core hands the speech to the
+    shell's sink (`Core::set_speech_sink`, `island::take_speech`, off the
+    async runtime), which decides at once and answers `{"ok":true}` once
+    playback has started (not when it ends), or an error `unavailable:
+    <why>` when it will not play it (the owner chose text only since, not
+    the answer to the last message sent from here, a hold running or being
+    sent, another app records (the wake's `mic_busy`, a call), the audio
+    does not decode). Under "synth decides" the synth then sends a voice
+    note to the chat instead; otherwise only the summary shows, as always.
+    Without a sink it is `CoreEvent::IslandSpeech` (the audio is never
+    printed). Decoded in pure Rust (symphonia 0.5 for mp3 and WAV,
+    `ogg` + `opus-decoder` for Opus, cut at 240 s). The pure-Rust Opus
+    decoder runs only about 15x real time (90 s in 4 to 8 s on Apple
+    silicon, release), so Opus streams: `speak::prepare` decodes the first
+    half second before the rpc is answered (about 50 ms), the rest is
+    decoded on `island-speech-decode` while it plays; mp3 decodes whole
+    (90 s in about 60 ms). Resampled as it comes (linear) to the default
     output's rate and played through cpal (CoreAudio, WASAPI) on an
-    `island-speaker` thread. One at a time: a new answer stops the one
+    `island-speaker` thread; a buffer not decoded yet plays silence in
+    place, never a skip. One at a time: a new answer stops the one
     that plays. The face is in the `speaking` state (mouth or a pill's
     beans with the voice's level, sent as `island:level` every 50 ms, the
     meter bars beside the eye); the island does not open for it, the
@@ -1138,9 +1153,11 @@ then split off), so it waits for the release manager.
   (only with a voice message, only to a synth that announces it), the
   `speech` event's checks, decoding of an mp3, an Ogg Opus and a WAV
   fixture, the resampling, one answer at a time, the stop and the wake's
-  pause with its tail (unit tests); a real playback of the mp3 fixture
+  pause with its tail, the shell answering within the rpc (unit tests);
+  a real playback of the Opus fixture
   through CoreAudio on an Apple-silicon Mac (`speak_real_device`,
-  ignored, run by hand); the same test on the Windows CI machine, which
+  ignored, run by hand; with `SPEAK_FILE=<3 s Ogg Opus>` the streamed
+  path, also finished); the same test on the Windows CI machine, which
   may have no output device. Never done: WASAPI playback on a real
   Windows PC (shared mode at the device's mix format, a Bluetooth
   headset), a real answer from a synth end to end, barge-in by a real key

@@ -1581,6 +1581,12 @@ pub fn spawn(ctx: Arc<Ctx>) {
             tauri::async_runtime::spawn(async move { emit_view(&ctx) });
         }
     }));
+    // The synth's spoken answers: answered within its rpc (`take_speech`).
+    let weak = Arc::downgrade(&ctx);
+    ctx.core.set_speech_sink(Arc::new(move |s| match weak.upgrade() {
+        Some(ctx) => take_speech(&ctx, s),
+        None => Err("unavailable: the app is closing".into()),
+    }));
     let mut events = ctx.core.subscribe();
     let poll_ctx = ctx.clone();
     tauri::async_runtime::spawn(async move { poll(poll_ctx).await });
@@ -1665,76 +1671,88 @@ fn speech_unwanted(ctx: &Arc<Ctx>, s: &IslandSpeech) -> Option<String> {
     None
 }
 
-/// `island.event kind=speech`: play it, or say in the log why not. One log
-/// line per answer: its size and type, and played (how long), stopped (by
-/// what), failed or skipped (why).
+/// `island.event kind=speech` (connect-core's speech sink, within the
+/// synth's rpc, off the async runtime): Ok = taken, it plays (the answer
+/// goes back at once, playback goes on); Err = not played here, with the
+/// reason (the synth, when the model chose to speak, sends a voice note to
+/// the chat instead). One log line per answer: its size and type, and
+/// played (how long), stopped (by what), failed or skipped (why).
+pub fn take_speech(ctx: &Arc<Ctx>, s: IslandSpeech) -> Result<(), String> {
+    let bytes = s.audio.0.len();
+    let what = format!("{bytes} bytes of {}, message {}", s.mime, if s.message_id.is_empty() { "?" } else { &s.message_id });
+    let skip = |why: String| {
+        connect_core::logln!("island: speech: {what}: skipped: {why}");
+        Err(format!("unavailable: {why}"))
+    };
+    // The owner chose text only since the message went.
+    if ctx.core.island().voice_reply() == core_island::VoiceReply::Off {
+        return skip("the owner chose text only on this computer".into());
+    }
+    if let Some(why) = speech_unwanted(ctx, &s) {
+        return skip(why);
+    }
+    // A call: the synth must not talk into it. The text shows as always
+    // (the summary of `done`).
+    let (busy, who) = wake::system::mic_busy();
+    if busy {
+        return skip(format!("a call, the microphone is in use by {}", who.join(", ")));
+    }
+    // Checked and started (Opus: the first half second; the rest is
+    // decoded while it plays).
+    let voice = match speak::prepare(&s.mime, &s.audio.0) {
+        Ok(v) => v,
+        Err(e) => return skip(format!("it did not decode: {e}")),
+    };
+    // Decoding took a moment: a hold may have started since.
+    if let Some(why) = speech_unwanted(ctx, &s) {
+        return skip(why);
+    }
+    let total_ms = if voice.ms > 0 { voice.ms } else { s.duration_ms.unwrap_or(0) };
+    let (id, stop) = ctx.island.speaker.begin();
+    // Wake by name goes deaf before the first sound.
+    ctx.island.wake_word.kick();
+    ctx.island.inner.lock().unwrap().speaking =
+        Some((id, SpeakingView { message_id: s.message_id.clone(), text: s.text.clone(), since_ms: now_ms(), ms: total_ms }));
+    emit_view(ctx);
+    let level_ctx = ctx.clone();
+    let on_level: Arc<dyn Fn(f32) + Send + Sync> = Arc::new(move |level: f32| {
+        if let Some(w) = window(&level_ctx) {
+            let _ = w.emit_to(WINDOW, LEVEL_EVENT, level);
+        }
+    });
+    let end_ctx = ctx.clone();
+    let on_end = Box::new(move |end: speak::End, took: Duration| {
+        let secs = took.as_secs_f32();
+        let total = total_ms as f32 / 1000.0;
+        match &end {
+            speak::End::Finished => connect_core::logln!("island: speech: {what}: played {total:.1} s"),
+            speak::End::Stopped(why) => connect_core::logln!("island: speech: {what}: stopped after {secs:.1} of {total:.1} s: {why}"),
+            speak::End::Failed(e) => connect_core::logln!("island: speech: {what}: failed after {secs:.1} s: {e}"),
+        }
+        let ctx = end_ctx.clone();
+        tauri::async_runtime::spawn(async move {
+            {
+                let mut inner = ctx.island.inner.lock().unwrap();
+                if inner.speaking.as_ref().is_some_and(|(n, _)| *n == id) {
+                    inner.speaking = None;
+                }
+            }
+            emit_view(&ctx);
+            // Wake by name listens again once the tail is over.
+            tokio::time::sleep(speak::TAIL + Duration::from_millis(20)).await;
+            ctx.island.wake_word.kick();
+        });
+    });
+    ctx.island.speaker.play(id, stop, speak::Job { voice, on_level, on_end });
+    Ok(())
+}
+
+/// A spoken answer that came as an event (no sink set yet): the same, off
+/// the async runtime, the answer to the synth already given.
 fn on_speech(ctx: &Arc<Ctx>, s: IslandSpeech) {
     let ctx = ctx.clone();
-    tauri::async_runtime::spawn(async move {
-        let bytes = s.audio.0.len();
-        let what = format!("{bytes} bytes of {}, message {}", s.mime, if s.message_id.is_empty() { "?" } else { &s.message_id });
-        if let Some(why) = speech_unwanted(&ctx, &s) {
-            connect_core::logln!("island: speech: {what}: skipped: {why}");
-            return;
-        }
-        // A call: the synth must not talk into it. The text shows as
-        // always (the summary of `done`).
-        let (busy, who) = tokio::task::spawn_blocking(wake::system::mic_busy).await.unwrap_or_default();
-        if busy {
-            connect_core::logln!("island: speech: {what}: skipped: a call, the microphone is in use by {}", who.join(", "));
-            return;
-        }
-        let (mime, audio) = (s.mime.clone(), s.audio.clone());
-        let decoded = tokio::task::spawn_blocking(move || speak::decode(&mime, &audio.0)).await.map_err(|e| e.to_string()).and_then(|r| r);
-        let pcm = match decoded {
-            Ok(p) => p,
-            Err(e) => {
-                connect_core::logln!("island: speech: {what}: skipped: it did not decode: {e}");
-                return;
-            }
-        };
-        // Decoding took a moment: a hold may have started since.
-        if let Some(why) = speech_unwanted(&ctx, &s) {
-            connect_core::logln!("island: speech: {what}: skipped: {why}");
-            return;
-        }
-        let total_ms = pcm.ms();
-        let (id, stop) = ctx.island.speaker.begin();
-        // Wake by name goes deaf before the first sound.
-        ctx.island.wake_word.kick();
-        ctx.island.inner.lock().unwrap().speaking =
-            Some((id, SpeakingView { message_id: s.message_id.clone(), text: s.text.clone(), since_ms: now_ms(), ms: total_ms }));
-        emit_view(&ctx);
-        let level_ctx = ctx.clone();
-        let on_level: Arc<dyn Fn(f32) + Send + Sync> = Arc::new(move |level: f32| {
-            if let Some(w) = window(&level_ctx) {
-                let _ = w.emit_to(WINDOW, LEVEL_EVENT, level);
-            }
-        });
-        let end_ctx = ctx.clone();
-        let on_end = Box::new(move |end: speak::End, took: Duration| {
-            let secs = took.as_secs_f32();
-            let total = total_ms as f32 / 1000.0;
-            match &end {
-                speak::End::Finished => connect_core::logln!("island: speech: {what}: played {total:.1} s"),
-                speak::End::Stopped(why) => connect_core::logln!("island: speech: {what}: stopped after {secs:.1} of {total:.1} s: {why}"),
-                speak::End::Failed(e) => connect_core::logln!("island: speech: {what}: failed after {secs:.1} s: {e}"),
-            }
-            let ctx = end_ctx.clone();
-            tauri::async_runtime::spawn(async move {
-                {
-                    let mut inner = ctx.island.inner.lock().unwrap();
-                    if inner.speaking.as_ref().is_some_and(|(n, _)| *n == id) {
-                        inner.speaking = None;
-                    }
-                }
-                emit_view(&ctx);
-                // Wake by name listens again once the tail is over.
-                tokio::time::sleep(speak::TAIL + Duration::from_millis(20)).await;
-                ctx.island.wake_word.kick();
-            });
-        });
-        ctx.island.speaker.play(id, stop, speak::Job { pcm, on_level, on_end });
+    tauri::async_runtime::spawn_blocking(move || {
+        let _ = take_speech(&ctx, s);
     });
 }
 

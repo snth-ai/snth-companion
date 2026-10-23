@@ -814,3 +814,35 @@ async fn a_spoken_answer_reaches_the_shell_with_its_audio() {
     assert!(matches!(events.try_recv(), Ok(CoreEvent::IslandSpeech(_))));
     assert!(event_from(&core, "mia", json!({"kind": "done", "message_id": "m"})).await.unwrap_err().starts_with("denied: "));
 }
+
+/// The shell's sink answers within the synth's rpc: taken (playback goes
+/// on after the answer) or refused with its reason, which the synth reads
+/// as "this computer will not play it" (under auto: a voice note to the
+/// chat instead).
+#[tokio::test]
+async fn the_shell_answers_a_spoken_answer_within_the_rpc() {
+    let (core, _q) = linked(&[("mia", WITH_VOICE)]);
+    core.set_island(|i| i.enabled = true);
+    let mut events = core.subscribe();
+    while events.try_recv().is_ok() {}
+    let taken = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = taken.clone();
+    core.set_speech_sink(Arc::new(move |s: IslandSpeech| {
+        if s.message_id == "om_refused" {
+            return Err("unavailable: a call, the microphone is in use".into());
+        }
+        seen.lock().unwrap().push(s.message_id);
+        Ok(())
+    }));
+    let ev = |id: &str| json!({"kind": "speech", "message_id": id, "audio": {"mime": "audio/ogg", "data": "AAEC"}, "text": "hi"});
+    assert_eq!(event_from(&core, "mia", ev("om_1")).await.unwrap(), json!({"ok": true}));
+    let refused = event_from(&core, "mia", ev("om_refused")).await.unwrap_err();
+    assert!(refused.starts_with("unavailable: a call"), "{refused}");
+    assert_eq!(*taken.lock().unwrap(), vec!["om_1".to_string()]);
+    // With a sink nothing goes out as an event.
+    assert!(events.try_recv().is_err());
+    // Whatever the synth sizes to the advertised line (its room: the line
+    // less its slack and the text, as base64) is within the limit here.
+    let synth_room = (crate::rpc::MAX_REQUEST_LINE - 1024) / 4 * 3;
+    assert!(synth_room <= MAX_SPEECH_BYTES && b64_len(MAX_SPEECH_BYTES) <= crate::rpc::MAX_REQUEST_LINE);
+}
