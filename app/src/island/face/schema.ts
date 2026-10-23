@@ -33,6 +33,7 @@ export const FACE_STATES = [
   "idle",
   "sleeping",
   "listening",
+  "speaking",
   "accepted",
   "thinking",
   "working",

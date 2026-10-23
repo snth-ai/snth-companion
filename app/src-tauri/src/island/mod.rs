@@ -51,12 +51,27 @@
 //! With wake by name on (`wake/`, off by default) the owner may say the
 //! main synth's name instead of holding a key: the wake becomes a hold of
 //! the voice key and is sent the same way.
+//!
+//! The synth's voice reply (tz-voice-reply.md, `speak.rs`): with the
+//! owner's "Reply with voice" on (always or auto, the default always) a
+//! voice message carries `voice_reply`, and the synth may answer with an
+//! `island.event kind=speech`: the audio of its answer, played here on the
+//! default output while the face speaks (`View::speaking`). One at a time;
+//! a hold key, a wake or a click on the island stops it at once (and the
+//! key or the wake goes on as usual). Wake by name does not listen while
+//! it plays and for `speak::TAIL` after (`wake::pause::Pause::Speaking`).
+//! An answer that arrives while another app records (a call: the wake's
+//! `mic_busy`), during a hold, or for a message that is not the last one
+//! sent from here is not played; the summary shows as always. The island
+//! hidden by a full-screen app, or switched off since the message went,
+//! plays it all the same: the sound does not depend on the window.
 
 pub mod audio;
 pub mod geometry;
 pub mod hold;
 pub mod panel;
 pub mod shot;
+pub mod speak;
 pub mod stt;
 pub mod wake;
 
@@ -66,7 +81,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use connect_core::island::{self as core_island, Audio, HotkeyKind, Hotkeys, IslandEvent, Mode, OwnerMessage, SttEngine, SttMode};
+use connect_core::island::{self as core_island, Audio, HotkeyKind, Hotkeys, IslandEvent, IslandSpeech, Mode, OwnerMessage, SttEngine, SttMode};
 use connect_core::{CoreEvent, LinkState};
 use serde::Serialize;
 use serde_json::Value;
@@ -144,6 +159,17 @@ pub struct MessageView {
     pub at_ms: u64,
     pub summary: String,
     pub channel: String,
+}
+
+/// The synth speaks its answer on this computer right now.
+#[derive(Debug, Clone, Serialize)]
+pub struct SpeakingView {
+    pub message_id: String,
+    /// The words being spoken (plain text, as the synth sent them).
+    pub text: String,
+    /// When it began (unix ms), and how long it is.
+    pub since_ms: u64,
+    pub ms: u64,
 }
 
 /// Something the island says by itself: why a key did nothing, why a
@@ -229,6 +255,8 @@ pub struct View {
     /// Wake by name: off, listening (the dot in the right ear), paused
     /// and why, or recording a request.
     pub wake: wake::pause::Status,
+    /// The synth's spoken answer plays now (`speak.rs`).
+    pub speaking: Option<SpeakingView>,
 }
 
 #[derive(Default)]
@@ -275,6 +303,8 @@ struct Inner {
     /// recording had started (Some(kind): send it, None: a slip).
     hold_seq: u64,
     early: Option<(u64, Option<HotkeyKind>)>,
+    /// The spoken answer that plays, with its number at the speaker.
+    speaking: Option<(u64, SpeakingView)>,
 }
 
 /// Something the owner started or must see is on the island: it stays
@@ -285,7 +315,7 @@ fn busy(inner: &Inner, holding: bool, approval: bool) -> bool {
         "done" | "error" => at.elapsed() < SUMMARY_FOR,
         _ => false,
     });
-    holding || approval || inner.text_open || inner.sending || inner.recognizing || message || inner.notice.as_ref().is_some_and(|(_, at)| at.elapsed() < NOTICE_FOR)
+    holding || approval || inner.text_open || inner.sending || inner.recognizing || inner.speaking.is_some() || message || inner.notice.as_ref().is_some_and(|(_, at)| at.elapsed() < NOTICE_FOR)
 }
 
 struct Hold {
@@ -327,6 +357,8 @@ pub struct Island {
     /// The tone of voice estimated here (stt/tone): its model, the owner's
     /// usual manner.
     pub tone: stt::tone::Tone,
+    /// The synth's spoken answers (`speak.rs`).
+    pub speaker: Arc<speak::Speaker>,
 }
 
 impl Island {
@@ -343,6 +375,7 @@ impl Island {
             stt: stt::Stt::new(data_dir),
             wake_word: wake::Wake::new(data_dir),
             tone: stt::tone::Tone::new(data_dir),
+            speaker: Arc::new(speak::Speaker::default()),
         }
     }
 }
@@ -457,6 +490,7 @@ pub fn view(ctx: &Ctx) -> View {
         stt_loading: hold.is_some() && inner.transcript.is_some() && island.stt.engine() != stt::EngineState::Ready,
         stt_card,
         wake: island.wake_word.status(),
+        speaking: inner.speaking.as_ref().map(|(_, s)| s.clone()),
     };
     drop(inner);
     // The owner has seen the offer: a restart shows it again until it is
@@ -514,6 +548,10 @@ pub fn sync(ctx: &Arc<Ctx>) {
     sync_keys(ctx, if want_keys { Some(&settings.hotkeys) } else { None });
     if !want_keys {
         cancel_hold(ctx);
+    }
+    // "Stop everything" silences the synth too.
+    if ctx.core.link_brief().paused {
+        stop_speech(ctx, "the app was paused");
     }
     // The owner chose another spot: there now.
     let spot = spot_of(&settings.position);
@@ -745,6 +783,8 @@ pub fn on_key(ctx: &Arc<Ctx>, kind: HotkeyKind, state: ShortcutState) {
             if ctx.island.hold.lock().unwrap().holding().is_some() {
                 return;
             }
+            // Barge-in: the owner talks over the synth's answer.
+            stop_speech(ctx, "barge-in: a hold key");
             let synth_id = match gate(ctx) {
                 Ok(id) => id,
                 Err((code, detail)) => {
@@ -1133,6 +1173,8 @@ async fn finish(ctx: &Arc<Ctx>, kind: HotkeyKind, h: Hold) {
     let secs = captured.ms as f32 / 1000.0;
     let audio = Audio { mime: "audio/wav".into(), data: captured.wav, ms: captured.ms };
     let mode = if kind == HotkeyKind::ScreenVoice && !images.is_empty() { Mode::ScreenVoice } else { Mode::Voice };
+    // How the synth may answer (sent only to a synth that announces it).
+    let voice_reply = Some(ctx.core.island().voice_reply());
     let (msg, fallback) = match release {
         stt::Release::Text(text) => {
             // Wake by name: the request without the name in front; the
@@ -1159,19 +1201,19 @@ async fn finish(ctx: &Arc<Ctx>, kind: HotkeyKind, h: Hold) {
                 text.chars().count(),
                 if voice_tone.is_some() { ", with the tone" } else { "" }
             );
-            let msg = OwnerMessage { client_id: core_island::new_client_id(), mode, text: String::new(), audio: None, images, voice_transcript: Some(text.clone()), voice_tone };
+            let msg = OwnerMessage { client_id: core_island::new_client_id(), mode, text: String::new(), audio: None, images, voice_transcript: Some(text.clone()), voice_tone, voice_reply };
             ctx.island.inner.lock().unwrap().transcript = Some(text);
             (msg, Some(audio))
         }
         stt::Release::Audio(why) => {
             connect_core::logln!("island: speech-to-text: sent audio because {why} ({secs:.1} s of audio, {waited} ms after release)");
             ctx.island.inner.lock().unwrap().transcript = None;
-            (OwnerMessage { client_id: core_island::new_client_id(), mode, text: String::new(), audio: Some(audio), images, voice_transcript: None, voice_tone: None }, None)
+            (OwnerMessage { client_id: core_island::new_client_id(), mode, text: String::new(), audio: Some(audio), images, voice_transcript: None, voice_tone: None, voice_reply }, None)
         }
         stt::Release::PictureOnly => {
             connect_core::logln!("island: speech-to-text: sent the screenshot alone: silence (vad) ({secs:.1} s of audio)");
             ctx.island.inner.lock().unwrap().transcript = None;
-            (OwnerMessage { client_id: core_island::new_client_id(), mode: Mode::ScreenVoice, text: String::new(), audio: None, images, voice_transcript: None, voice_tone: None }, None)
+            (OwnerMessage { client_id: core_island::new_client_id(), mode: Mode::ScreenVoice, text: String::new(), audio: None, images, voice_transcript: None, voice_tone: None, voice_reply }, None)
         }
         stt::Release::Silent => {
             connect_core::logln!("island: speech-to-text: dropped: silence (vad) ({secs:.1} s of audio)");
@@ -1328,7 +1370,7 @@ pub async fn submit_text(ctx: &Arc<Ctx>, text: String) -> Result<(), String> {
         code
     })?;
     ctx.island.inner.lock().unwrap().transcript = None;
-    let msg = OwnerMessage { client_id: core_island::new_client_id(), mode: Mode::Text, text, audio: None, images: vec![], voice_transcript: None, voice_tone: None };
+    let msg = OwnerMessage { client_id: core_island::new_client_id(), mode: Mode::Text, text, audio: None, images: vec![], voice_transcript: None, voice_tone: None, voice_reply: None };
     send(ctx, &synth_id, msg).await;
     Ok(())
 }
@@ -1340,7 +1382,7 @@ pub async fn ask_design(ctx: &Arc<Ctx>, synth_id: &str) -> Result<(), String> {
         crate::i18n::Lang::Ru => "Придумай себе лицо для острова SNTH Connect на моём компьютере (инструмент connect_face): глаза, рот, цвета, аксессуар, как двигаешься. Такое, какое тебе по душе, и расскажи, что получилось и почему так.",
         _ => "Design your own face for the SNTH Connect island on my computer (your connect_face tool): eyes, mouth, colours, an accessory, how you move. Make it feel like you, and tell me what you chose and why.",
     };
-    let msg = OwnerMessage { client_id: core_island::new_client_id(), mode: Mode::Text, text: text.into(), audio: None, images: vec![], voice_transcript: None, voice_tone: None };
+    let msg = OwnerMessage { client_id: core_island::new_client_id(), mode: Mode::Text, text: text.into(), audio: None, images: vec![], voice_transcript: None, voice_tone: None, voice_reply: None };
     ctx.core.owner_message(synth_id, &msg).await.map(|_| ()).map_err(|e| e.code)
 }
 
@@ -1548,6 +1590,7 @@ pub fn spawn(ctx: Arc<Ctx>) {
         loop {
             match events.recv().await {
                 Ok(CoreEvent::Island(e)) => on_event(&ctx, e),
+                Ok(CoreEvent::IslandSpeech(s)) => on_speech(&ctx, s),
                 Ok(CoreEvent::Face { .. }) | Ok(CoreEvent::ComputerTask) => emit_view(&ctx),
                 Ok(CoreEvent::Link { .. } | CoreEvent::Paused { .. } | CoreEvent::Paired { .. } | CoreEvent::Unpaired { .. } | CoreEvent::Settings { .. })
                 | Err(RecvError::Lagged(_)) => sync(&ctx),
@@ -1582,6 +1625,117 @@ fn on_event(ctx: &Arc<Ctx>, e: IslandEvent) {
         ));
     }
     emit_view(ctx);
+}
+
+// --- the synth's spoken answer ---
+
+/// Stop the spoken answer that plays (a hold key, a wake, a click on the
+/// island, the app's pause). True when one did.
+pub fn stop_speech(ctx: &Arc<Ctx>, why: &str) -> bool {
+    let stopped = ctx.island.speaker.stop(why);
+    if stopped {
+        ctx.island.inner.lock().unwrap().speaking = None;
+        ctx.island.wake_word.kick();
+        emit_view(ctx);
+    }
+    stopped
+}
+
+/// Why an answer that just arrived is not played, before it is decoded
+/// (None: play it). Only the answer to the last message sent from here; not
+/// over a hold (the owner is talking) or a call.
+fn speech_unwanted(ctx: &Arc<Ctx>, s: &IslandSpeech) -> Option<String> {
+    {
+        let inner = ctx.island.inner.lock().unwrap();
+        let ours = match &inner.message {
+            Some((m, _)) => m.synth_id == s.synth_id && (s.message_id.is_empty() || m.message_id == s.message_id),
+            // The event came before owner.message returned.
+            None => inner.sending,
+        };
+        if !ours {
+            return Some("not the answer to the last message sent from here".into());
+        }
+        if inner.recognizing {
+            return Some("a hold is being sent".into());
+        }
+    }
+    if ctx.island.hold.lock().unwrap().holding().is_some() {
+        return Some("the owner is recording".into());
+    }
+    None
+}
+
+/// `island.event kind=speech`: play it, or say in the log why not. One log
+/// line per answer: its size and type, and played (how long), stopped (by
+/// what), failed or skipped (why).
+fn on_speech(ctx: &Arc<Ctx>, s: IslandSpeech) {
+    let ctx = ctx.clone();
+    tauri::async_runtime::spawn(async move {
+        let bytes = s.audio.0.len();
+        let what = format!("{bytes} bytes of {}, message {}", s.mime, if s.message_id.is_empty() { "?" } else { &s.message_id });
+        if let Some(why) = speech_unwanted(&ctx, &s) {
+            connect_core::logln!("island: speech: {what}: skipped: {why}");
+            return;
+        }
+        // A call: the synth must not talk into it. The text shows as
+        // always (the summary of `done`).
+        let (busy, who) = tokio::task::spawn_blocking(wake::system::mic_busy).await.unwrap_or_default();
+        if busy {
+            connect_core::logln!("island: speech: {what}: skipped: a call, the microphone is in use by {}", who.join(", "));
+            return;
+        }
+        let (mime, audio) = (s.mime.clone(), s.audio.clone());
+        let decoded = tokio::task::spawn_blocking(move || speak::decode(&mime, &audio.0)).await.map_err(|e| e.to_string()).and_then(|r| r);
+        let pcm = match decoded {
+            Ok(p) => p,
+            Err(e) => {
+                connect_core::logln!("island: speech: {what}: skipped: it did not decode: {e}");
+                return;
+            }
+        };
+        // Decoding took a moment: a hold may have started since.
+        if let Some(why) = speech_unwanted(&ctx, &s) {
+            connect_core::logln!("island: speech: {what}: skipped: {why}");
+            return;
+        }
+        let total_ms = pcm.ms();
+        let (id, stop) = ctx.island.speaker.begin();
+        // Wake by name goes deaf before the first sound.
+        ctx.island.wake_word.kick();
+        ctx.island.inner.lock().unwrap().speaking =
+            Some((id, SpeakingView { message_id: s.message_id.clone(), text: s.text.clone(), since_ms: now_ms(), ms: total_ms }));
+        emit_view(&ctx);
+        let level_ctx = ctx.clone();
+        let on_level: Arc<dyn Fn(f32) + Send + Sync> = Arc::new(move |level: f32| {
+            if let Some(w) = window(&level_ctx) {
+                let _ = w.emit_to(WINDOW, LEVEL_EVENT, level);
+            }
+        });
+        let end_ctx = ctx.clone();
+        let on_end = Box::new(move |end: speak::End, took: Duration| {
+            let secs = took.as_secs_f32();
+            let total = total_ms as f32 / 1000.0;
+            match &end {
+                speak::End::Finished => connect_core::logln!("island: speech: {what}: played {total:.1} s"),
+                speak::End::Stopped(why) => connect_core::logln!("island: speech: {what}: stopped after {secs:.1} of {total:.1} s: {why}"),
+                speak::End::Failed(e) => connect_core::logln!("island: speech: {what}: failed after {secs:.1} s: {e}"),
+            }
+            let ctx = end_ctx.clone();
+            tauri::async_runtime::spawn(async move {
+                {
+                    let mut inner = ctx.island.inner.lock().unwrap();
+                    if inner.speaking.as_ref().is_some_and(|(n, _)| *n == id) {
+                        inner.speaking = None;
+                    }
+                }
+                emit_view(&ctx);
+                // Wake by name listens again once the tail is over.
+                tokio::time::sleep(speak::TAIL + Duration::from_millis(20)).await;
+                ctx.island.wake_word.kick();
+            });
+        });
+        ctx.island.speaker.play(id, stop, speak::Job { pcm, on_level, on_end });
+    });
 }
 
 // --- the pointer ---

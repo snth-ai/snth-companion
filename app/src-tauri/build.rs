@@ -91,6 +91,7 @@ const COMMANDS: &[&str] = &[
     "island_text_cancel",
     "island_select_synth",
     "island_stop",
+    "island_speech_stop",
     "island_open_app",
     "island_mic",
     "island_stt_offer",

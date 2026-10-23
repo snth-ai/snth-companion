@@ -23,7 +23,12 @@
 //!    link time, `face.set` from the owner's editor, `island.event
 //!    kind=face` when the synth changed it itself;
 //!  - `island.event`, the rpc the synth calls with the life of a message
-//!    (accepted, working, done with a summary, error) and face changes.
+//!    (accepted, working, done with a summary, error) and face changes;
+//!  - the synth's voice reply (tz-voice-reply.md): the owner's choice
+//!    (`IslandSettings::voice_reply`, always / auto / off), sent as
+//!    owner.message `voice_reply` with a voice message to a synth that
+//!    announces `island_voice_reply`, and the spoken answer that comes
+//!    back as `island.event kind=speech` (the audio, played by the shell).
 //!
 //! Protocol additions are additive (no proto bump): an old synth does not
 //! announce the `island` feature and is sent nothing; an old app does not
@@ -52,6 +57,10 @@ pub const FEATURE_DEVICE_STT: &str = "island_device_stt";
 /// the tone of the voice estimated on this computer (owner.message
 /// `voice_tone`). Without it the tone is left out.
 pub const FEATURE_DEVICE_TONE: &str = "island_device_tone";
+/// The hello_ack feature of a synth that may answer a voice message with
+/// its voice, played on this computer (owner.message `voice_reply`,
+/// `island.event kind=speech`). Without it `voice_reply` is left out.
+pub const FEATURE_VOICE_REPLY: &str = "island_voice_reply";
 /// `capabilities.island.version`.
 pub const VERSION: u32 = 1;
 
@@ -82,6 +91,13 @@ pub const SEND_TIMEOUT: Duration = Duration::from_secs(90);
 /// After the link dropped mid-send: how long to wait for it to come back
 /// before the one retry with the same client_id.
 const RETRY_WAIT: Duration = Duration::from_secs(10);
+
+/// The largest spoken answer (`island.event kind=speech`), decoded. The
+/// synth keeps it to about 90 s of mp3 (1.5 MB); the request line (6 MB,
+/// rpc.rs `MAX_REQUEST_LINE`) holds this much as base64 with room left.
+pub const MAX_SPEECH_BYTES: usize = 4 * 1024 * 1024;
+/// The words of a spoken answer kept for the island and the log.
+const MAX_SPEECH_TEXT_CHARS: usize = 2000;
 
 /// The summary the island shows is cut to this many characters (the
 /// synth sends at most 140; a longer one is not trusted to fit).
@@ -332,6 +348,40 @@ impl SttOffer {
     }
 }
 
+/// How the synth answers a voice message from the island
+/// (tz-voice-reply.md): aloud on this computer every time, aloud when the
+/// synth chooses to speak, or in text only. Text messages always get text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceReply {
+    /// Asked by voice, answered by voice. The default.
+    #[default]
+    Always,
+    /// The synth decides (its `tts` tool); its voice plays here.
+    Auto,
+    /// Text only, as before the setting existed.
+    Off,
+}
+
+impl VoiceReply {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VoiceReply::Always => "always",
+            VoiceReply::Auto => "auto",
+            VoiceReply::Off => "off",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<VoiceReply> {
+        match s {
+            "always" => Some(VoiceReply::Always),
+            "auto" => Some(VoiceReply::Auto),
+            "off" => Some(VoiceReply::Off),
+            _ => None,
+        }
+    }
+}
+
 /// Which screen edge the island keeps to (the owner's choice), or the
 /// middle of a side edge (with `Left` or `Right` only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -435,6 +485,11 @@ pub struct IslandSettings {
     /// unless the owner chose a spot.
     #[serde(default)]
     pub position: IslandPosition,
+    /// The synth's voice reply to a voice message (`VoiceReply`). None:
+    /// the default (always), and in a settings file written before the
+    /// choice existed; the default writes nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_reply: Option<VoiceReply>,
 }
 
 fn yes() -> bool {
@@ -454,6 +509,7 @@ impl Default for IslandSettings {
             wake_phrase: String::new(),
             stt_tone: true,
             position: IslandPosition::default(),
+            voice_reply: None,
         }
     }
 }
@@ -467,6 +523,11 @@ impl IslandSettings {
         self.hotkeys.normalize();
         let phrase = self.wake_phrase.split_whitespace().collect::<Vec<_>>().join(" ");
         self.wake_phrase = phrase.chars().take(WAKE_PHRASE_MAX).collect();
+    }
+
+    /// The voice reply the owner chose (the default: always).
+    pub fn voice_reply(&self) -> VoiceReply {
+        self.voice_reply.unwrap_or_default()
     }
 
     /// The synth the keys talk to among these links: the chosen one while
@@ -549,6 +610,10 @@ pub struct OwnerMessage {
     /// this computer. Sent only to a synth with `FEATURE_DEVICE_TONE`
     /// (`send` leaves it out otherwise); cut to `MAX_TONE_CHARS`.
     pub voice_tone: Option<String>,
+    /// voice and screen_voice: how the synth may answer (the owner's
+    /// setting). Sent only to a synth with `FEATURE_VOICE_REPLY` (`send`
+    /// leaves it out otherwise); never with a text message.
+    pub voice_reply: Option<VoiceReply>,
 }
 
 /// A fresh client_id: a random UUID (version 4).
@@ -687,6 +752,10 @@ impl OwnerMessage {
         if !images.is_empty() {
             params["images"] = Value::Array(images);
         }
+        // A voice message only: a line of text is always answered in text.
+        if let (Some(reply), Mode::Voice | Mode::ScreenVoice) = (self.voice_reply, self.mode) {
+            params["voice_reply"] = json!(reply.as_str());
+        }
         // The whole request line as the control stream will carry it.
         let envelope = json!({"type": "request", "id": u64::MAX, "method": "owner.message", "params": params});
         let size = serde_json::to_vec(&envelope).map(|b| b.len() + 1).unwrap_or(usize::MAX);
@@ -752,6 +821,11 @@ pub fn supports_device_tone(slot: &LinkSlot) -> bool {
     supports_device_stt(slot) && slot.synth.read().unwrap().as_ref().is_some_and(|ack| ack.has(FEATURE_DEVICE_TONE))
 }
 
+/// Does this link's synth answer a voice message with its voice here?
+pub fn supports_voice_reply(slot: &LinkSlot) -> bool {
+    supports(slot) && slot.synth.read().unwrap().as_ref().is_some_and(|ack| ack.has(FEATURE_VOICE_REPLY))
+}
+
 /// Send one message to this synth. The answer comes before the synth's
 /// turn (the synth's iron rule), so this waits only for "accepted".
 ///
@@ -783,6 +857,12 @@ pub async fn send(shared: &Arc<Shared>, synth_id: &str, msg: &OwnerMessage) -> R
         if !supports_device_tone(&slot) {
             if let Some(p) = params.as_object_mut() {
                 p.remove("voice_tone");
+            }
+        }
+        // The voice reply likewise: an older synth would not know it.
+        if !supports_voice_reply(&slot) {
+            if let Some(p) = params.as_object_mut() {
+                p.remove("voice_reply");
             }
         }
         match slot.requests.call_within("owner.message", params, SEND_TIMEOUT).await {
@@ -914,19 +994,94 @@ pub struct IslandEvent {
     pub channel: String,
 }
 
-const KINDS: [&str; 5] = ["accepted", "working", "done", "error", "face"];
+const KINDS: [&str; 6] = ["accepted", "working", "done", "error", "face", "speech"];
+
+/// The audio of a spoken answer. Shared, never printed (a debug line says
+/// only its size).
+#[derive(Clone, Default)]
+pub struct SpeechAudio(pub Arc<Vec<u8>>);
+
+impl std::fmt::Debug for SpeechAudio {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<{} bytes of audio>", self.0.len())
+    }
+}
+
+/// The synth's spoken answer to a voice message sent from here
+/// (`island.event kind=speech`, tz-voice-reply.md): the shell plays it.
+/// It may come before or after the message's `done`.
+#[derive(Debug, Clone, Serialize)]
+pub struct IslandSpeech {
+    pub synth_id: String,
+    pub message_id: String,
+    /// One of `SPEECH_MIMES` (the synth's mime, normalized).
+    pub mime: String,
+    #[serde(skip)]
+    pub audio: SpeechAudio,
+    /// The words that were spoken (plain text, for the log and the island).
+    pub text: String,
+    /// The synth's estimate of the length, when it sent one.
+    pub duration_ms: Option<u64>,
+}
+
+/// The kinds of audio the shell plays: mp3 (what the synth sends), WAV
+/// (PCM) and Ogg Opus.
+pub const SPEECH_MIMES: [&str; 3] = ["audio/mpeg", "audio/wav", "audio/ogg"];
+
+/// The synth's mime as one of `SPEECH_MIMES`, parameters dropped and the
+/// usual aliases taken ("audio/mp3", "audio/x-wav", "audio/opus"...).
+pub fn speech_mime(mime: &str) -> Option<&'static str> {
+    let base = mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    match base.as_str() {
+        "audio/mpeg" | "audio/mp3" | "audio/mpeg3" | "audio/x-mpeg" => Some("audio/mpeg"),
+        "audio/wav" | "audio/x-wav" | "audio/wave" | "audio/vnd.wave" => Some("audio/wav"),
+        "audio/ogg" | "audio/opus" | "audio/x-opus" => Some("audio/ogg"),
+        _ => None,
+    }
+}
+
+/// `island.event kind=speech` -> the speech, checked.
+fn speech_of(synth_id: String, params: &Value) -> Result<IslandSpeech, String> {
+    let audio = params.get("audio").ok_or("bad request: a speech event carries params.audio")?;
+    let mime_in = audio.get("mime").and_then(Value::as_str).unwrap_or("");
+    let mime = speech_mime(mime_in).ok_or_else(|| format!("bad request: speech audio type {:?} is not played here", clip(mime_in, 64)))?;
+    let b64 = audio.get("data").or_else(|| audio.get("b64")).and_then(Value::as_str).unwrap_or("");
+    if b64.is_empty() {
+        return Err("bad request: a speech event without audio data".into());
+    }
+    if b64.len() > b64_len(MAX_SPEECH_BYTES) + 4 {
+        return Err(format!("too_large: speech audio of {} base64 bytes (max {MAX_SPEECH_BYTES} bytes decoded)", b64.len()));
+    }
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .map_err(|e| format!("bad request: speech audio is not base64: {e}"))?;
+    if data.is_empty() || data.len() > MAX_SPEECH_BYTES {
+        return Err(format!("too_large: speech audio of {} bytes (max {MAX_SPEECH_BYTES})", data.len()));
+    }
+    Ok(IslandSpeech {
+        synth_id,
+        message_id: params.get("message_id").and_then(Value::as_str).map(|s| clip(s, 128)).unwrap_or_default(),
+        mime: mime.to_string(),
+        audio: SpeechAudio(Arc::new(data)),
+        text: params.get("text").and_then(Value::as_str).map(|s| clip(s, MAX_SPEECH_TEXT_CHARS)).unwrap_or_default(),
+        duration_ms: params.get("duration_ms").and_then(Value::as_u64),
+    })
+}
 
 /// The rpc `island.event` (rpc.rs). Answered `{"ok":true}`; the synth
 /// ignores errors, so a refusal is only a labeled line for its log.
 pub(crate) fn handle_event(shared: &Arc<Shared>, params: &Value) -> Result<Value, String> {
-    if !shared.island().enabled {
+    let kind = params.get("kind").and_then(Value::as_str).unwrap_or("");
+    // The spoken answer to a message sent from here plays even when the
+    // owner switched the island off since (the sound does not depend on
+    // the window; the shell plays only an answer to its own message).
+    if !shared.island().enabled && kind != "speech" {
         return Err("denied: the island is off on this computer".into());
     }
     let synth_id = shared.current_synth_id();
     if synth_id.is_empty() {
         return Err("denied: not from a linked synth".into());
     }
-    let kind = params.get("kind").and_then(Value::as_str).unwrap_or("");
     if !KINDS.contains(&kind) {
         return Err(format!("bad request: unknown island event kind {kind:?}"));
     }
@@ -939,6 +1094,11 @@ pub(crate) fn handle_event(shared: &Arc<Shared>, params: &Value) -> Result<Value
         } else {
             return Err(format!("bad request: params.face must be a FaceConfig object of at most {MAX_FACE_BYTES} bytes"));
         }
+        return Ok(json!({"ok": true}));
+    }
+    if kind == "speech" {
+        let speech = speech_of(synth_id, params)?;
+        shared.emit(CoreEvent::IslandSpeech(speech));
         return Ok(json!({"ok": true}));
     }
     let text = |key: &str, max: usize| params.get(key).and_then(Value::as_str).map(|s| clip(s, max)).unwrap_or_default();
@@ -978,6 +1138,8 @@ pub struct IslandView {
     pub supported: BTreeMap<String, bool>,
     /// synth_id -> it takes a voice message as text recognized here.
     pub device_stt: BTreeMap<String, bool>,
+    /// synth_id -> it may answer a voice message with its voice here.
+    pub voice_reply: BTreeMap<String, bool>,
 }
 
 #[cfg(test)]

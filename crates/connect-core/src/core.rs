@@ -94,6 +94,9 @@ pub enum CoreEvent {
     /// The synth told the island about a message the owner sent from here
     /// (island.rs, `island.event`).
     Island(crate::island::IslandEvent),
+    /// The synth's spoken answer to a message sent from here
+    /// (`island.event kind=speech`): the shell plays it.
+    IslandSpeech(crate::island::IslandSpeech),
     /// A synth's face changed in the cache (read from it, set by the owner,
     /// or changed by the synth itself).
     Face { synth_id: String },
@@ -1495,6 +1498,7 @@ impl Core {
             faces: self.shared.persisted.read().unwrap().faces.clone(),
             supported: links.iter().map(|l| (l.synth_id.clone(), crate::island::supports(l))).collect(),
             device_stt: links.iter().map(|l| (l.synth_id.clone(), crate::island::supports_device_stt(l))).collect(),
+            voice_reply: links.iter().map(|l| (l.synth_id.clone(), crate::island::supports_voice_reply(l))).collect(),
             settings,
         }
     }
