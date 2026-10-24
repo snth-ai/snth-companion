@@ -69,6 +69,18 @@
 //         makes connecting to Maya fail with that error.)
 //   &island=...   (the Island screen and the island window: see
 //        mockIsland.ts for the scenarios)
+//   &observe=on|call|private|notasked|denied|nowifi|unnamed|notitles|
+//            nofeature|nogrant|two
+//        (?screen=observe, what the synths see: on = calls, the activity
+//         and the place switched on for Mia, at home; call = and a Zoom
+//         call running; private = 1Password in front; notasked / denied =
+//         the place without the Location permission; nowifi = no network;
+//         unnamed = a network without a name yet; notitles = macOS without
+//         Accessibility (no window titles); nofeature = Mia needs an
+//         update; nogrant = Mia takes none of the sources right now; two =
+//         Mia and Maya, Maya with the place only. Without it: every source
+//         off. While the activity is on the app in front changes every few
+//         seconds.)
 //   &lang=en|ru  &theme=light|dark  &os=macos|windows|linux
 //
 // Nothing here touches the network, the disk or the real computer.
@@ -113,6 +125,10 @@ import type {
   SttMode,
   IslandRect,
   IslandSignal,
+  AppMark,
+  ObserveDescriptor,
+  ObserveLink,
+  ObserveState,
 } from "./types";
 import { MockIslandScreen, MockIslandWindow, stagedIslandState } from "./mockIsland";
 
@@ -734,6 +750,112 @@ function linkOf(id: string, source: LinkBrief["source"], state: LinkBrief["state
   };
 }
 
+// --- observe ---
+
+/** The context service's descriptors, as the synth relays them. */
+const OBSERVE_DESCRIPTORS: ObserveDescriptor[] = [
+  {
+    resource: "device.call",
+    revision: 2,
+    title: { en: "call", ru: "звонок" },
+    description: { en: "Whether a call runs on the device and in which app. No audio, screen or participants.", ru: "Идёт ли звонок на устройстве и в каком приложении. Без звука, экрана и участников." },
+    consent: {
+      en: "The synth learns only whether a call runs and in which app. No audio is recorded; screen and participants are not sent.",
+      ru: "Синт узнаёт только, идёт ли звонок и в каком приложении. Звук не записывается, экран и участники не передаются.",
+    },
+    privacy_class: "flag_only",
+    max_bytes: 8192,
+  },
+  {
+    resource: "device.activity",
+    revision: 2,
+    title: { en: "activity", ru: "чем занят" },
+    description: {
+      en: "The active app on the device, its window title and a category. Excluded apps send the category only.",
+      ru: "Активное приложение на устройстве, заголовок его окна и категория. Для приложений из исключений только категория.",
+    },
+    consent: {
+      en: "The synth sees which app is open and its window title (for example a file or page name). Excluded apps send the category only. Pause in the menu turns everything off.",
+      ru: "Синт видит, какое приложение открыто и заголовок его окна (например, имя файла или страницы). Для приложений из исключений уходит только категория. Пауза в меню выключает всё.",
+    },
+    privacy_class: "sensitive",
+    max_bytes: 12000,
+  },
+  {
+    resource: "place.current",
+    revision: 1,
+    title: { en: "place", ru: "место" },
+    description: { en: "The owner's named place (home, gym) and present or unknown.", ru: "Именованное место владельца (дом, зал) и present или unknown." },
+    consent: { en: "", ru: "" },
+    privacy_class: "ordinary",
+    max_bytes: 1024,
+  },
+];
+
+/** What is in front, in turn, while the activity is on. */
+const MOCK_FRONTS: { app: AppMark; title: string; category: string }[] = [
+  { app: { id: "com.microsoft.VSCode", name: "Visual Studio Code" }, title: "registry.go - hub", category: "code" },
+  { app: { id: "com.google.Chrome", name: "Google Chrome" }, title: "Pull requests - GitHub", category: "browser" },
+  { app: { id: "com.mitchellh.ghostty", name: "Ghostty" }, title: "cargo test", category: "terminal" },
+  { app: { id: "ru.keepcoder.Telegram", name: "Telegram" }, title: "Mia", category: "chat" },
+];
+
+const MOCK_RUNNING: AppMark[] = [
+  { id: "com.apple.mail", name: "Mail" },
+  { id: "com.apple.MobileSMS", name: "Messages" },
+  { id: "com.google.Chrome", name: "Google Chrome" },
+  { id: "com.microsoft.VSCode", name: "Visual Studio Code" },
+  { id: "com.spotify.client", name: "Spotify" },
+  { id: "ru.keepcoder.Telegram", name: "Telegram" },
+  { id: "us.zoom.xos", name: "zoom.us" },
+];
+
+function observeLink(id: string, scenario: string | null, offered?: string[]): ObserveLink {
+  const feature = scenario !== "nofeature";
+  const list = !feature || scenario === "nogrant" ? [] : (offered ?? OBSERVE_DESCRIPTORS.map((d) => d.resource));
+  return {
+    synth_id: id,
+    synth_name: SYNTHS[id]?.name ?? null,
+    linked: true,
+    feature,
+    offered: list,
+    descriptors: OBSERVE_DESCRIPTORS.filter((d) => list.includes(d.resource)),
+    on: [],
+  };
+}
+
+/** The page as `observe=` stages it. */
+function stagedObserve(os: string): ObserveState {
+  const scenario = params.get("observe");
+  const links = [observeLink("mia", scenario)];
+  if (scenario === "two") links.push(observeLink("maya", null, ["place.current"]));
+  const on = ["on", "call", "private", "notasked", "denied", "nowifi", "unnamed", "notitles", "two"].includes(scenario ?? "");
+  if (on) links[0]!.on = ["device.call", "device.activity", "place.current"];
+  if (scenario === "two") links[1]!.on = ["place.current"];
+  const wifi: ObserveState["wifi"] = !on
+    ? { state: "unknown" }
+    : scenario === "notasked"
+      ? { state: "not_asked" }
+      : scenario === "denied"
+        ? { state: "denied" }
+        : scenario === "nowifi"
+          ? { state: "not_connected" }
+          : { state: "network", ssid: scenario === "unnamed" ? "Cafe Lounge 5G" : "Keenetic-5G" };
+  return {
+    links,
+    settings: {
+      on: Object.fromEntries(links.filter((l) => l.on.length).map((l) => [l.synth_id, l.on])),
+      excluded: on ? [{ id: "com.apple.MobileSMS", name: "Messages" }] : [],
+      places: on ? [{ ssid: "Keenetic-5G", name: "дом" }, { ssid: "WorldClass-Free", name: "зал" }] : [],
+    },
+    values: {},
+    support: { call: os !== "linux", activity: os !== "linux", place: os !== "linux" },
+    titles_allowed: os === "macos" ? scenario !== "notitles" : null,
+    wifi,
+    recent: on ? MOCK_FRONTS.map((f) => f.app) : [],
+  };
+}
+
 function accountSynth(id: string, linked: boolean): AccountSynth {
   const known = SYNTHS[id]!;
   return { hub_id: known.hub, synth_id: id, name: known.name, avatar_url: null, linked, skipped: false, error: null, reason: null };
@@ -850,6 +972,7 @@ class MockBackend implements Backend {
       logins: { ...stagedBrowsers(os), vault: { state: "unknown" }, vault_synth: "mia" },
       account: signedOut(),
       island: stagedIslandState(os, [linkOf("mia", "code")]),
+      observe: stagedObserve(os),
       prefs: {
         onboarded: true,
         language: params.get("lang"),
@@ -879,6 +1002,13 @@ class MockBackend implements Backend {
     this.applyScenario();
     this.refreshApps();
     this.state.island = stagedIslandState(os, this.state.core.links);
+    if (params.get("observe") === "two") this.state.core.links = [linkOf("mia", "code"), linkOf("maya", "account")];
+    this.observeTick();
+    // The app in front changes now and then, as it would.
+    window.setInterval(() => {
+      this.observeFront = (this.observeFront + 1) % MOCK_FRONTS.length;
+      this.observeTick();
+    }, 6000);
     if (params.get("island") === "nolink") this.setLink(0, "reconnecting", "connect: no answer in 15s");
   }
 
@@ -2026,6 +2156,104 @@ class MockBackend implements Backend {
         `Cua Driver: ${c.cua_version || "not installed"} (status ${c.cua_status})`,
       ].join("\n"),
     );
+  }
+
+  // --- observe ---
+
+  private observeFront = 0;
+
+  /** The sources' values, as the shell's round would work them out. */
+  private observeTick() {
+    const o = this.state.observe;
+    if (!o) return;
+    const wanted = new Set(o.links.flatMap((l) => l.on));
+    const t = now();
+    const values: ObserveState["values"] = {};
+    const scenario = params.get("observe");
+    if (wanted.has("device.call")) {
+      values["device.call"] = {
+        value: scenario === "call" ? { in_call: true, since: new Date((t - 14 * 60) * 1000).toISOString().slice(0, 19) + "Z", app: "zoom" } : { in_call: false },
+        observed_at: t,
+      };
+    }
+    if (wanted.has("device.activity")) {
+      const f = MOCK_FRONTS[this.observeFront]!;
+      const excluded = (o.settings.excluded ?? []).some((m) => m.id.toLowerCase() === f.app.id.toLowerCase());
+      values["device.activity"] = {
+        value:
+          scenario === "private" || excluded
+            ? { app: "private", category: "private" }
+            : o.titles_allowed === false
+              ? { app: f.app.name, category: f.category }
+              : { app: f.app.name, title: f.title, category: f.category },
+        observed_at: t,
+      };
+    }
+    if (wanted.has("place.current") && o.wifi.state === "network") {
+      const ssid = o.wifi.ssid;
+      const named = (o.settings.places ?? []).find((p) => p.ssid === ssid);
+      if (named) values["place.current"] = { value: { name: named.name, state: "present" }, observed_at: t };
+    }
+    o.values = values;
+  }
+
+  private observeChanged(): Promise<UiState> {
+    this.observeTick();
+    this.emit({ type: "state" });
+    return this.reply(this.snapshot());
+  }
+
+  observeView() {
+    this.observeTick();
+    return this.reply(structuredClone(this.state.observe!), 20);
+  }
+
+  observeSet(synthId: string, resource: string, on: boolean) {
+    const o = this.state.observe!;
+    const link = o.links.find((l) => l.synth_id === synthId);
+    if (!link) return Promise.reject(new Error("unknown_synth"));
+    link.on = on ? [...new Set([...link.on, resource])] : link.on.filter((r) => r !== resource);
+    o.settings.on = Object.fromEntries(o.links.filter((l) => l.on.length).map((l) => [l.synth_id, l.on]));
+    const placeOn = o.links.some((l) => l.on.includes("place.current"));
+    if (!placeOn) o.wifi = { state: "unknown" };
+    else if (o.wifi.state === "unknown") o.wifi = this.state.app.os === "macos" ? { state: "not_asked" } : { state: "network", ssid: "Keenetic-5G" };
+    if (o.links.some((l) => l.on.includes("device.activity")) && o.recent.length === 0) o.recent = MOCK_FRONTS.map((f) => f.app);
+    return this.observeChanged();
+  }
+
+  observeRefresh(_synthId: string) {
+    return this.observeChanged();
+  }
+
+  observeExclude(id: string, name: string, excluded: boolean) {
+    const o = this.state.observe!;
+    const list = o.settings.excluded ?? [];
+    const same = (m: AppMark) => (m.id || id ? m.id.toLowerCase() === id.toLowerCase() : m.name.toLowerCase() === name.toLowerCase());
+    o.settings.excluded = excluded ? (list.some(same) ? list : [...list, { id, name }]) : list.filter((m) => !same(m));
+    return this.observeChanged();
+  }
+
+  observePlace(ssid: string, name: string) {
+    const o = this.state.observe!;
+    const clean = name.replace(/[<>]/g, "").replace(/\s+/g, " ").trim();
+    const list = (o.settings.places ?? []).filter((p) => p.ssid !== ssid || clean);
+    const at = list.find((p) => p.ssid === ssid);
+    if (at) at.name = clean;
+    else if (clean) list.push({ ssid, name: clean });
+    o.settings.places = list;
+    return this.observeChanged();
+  }
+
+  observeRunningApps() {
+    return this.reply(structuredClone(MOCK_RUNNING), 400);
+  }
+
+  observeLocation() {
+    const o = this.state.observe!;
+    // The system's question, answered "Allow".
+    if (o.wifi.state === "not_asked") o.wifi = { state: "network", ssid: "Keenetic-5G" };
+    else console.info("[mock] would ask for Location Services again");
+    return this.observeChanged();
   }
 
   // --- the island ---

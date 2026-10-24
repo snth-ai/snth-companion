@@ -66,6 +66,14 @@ export const tauriBackend: Backend = {
   diagnostics: () => invoke("diagnostics"),
   openExternal: (target) => invoke("open_external", { target }),
 
+  observeView: () => invoke("observe_view"),
+  observeSet: (synthId, resource, on) => invoke("observe_set", { synthId, resource, on }),
+  observeRefresh: (synthId) => invoke("observe_refresh", { synthId }),
+  observeExclude: (id, name, excluded) => invoke("observe_exclude", { id, name, excluded }),
+  observePlace: (ssid, name) => invoke("observe_place", { ssid, name }),
+  observeRunningApps: () => invoke("observe_running_apps"),
+  observeLocation: () => invoke("observe_location"),
+
   islandSet: (enabled, mainSynth, position, voiceReply) =>
     invoke("island_set", {
       enabled,

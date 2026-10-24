@@ -176,7 +176,11 @@ snapshot as JSON directly.
 - durable grants ("always" and until-time), each with its synth. Session
   grants are memory only;
 - this month's egress count, so the monthly cap is not reset by a restart
-  (written at most every 30 s or 4 MiB, and on `flush()`).
+  (written at most every 30 s or 4 MiB, and on `flush()`);
+- observe (`observe`, observe.rs): which source goes to which synth, the
+  apps the owner never shows, the named Wi-Fi networks (their names never
+  leave the computer). Not part of `settings_rev`; unlinking a synth drops
+  its switches.
 
 The journal ring is refilled from the tail of `journal.jsonl` on start.
 `unpair_synth` erases one synth's pairing and grants; `unpair` /
@@ -907,3 +911,30 @@ paused, ask with the exact-command "always", auto, a bad request asks
 nobody, pause and switching off stop a running command, a preset turns it
 off, `permission.request`). `rpc::tests::shell_exec_runs_while_the_stream_is_open_and_stops_when_it_closes`
 covers the cancel over a stream.
+
+## Observe: User Context reports (`observe.rs`)
+
+The app's side of connect.md "Observe" (UC source contract P2). The host
+reads the system and reports; the core decides what goes to which synth.
+
+- `Core::observe_report(resource, Option<Value>)`: the current value of a
+  source (`device.call`, `device.activity`, `place.current`), every round.
+  Links hear only of a change.
+- `Core::set_observe(|o| ...)`, `observe_settings()`: the owner's switches
+  per synth, own exclusions, named networks.
+- `Core::observe_wanted()`: the sources some linked synth has on (what the
+  host reads). The host checks `paused` itself and then reads nothing.
+- `Core::observe_view()`, `observe_refresh(synth_id)`: the page's data,
+  and the synth's descriptors asked again.
+- Per link (`run_link`, started at a `hello_ack` with the `observe`
+  feature): `observe.resources` at once and every 10 minutes, every
+  current value right after hello_ack, a change at once, the unchanged
+  value every 60 s, `value: null` once when a source the synth had is
+  switched off or has nothing to say, nothing while paused. Values are
+  fitted to the descriptor (`maxLength`, `max_bytes`).
+- `observe::sources`: the pure decisions behind small probe traits
+  (`MicProbe`, `FrontProbe`, `WifiProbe`) and `Sampler::tick`: clean
+  strings, the category table, the exclusions (password managers, the
+  passwords page of System Settings, private windows, the owner's own),
+  the call decision (the app's own microphone never counts), the place by
+  network.

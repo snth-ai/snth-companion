@@ -63,6 +63,14 @@ const COMMANDS: &[&str] = &[
     "set_developer",
     "diagnostics",
     "open_external",
+    // observe: what the synths see of this computer (main window)
+    "observe_view",
+    "observe_set",
+    "observe_refresh",
+    "observe_exclude",
+    "observe_place",
+    "observe_running_apps",
+    "observe_location",
     // the island: settings (main window)
     "island_set",
     "island_hotkey_set",

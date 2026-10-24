@@ -100,6 +100,9 @@ pub enum CoreEvent {
     /// A synth's face changed in the cache (read from it, set by the owner,
     /// or changed by the synth itself).
     Face { synth_id: String },
+    /// What a synth offers of `observe` changed (its descriptors arrived),
+    /// or the owner's observe choices did (`synth_id` empty).
+    Observe { synth_id: String },
 }
 
 /// After a failed start of our daemon the next try waits: 5 s, 15 s, 1 min,
@@ -258,6 +261,8 @@ pub struct Shared {
     /// points, top-left origin, as the driver takes them) and when: the
     /// island's eyes follow it while the synth drives. Memory only.
     agent_cursor: Mutex<Option<(f64, f64, Instant)>>,
+    /// The current value of each observe source (observe.rs). Memory only.
+    pub(crate) observe: crate::observe::Hub,
 }
 
 impl Shared {
@@ -1016,7 +1021,8 @@ impl Shared {
             persisted.identities.retain(|i| i.synth_id != id);
             persisted.grants.retain(|g| g.synth_id != id);
             let face = persisted.faces.remove(&id).is_some();
-            if before != (persisted.identities.len(), persisted.grants.len()) || face {
+            let observe = persisted.observe.on.remove(&id).is_some();
+            if before != (persisted.identities.len(), persisted.grants.len()) || face || observe {
                 self.save_locked(&persisted);
             }
         }
@@ -1376,6 +1382,7 @@ impl Core {
             faces_read: Mutex::new(std::collections::HashSet::new()),
             speech_sink: RwLock::new(None),
             agent_cursor: Mutex::new(None),
+            observe: crate::observe::Hub::default(),
         });
         Core { shared }
     }

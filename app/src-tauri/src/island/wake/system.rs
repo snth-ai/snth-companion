@@ -87,6 +87,8 @@ mod mac {
     const PROCESS_PID: u32 = fourcc(b"ppid");
     const PROCESS_RUNNING_INPUT: u32 = fourcc(b"piri");
     const PROCESS_BUNDLE_ID: u32 = fourcc(b"pbid");
+    /// kAudioDevicePropertyDeviceIsRunningSomewhere.
+    const DEVICE_RUNNING_SOMEWHERE: u32 = fourcc(b"gone");
 
     type CFTypeRef = *const c_void;
 
@@ -218,6 +220,15 @@ mod mac {
             out.push((pid, bundle));
         }
         Some(out)
+    }
+
+    /// The default input device runs for some process (this app
+    /// included): all that macOS before 14 says.
+    pub fn default_input_running() -> bool {
+        let Some(dev) = get::<u32>(SYSTEM_OBJECT, DEFAULT_INPUT).filter(|d| *d != 0) else {
+            return false;
+        };
+        get::<u32>(dev, DEVICE_RUNNING_SOMEWHERE).unwrap_or(0) != 0
     }
 
     /// The front app's bundle id (the fallback before macOS 14).
@@ -642,6 +653,59 @@ pub fn mic_busy() -> (bool, Vec<String>) {
     {
         (false, Vec::new())
     }
+}
+
+/// The processes other than this app that record now, by id: a bundle id
+/// (else the process name) on macOS 14 and later, a program's file name or
+/// a Store package's name on Windows. None where the system does not list
+/// them (macOS before 14, other systems). Observe's call source.
+pub fn recorders() -> Option<Vec<String>> {
+    #[cfg(target_os = "macos")]
+    {
+        mac::recording_elsewhere().map(|list| list.into_iter().map(|(pid, b)| if b.is_empty() { process_file(pid) } else { b }).collect())
+    }
+    #[cfg(windows)]
+    {
+        let entries = win::consent_entries()?;
+        let me = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        let running = win::running();
+        Some(consent::recording(&entries, &me, running.as_deref()))
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        None
+    }
+}
+
+/// The default input device runs for some process, this app included
+/// (macOS; false elsewhere, where `recorders` answers).
+pub fn input_running() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        mac::default_input_running()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// The file names of the running programs, lower case (None when they
+/// cannot be listed).
+#[cfg(windows)]
+pub fn running_programs() -> Option<Vec<String>> {
+    win::running()
+}
+
+/// A process's file name without the pid (a tool without a bundle id).
+#[cfg(target_os = "macos")]
+fn process_file(pid: i32) -> String {
+    let mut buf = [0u8; 256];
+    let n = unsafe { libc::proc_name(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    if n <= 0 {
+        return String::new();
+    }
+    String::from_utf8_lossy(&buf[..n as usize]).into_owned()
 }
 
 /// A process's name (a tool without a bundle id, like ffmpeg).

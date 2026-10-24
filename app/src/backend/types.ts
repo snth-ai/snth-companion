@@ -656,6 +656,88 @@ export type IslandSignal =
   | { type: "gaze"; x: number; y: number; agent: boolean }
   | { type: "level"; level: number };
 
+// --- observe: what the synths see of this computer ---
+
+/** The sources this app has (connect.md "Observe"). */
+export type ObserveResource = "device.call" | "device.activity" | "place.current";
+
+/** Words of a descriptor in both languages ("" when it has none). */
+export interface ObserveWords {
+  en: string;
+  ru: string;
+}
+
+/** One resource as the synth describes it. */
+export interface ObserveDescriptor {
+  resource: string;
+  revision: number;
+  title: ObserveWords;
+  description: ObserveWords;
+  /** What the owner reads when switching it on; empty = the app's own words. */
+  consent: ObserveWords;
+  privacy_class: string;
+  max_bytes: number;
+}
+
+/** One linked synth on the page. */
+export interface ObserveLink {
+  synth_id: string;
+  synth_name: string | null;
+  linked: boolean;
+  /** The synth takes observe reports (announced the feature). */
+  feature: boolean;
+  /** The resources it may take right now (its grant). */
+  offered: string[];
+  descriptors: ObserveDescriptor[];
+  /** The sources the owner switched on for it. */
+  on: string[];
+}
+
+/** An app: its id (macOS bundle id, Windows program file name) and name. */
+export interface AppMark {
+  id: string;
+  name: string;
+}
+
+export interface NamedNetwork {
+  /** The network's name: stays on this computer. */
+  ssid: string;
+  /** The owner's name for the place. */
+  name: string;
+}
+
+/** The Wi-Fi network as the app reads it. */
+export type WifiState =
+  | { state: "network"; ssid: string }
+  | { state: "not_connected" | "not_asked" | "denied" | "unsupported" | "unknown" };
+
+/** The current value of one source and when it was read (unix seconds). */
+export interface ObserveReport {
+  value: Record<string, unknown>;
+  observed_at: number;
+}
+
+/** The "what the synth sees" page. */
+export interface ObserveState {
+  links: ObserveLink[];
+  settings: {
+    on?: Record<string, string[]>;
+    /** The owner's own exclusions (the password managers and private
+     * windows are always excluded). */
+    excluded?: AppMark[];
+    places?: NamedNetwork[];
+  };
+  /** What each source sends now, by resource. */
+  values: Record<string, ObserveReport>;
+  /** The sources this system can read. */
+  support: { call: boolean; activity: boolean; place: boolean };
+  /** macOS: window titles can be read (Accessibility). null elsewhere. */
+  titles_allowed: boolean | null;
+  wifi: WifiState;
+  /** The apps in front lately (the exclusion picker). */
+  recent: AppMark[];
+}
+
 export interface UiState {
   core: Snapshot;
   link_detail: string;
@@ -678,6 +760,8 @@ export interface UiState {
   account: AccountState;
   /** The island (the Island screen). */
   island: IslandState;
+  /** What the synths see of this computer. Missing from an older shell. */
+  observe?: ObserveState;
   prefs: {
     onboarded: boolean;
     /** "en" / "ru" when the owner picked one; null = follow the system. */
@@ -805,6 +889,8 @@ export type ExternalTarget =
   | "privacy_full_disk"
   /** The island's microphone. */
   | "privacy_microphone"
+  /** The place: the network's name needs location access. */
+  | "privacy_location"
   | "helper"
   | "vault_extension"
   /** Safari's settings, at the extension that ships in this app. */
@@ -911,6 +997,23 @@ export interface Backend {
   setDeveloper(enabled: boolean): Promise<UiState>;
   diagnostics(): Promise<string>;
   openExternal(target: ExternalTarget): Promise<void>;
+
+  // --- observe: what the synths see ---
+  /** The page, fresh (asked every few seconds while it is open). */
+  observeView(): Promise<ObserveState>;
+  /** One source on or off for one synth. Err: unknown_synth,
+   * unknown_resource, unsupported. */
+  observeSet(synthId: string, resource: string, on: boolean): Promise<UiState>;
+  /** Ask the synth again what it takes. */
+  observeRefresh(synthId: string): Promise<UiState>;
+  /** Add an app to the owner's exclusions, or take it off. */
+  observeExclude(id: string, name: string, excluded: boolean): Promise<UiState>;
+  /** Name a Wi-Fi network; "" forgets it. Err: bad_network. */
+  observePlace(ssid: string, name: string): Promise<UiState>;
+  /** The apps with a window that run now (the exclusion picker). */
+  observeRunningApps(): Promise<AppMark[]>;
+  /** Ask the system again for the network's name (macOS asks once). */
+  observeLocation(): Promise<UiState>;
 
   // --- the island: the Island screen ---
   /** `position`: the owner's spot, each axis "default" for this

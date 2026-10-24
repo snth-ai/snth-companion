@@ -16,6 +16,7 @@ mod crashlog;
 mod i18n;
 mod island;
 mod logins;
+mod observe;
 #[cfg(target_os = "macos")]
 mod menu;
 mod prefs;
@@ -154,6 +155,7 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
         safari: safari::Safari::detect(|exe| logins::stays_put(exe, false)),
         stop_shortcut: Mutex::new(None),
         island: island::Island::new(&data_dir),
+        observe: observe::Observe::default(),
     });
     app.manage(ctx.clone());
 
@@ -209,6 +211,7 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
     // The island (off by default): its window and keys follow the
     // settings and the links from here on.
     island::spawn(ctx.clone());
+    observe::spawn(ctx.clone());
 
     // snth://pair?code=...
     #[cfg(any(windows, target_os = "linux"))]
@@ -466,6 +469,13 @@ fn main() {
             commands::set_developer,
             commands::diagnostics,
             commands::open_external,
+            commands::observe_view,
+            commands::observe_set,
+            commands::observe_refresh,
+            commands::observe_exclude,
+            commands::observe_place,
+            commands::observe_running_apps,
+            commands::observe_location,
             commands::island_set,
             commands::island_hotkey_set,
             commands::island_hotkey_reset,

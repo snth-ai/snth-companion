@@ -22,6 +22,7 @@
 //! runtime). A recording is only ever started after the permission is
 //! known to be granted: an app without it gets silence, not an error.
 
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// The rate the synth gets.
@@ -35,6 +36,43 @@ pub enum MicPermission {
     Denied,
     NotAsked,
     Unknown,
+}
+
+/// This app's own microphone streams open now (a hold, the wake
+/// listener), and when the last one closed (unix ms). Observe's call
+/// source (observe/mod.rs) must never take the app's own microphone for a
+/// call: where the system says only that the device runs, not for whom
+/// (macOS before 14), a running device while this is set is not a call.
+static OWN_OPEN: AtomicUsize = AtomicUsize::new(0);
+static OWN_CLOSED_MS: AtomicU64 = AtomicU64::new(0);
+/// The device may still say "running" this long after our stream closed.
+const OWN_TAIL_MS: u64 = 3000;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// Held for as long as one of our streams is (being) opened.
+struct OwnCapture;
+
+impl OwnCapture {
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+    fn begin() -> OwnCapture {
+        OWN_OPEN.fetch_add(1, Ordering::AcqRel);
+        OwnCapture
+    }
+}
+
+impl Drop for OwnCapture {
+    fn drop(&mut self) {
+        OWN_CLOSED_MS.store(now_ms(), Ordering::Release);
+        OWN_OPEN.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// This app has the microphone open (or closed it a moment ago).
+pub fn own_capture() -> bool {
+    OWN_OPEN.load(Ordering::Acquire) > 0 || now_ms().saturating_sub(OWN_CLOSED_MS.load(Ordering::Acquire)) < OWN_TAIL_MS
 }
 
 /// A finished recording.
@@ -246,7 +284,7 @@ mod capture {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use cpal::{FromSample, Sample, SampleFormat, SizedSample};
 
-    use super::{is_glitch, level, open_error, verdict, wav, Captured, Resampler, StreamErrors, LEVEL_EVERY, RATE};
+    use super::{is_glitch, level, open_error, verdict, wav, Captured, OwnCapture, Resampler, StreamErrors, LEVEL_EVERY, RATE};
 
     /// A recording that runs. `finish` ends it and returns the voice;
     /// dropping it throws the recording away.
@@ -257,6 +295,8 @@ mod capture {
         /// Whose it is, for the log: "hold" (a key) or "wake" (the wake
         /// listener's, a wake's hold once the name was heard).
         who: &'static str,
+        /// Counts this stream as the app's own microphone (`own_capture`).
+        _own: OwnCapture,
     }
 
     /// A look at a running recording's samples (on-device speech-to-text
@@ -376,6 +416,8 @@ mod capture {
     }
 
     fn open(uid: Option<String>, on_level: Arc<dyn Fn(f32) + Send + Sync>, who: &'static str) -> Result<Recording, String> {
+        // From before the device opens until the recording is gone.
+        let own = OwnCapture::begin();
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
         let (done_tx, done_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
@@ -446,7 +488,7 @@ mod capture {
             })
             .map_err(|e| format!("mic_failed: {e}"))?;
         match ready_rx.recv_timeout(std::time::Duration::from_secs(5)) {
-            Ok(Ok(())) => Ok(Recording { stop: Some(stop_tx), done: done_rx, shared: tapped, who }),
+            Ok(Ok(())) => Ok(Recording { stop: Some(stop_tx), done: done_rx, shared: tapped, who, _own: own }),
             Ok(Err(e)) => Err(e),
             Err(_) => Err("mic_failed: the microphone did not start in time (5 s)".into()),
         }

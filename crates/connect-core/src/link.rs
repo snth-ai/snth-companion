@@ -321,6 +321,9 @@ async fn control_loop(mut s: MuxStream, shared: Arc<Shared>, slot: Arc<LinkSlot>
     let slot_r = slot.clone();
     let est = established.clone();
     let reader = async move {
+        // This link's observe reports (observe.rs), from its hello_ack on.
+        // The task ends with the control stream (its queue closes).
+        let mut observe: Option<tokio::task::JoinHandle<()>> = None;
         loop {
             match read_line(&mut rd, MAX_CONTROL_LINE).await {
                 Ok(Some(line)) => {
@@ -330,6 +333,7 @@ async fn control_loop(mut s: MuxStream, shared: Arc<Shared>, slot: Arc<LinkSlot>
                             let ack: wire::HelloAck =
                                 serde_json::from_slice(&line).unwrap_or_default();
                             slot_r.requests.set_supported(ack.has(crate::requests::FEATURE));
+                            crate::observe::note_ack(&slot_r, &ack);
                             shared_r.set_synth(&slot_r, ack.clone());
                             shared_r.set_slot_state(
                                 &slot_r,
@@ -338,6 +342,16 @@ async fn control_loop(mut s: MuxStream, shared: Arc<Shared>, slot: Arc<LinkSlot>
                             );
                             est.store(true, Ordering::Release);
                             logln!("linked to {} as device {}", slot_r.display_name(), shared_r.device_id());
+                            // The synth takes observe reports: they start
+                            // now (it remembers none from an earlier link).
+                            if let Some(old) = observe.take() {
+                                old.abort();
+                            }
+                            if ack.has(crate::observe::FEATURE) {
+                                if let Some(out) = slot_r.requests.sender(generation) {
+                                    observe = Some(tokio::spawn(crate::observe::run_link(shared_r.clone(), slot_r.clone(), out)));
+                                }
+                            }
                             // The island shows this synth's face: read it
                             // now (the request goes out on this stream).
                             if shared_r.island().enabled && crate::island::supports(&slot_r) {
