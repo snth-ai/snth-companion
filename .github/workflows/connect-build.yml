@@ -11,6 +11,7 @@ name: connect-build
 on:
   push:
     branches:
+      - "main"
       - "connect/**"
   workflow_dispatch:
 

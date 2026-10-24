@@ -176,6 +176,19 @@ shortcut `Ctrl/Cmd+Shift+Q` is "taken by another app". Examples:
 `?account=signed_out`, `?account=two&screen=general&lang=ru`,
 `?account=repair`, `?account=consent&connectfail=synth_outdated`.
 
+## Keeping a Mac available
+
+On Computer control, enable **Keep this Mac available** to prevent idle system
+sleep while paired, computer control is enabled, and Connect is not paused.
+Permitted computer tasks wake the display; it can sleep between tasks.
+Pausing, disabling computer control, unpairing, or quitting releases the hold.
+The setting is off by default and is preserved when switching presets.
+
+The session must be unlocked for computer tasks. This setting does not unlock
+macOS, wake a fully sleeping Mac, or override a closed lid. Automatic unlock is
+deferred; the experimental native validation components are not bundled or
+installed by the app.
+
 ## Build
 
 ```
