@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { backend } from "./backend";
 import { shortcutText } from "./lib/format";
-import { synthsLabel, synthsNames, useActiveEntry, useStore } from "./lib/store";
+import { synthName, synthsLabel, synthsNames, useActiveEntry, useStore } from "./lib/store";
 import { Activity } from "./screens/Activity";
 import { Apps } from "./screens/Apps";
 import { Computer } from "./screens/Computer";
@@ -10,13 +10,14 @@ import { General } from "./screens/General";
 import { Internet } from "./screens/Internet";
 import { Island } from "./screens/Island";
 import { Logins } from "./screens/Logins";
+import { Observe } from "./screens/Observe";
 import { Onboarding, type Step } from "./screens/Onboarding";
 import { PairSheet } from "./screens/Pairing";
 import { Status } from "./screens/Status";
-import { IconApps, IconCookie, IconIsland, IconFolder, IconGlobe, IconList, IconPause, IconPlay, IconPointer, IconSliders, IconStatus } from "./ui/icons";
+import { IconApps, IconCookie, IconEye, IconIsland, IconFolder, IconGlobe, IconList, IconPause, IconPlay, IconPointer, IconSliders, IconStatus } from "./ui/icons";
 
-export type Screen = "status" | "internet" | "computer" | "files" | "apps" | "island" | "cookies" | "activity" | "general";
-const SCREENS: Screen[] = ["status", "internet", "cookies", "computer", "files", "apps", "island", "activity", "general"];
+export type Screen = "status" | "internet" | "computer" | "files" | "apps" | "island" | "observe" | "cookies" | "activity" | "general";
+const SCREENS: Screen[] = ["status", "internet", "cookies", "computer", "files", "apps", "island", "observe", "activity", "general"];
 
 function Sidebar(props: { screen: Screen; go: (screen: Screen) => void }) {
   const { state, s, act } = useStore();
@@ -50,6 +51,12 @@ function Sidebar(props: { screen: Screen; go: (screen: Screen) => void }) {
     { screen: "files", icon: <IconFolder />, title: s.nav.files, off: !settings.files.enabled },
     { screen: "apps", icon: <IconApps />, title: s.nav.apps, off: !settings.apps.enabled },
     { screen: "island", icon: <IconIsland />, title: s.nav.island, off: !state.island.settings.enabled },
+    {
+      screen: "observe",
+      icon: <IconEye />,
+      title: s.nav.observe(core.links.length > 1 ? null : synthName(state, s)),
+      off: !(state.observe?.links ?? []).some((l) => l.on.length > 0),
+    },
     { screen: "activity", icon: <IconList />, title: s.nav.activity },
     { screen: "general", icon: <IconSliders />, title: s.nav.general },
   ];
@@ -182,6 +189,7 @@ export function App(props: { initialScreen?: string | null; initialStep?: Step }
         {screen === "files" ? <Files /> : null}
         {screen === "apps" ? <Apps /> : null}
         {screen === "island" ? <Island /> : null}
+        {screen === "observe" ? <Observe /> : null}
         {screen === "activity" ? <Activity /> : null}
         {screen === "general" ? <General /> : null}
       </main>

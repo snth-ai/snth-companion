@@ -78,6 +78,8 @@ pub struct LinkSlot {
     pub(crate) unpair_ack: Notify,
     /// What the app asks this synth over the control stream.
     pub(crate) requests: LinkRequests,
+    /// What this synth offers of `observe` (observe.rs).
+    pub(crate) observe: Mutex<crate::observe::LinkObserve>,
 }
 
 impl LinkSlot {
@@ -120,6 +122,7 @@ impl LinkSlot {
             unpair_req: Notify::new(),
             unpair_ack: Notify::new(),
             requests: LinkRequests::default(),
+            observe: Mutex::new(crate::observe::LinkObserve::default()),
         }
     }
 

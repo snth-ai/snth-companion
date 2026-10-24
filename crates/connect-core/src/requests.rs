@@ -75,6 +75,17 @@ impl LinkRequests {
         (rx, old.1)
     }
 
+    /// The writer queue of this control stream, for the messages the app
+    /// sends on its own (observe.rs). None once a newer stream attached or
+    /// the stream ended. The queue closes when the stream's writer ends.
+    pub(crate) fn sender(&self, generation: u64) -> Option<mpsc::UnboundedSender<Value>> {
+        let st = self.state.lock().unwrap();
+        if st.generation != generation {
+            return None;
+        }
+        st.out.clone()
+    }
+
     /// The synth's hello_ack arrived: does it answer requests?
     pub(crate) fn set_supported(&self, supported: bool) {
         self.state.lock().unwrap().supported = supported;

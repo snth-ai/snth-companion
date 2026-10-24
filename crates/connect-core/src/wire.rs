@@ -120,6 +120,10 @@ pub struct HelloAck {
     /// ("requests", "vault"). An older synth sends none.
     #[serde(default)]
     pub features: Vec<String>,
+    /// With the `observe` feature: the resources the synth relays right
+    /// now (connect.md "Observe"). Absent = none.
+    #[serde(default)]
+    pub observe_resources: Vec<String>,
 }
 
 impl HelloAck {

@@ -74,7 +74,9 @@ libc = "0.2"
 # the registry (another app records), the session's lock state and the
 # input desktop, the running programs, the memory of the process (its
 # test).
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_System_Registry", "Win32_System_RemoteDesktop", "Win32_System_Diagnostics_ToolHelp", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_System_StationsAndDesktops"] }
+# Observe (observe/win.rs): the window in front and its program, the
+# programs with a window, the current Wi-Fi network (the WLAN API).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_System_Registry", "Win32_System_RemoteDesktop", "Win32_System_Diagnostics_ToolHelp", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_System_StationsAndDesktops", "Win32_NetworkManagement_WiFi"] }
 # Wake by name (island/wake/system.rs): the input devices through the
 # MMDevice API, with the bus each sits on (a Bluetooth microphone is never
 # opened). The same crate and version cpal's WASAPI host uses, so nothing

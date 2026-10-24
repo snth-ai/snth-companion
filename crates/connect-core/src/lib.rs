@@ -47,6 +47,7 @@ pub mod locked_use;
 pub mod journal;
 pub mod link;
 pub mod mcp;
+pub mod observe;
 pub mod pairing;
 pub mod presence;
 pub mod power;

@@ -45,6 +45,13 @@ export const IconIsland = () => (
   </Svg>
 );
 
+export const IconEye = () => (
+  <Svg>
+    <path d="M1.8 8S4.1 3.6 8 3.6 14.2 8 14.2 8 11.9 12.4 8 12.4 1.8 8 1.8 8Z" />
+    <circle cx="8" cy="8" r="2" />
+  </Svg>
+);
+
 export const IconApps = () => (
   <Svg>
     <rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1.2" />

@@ -821,6 +821,12 @@ pub struct Persisted {
     /// id. A cache: the synth holds the truth.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub faces: std::collections::BTreeMap<String, serde_json::Value>,
+    /// Observe (observe.rs): which source goes to which synth, the apps
+    /// the owner excluded, the named Wi-Fi networks. The owner's own, like
+    /// the island: not a policy, not part of `settings_rev`, never sent.
+    /// Absent in a file written before observe: every source off.
+    #[serde(default, skip_serializing_if = "crate::observe::ObserveSettings::is_empty")]
+    pub observe: crate::observe::ObserveSettings,
 }
 
 impl Persisted {
@@ -868,6 +874,7 @@ impl Persisted {
             browsers: Vec::new(),
             island: crate::island::IslandSettings::default(),
             faces: std::collections::BTreeMap::new(),
+            observe: crate::observe::ObserveSettings::default(),
         }
     }
 }
@@ -887,6 +894,7 @@ pub fn load(path: &Path, new_device_id: impl FnOnce() -> String) -> io::Result<P
             p.migrate_links();
             // Keys of a file edited by hand: trimmed, no key twice.
             p.island.normalize();
+            p.observe.normalize();
             Ok(p)
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Persisted::fresh(new_device_id())),

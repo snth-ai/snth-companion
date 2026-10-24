@@ -24,7 +24,8 @@ app/
     lib/        store.tsx (state), format.ts (journal lines, sizes, shortcuts)
     ui/         controls.tsx, icons.tsx
     screens/    Onboarding, Status, Internet, Computer, Files, Apps,
-                Island, Logins, Activity, General, HelperStatus
+                Island, Observe ("What Mia sees"), Logins, Activity,
+                General, HelperStatus
     island/     IslandApp.tsx (the island window), IslandStage.tsx (its
                 browser review stage), faceApi.ts (the one door to the
                 face module), face/ (the face: renderer, schema, presets,
@@ -34,6 +35,11 @@ app/
     styles/app.css
   src-tauri/
     src/main.rs        plugins, setup, link supervisor, event forwarder
+    src/observe/       what the synths see (User Context reports): the
+                       observe thread (mod.rs) and this system's probes:
+                       mac.rs (CoreAudio, NSWorkspace, Accessibility,
+                       CoreWLAN, CoreLocation), win.rs (the microphone's
+                       consent store, the foreground window, the WLAN API)
     src/commands.rs    every command the webview may call
     src/approvals.rs   the Approver the core asks through
     src/actions.rs     pause / resume / quit / deep link / stop shortcut
@@ -1152,7 +1158,50 @@ byte-identical size), and the symbols land next to it:
 The cost is a longer and larger release build (the debug info is generated,
 then split off), so it waits for the release manager.
 
+## What the synth sees (observe)
+
+The "What Mia sees" page: per linked synth, a switch for each source the
+synth takes right now (connect.md "Observe: User Context reports";
+`hello_ack` feature `observe`, the list `observe_resources`, the
+descriptors from the `observe.resources` request at every link and every
+10 minutes). Every source is off by default; switching one on shows the
+descriptor's `privacy.consent` first. The logic (what counts as a call,
+the categories, the exclusions, the place by network, what goes when) is
+in `crates/connect-core/src/observe.rs` and `observe/sources.rs` with its
+tests; the shell (`src-tauri/src/observe/`) only reads the system, every
+2 s, and nothing while paused.
+
+| Source | Resource | macOS | Windows | Permission |
+|---|---|---|---|---|
+| Calls | `device.call` | the processes that record (CoreAudio process objects, macOS 14+; before: the default input running while the app's own microphone is closed) + the running call apps | the microphone's consent store (`LastUsedTimeStop == 0`), this exe left out | none (the microphone is never opened) |
+| The app in front | `device.activity` | `NSWorkspace.frontmostApplication` + `AXFocusedWindow`/`AXTitle` | `GetForegroundWindow`, `GetWindowTextW`, the process image | macOS: Accessibility for the titles (computer control's; never asked by this page), none on Windows |
+| Place | `place.current` | CoreWLAN `ssid` | `WlanQueryInterface` current connection | macOS 14+: Location Services, asked when the place is switched on (`NSLocationUsageDescription`, `com.apple.security.personal-information.location`); Windows 11 24H2+: location for desktop apps |
+
+The app's own microphone (a hold of the island, wake by name) never
+counts as a call: the process list leaves this process out, and before
+macOS 14 a running device while the app holds it (`audio::own_capture`,
+plus a 3 s tail) is not a call. Password managers, the passwords page of
+System Settings and private browser windows (by title) always go as
+`private`; the owner adds own apps from the apps lately in front or
+running now. The Wi-Fi network's name stays on the computer: only the
+owner's name for the place goes, `null` on an unnamed network.
+
+Mock mode: `?screen=observe&observe=on|call|private|notasked|denied|nowifi|unnamed|notitles|nofeature|nogrant|two`.
+The probes on a real Mac print with
+`cargo test -p snth-connect observe_probes_now -- --ignored --nocapture`.
+
 ## Not verified
+
+- Observe, live: the switches against a real synth with UC on, the
+  Location Services prompt in a signed build (the prompt, the answer, the
+  network's name after it), a real call (Zoom, FaceTime, Meet in a
+  browser, Telegram) seen as one, private-window markers in each browser
+  (Chrome on macOS may not put "Incognito" in the window title), and
+  everything on Windows (the consent store, the foreground window, the
+  WLAN API and its location gate). Tested: the logic in the core (unit
+  tests, also on the Windows CI machine), the macOS probes reading this
+  Mac (`observe_probes_now`), the Windows probes compiled for
+  x86_64-pc-windows-msvc.
 
 - The island, live. Unit-tested: the notch arithmetic, the hold state
   machine, the WAV and resampler, the JPEG scaling, owner.message and its

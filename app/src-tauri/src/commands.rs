@@ -1027,6 +1027,14 @@ pub fn open_external(ctx: Cx<'_>, target: String) -> Result<(), String> {
                 "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
             }
         }
+        // Observe's place: the network's name needs location access.
+        "privacy_location" => {
+            if cfg!(windows) {
+                "ms-settings:privacy-location"
+            } else {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices"
+            }
+        }
         "helper" => "https://cua.ai/docs/cua-driver",
         // Where the SNTH Vault extension is installed from.
         "vault_extension" => extension.as_str(),
@@ -1034,6 +1042,74 @@ pub fn open_external(ctx: Cx<'_>, target: String) -> Result<(), String> {
         _ => return Err("unknown_target".into()),
     };
     run_detached(open_argv(url))
+}
+
+// --- observe ---
+
+/// The "what the synth sees" page, fresh (it asks every few seconds while
+/// open: the live line of what goes).
+#[tauri::command]
+pub fn observe_view(ctx: Cx<'_>) -> crate::observe::ObserveDto {
+    crate::observe::dto(&ctx)
+}
+
+/// One source on or off for one synth. Err: "unknown_synth",
+/// "unknown_resource", "unsupported".
+#[tauri::command]
+pub async fn observe_set(ctx: Cx<'_>, synth_id: String, resource: String, on: bool) -> Result<UiState, String> {
+    crate::observe::set(ctx.inner(), &synth_id, &resource, on)?;
+    Ok(build_state(&ctx).await)
+}
+
+/// Ask a synth again what it offers (its descriptors).
+#[tauri::command]
+pub async fn observe_refresh(ctx: Cx<'_>, synth_id: String) -> Result<UiState, String> {
+    ctx.core.observe_refresh(&synth_id).await?;
+    Ok(build_state(&ctx).await)
+}
+
+/// Exclude an app from the activity (`excluded` true) or take it off the
+/// owner's list. The app is its id (bundle id, program file name) and the
+/// name shown for it.
+#[tauri::command]
+pub async fn observe_exclude(ctx: Cx<'_>, id: String, name: String, excluded: bool) -> Result<UiState, String> {
+    if id.len() > 512 || name.len() > 512 {
+        return Err("bad_app".into());
+    }
+    ctx.core.set_observe(|o| {
+        if excluded {
+            o.exclude(&id, &name);
+        } else {
+            o.unexclude(&id, &name);
+        }
+    });
+    Ok(build_state(&ctx).await)
+}
+
+/// Name a Wi-Fi network (a new name renames it, "" forgets it). Err:
+/// "bad_network".
+#[tauri::command]
+pub async fn observe_place(ctx: Cx<'_>, ssid: String, name: String) -> Result<UiState, String> {
+    let mut err = None;
+    ctx.core.set_observe(|o| err = o.name_network(&ssid, &name).err());
+    if let Some(e) = err {
+        return Err(e);
+    }
+    Ok(build_state(&ctx).await)
+}
+
+/// The apps with a window that run now, for the exclusion picker.
+#[tauri::command]
+pub async fn observe_running_apps() -> Result<Vec<connect_core::observe::AppMark>, String> {
+    tokio::task::spawn_blocking(crate::observe::running_apps).await.map_err(|e| e.to_string())
+}
+
+/// Ask the system again for the network's name (macOS: Location
+/// Services, once).
+#[tauri::command]
+pub async fn observe_location(ctx: Cx<'_>) -> Result<UiState, String> {
+    crate::observe::ask_location(ctx.inner());
+    Ok(build_state(&ctx).await)
 }
 
 // --- the island ---

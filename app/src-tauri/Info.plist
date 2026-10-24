@@ -16,6 +16,10 @@
 	<string>Your synth works with this app (for example your calendar, notes or messages) only if you switched that app on in SNTH Connect, under Apps.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>SNTH Connect listens only while you hold the island's talk key, and sends what you said to your synth as a voice message.</string>
+	<key>NSLocationUsageDescription</key>
+	<string>SNTH Connect reads the name of your Wi-Fi network only to tell which of the places you named you are at. The network's name and your location stay on this computer.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>SNTH Connect reads the name of your Wi-Fi network only to tell which of the places you named you are at. The network's name and your location stay on this computer.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Your synth reaches devices on your home network only if you turned that on in SNTH Connect.</string>
 </dict>

@@ -89,6 +89,8 @@ pub struct Ctx {
     pub stop_shortcut: Mutex<Option<tauri_plugin_global_shortcut::Shortcut>>,
     /// The island: its window, its keys, the message on its way.
     pub island: crate::island::Island,
+    /// Observe: what its sources saw last (observe/mod.rs).
+    pub observe: crate::observe::Observe,
 }
 
 impl Ctx {
@@ -307,6 +309,8 @@ pub struct UiState {
     pub account: connect_core::account::AccountView,
     /// The island (the Island screen).
     pub island: IslandDto,
+    /// What the synths see of this computer (the observe page).
+    pub observe: crate::observe::ObserveDto,
     pub prefs: PrefsDto,
     pub app: AppInfo,
 }
@@ -358,6 +362,7 @@ pub async fn build_state(ctx: &Ctx) -> UiState {
             stt: stt_dto(ctx),
             wake: crate::island::wake::dto(ctx),
         },
+        observe: crate::observe::dto(ctx),
         prefs: PrefsDto {
             onboarded: prefs.onboarded,
             language: prefs.language,

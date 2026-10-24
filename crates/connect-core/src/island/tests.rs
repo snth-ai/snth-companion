@@ -44,6 +44,7 @@ fn linked(ids: &[(&str, &[&str])]) -> (Core, Vec<tokio::sync::mpsc::UnboundedRec
                 synth_name: id.to_string(),
                 synth_version: "t".into(),
                 features: features.iter().map(|f| f.to_string()).collect(),
+                observe_resources: Vec::new(),
             },
         );
         shared.set_slot_state(&slot, LinkState::Linked, "linked");
