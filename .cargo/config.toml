@@ -1,0 +1,14 @@
+# The workspace builds with the Rust named in Cargo.toml (`rust-version`).
+# Prefer dependency versions that support it over newer ones that do not,
+# so `cargo update` cannot quietly raise the toolchain requirement.
+[resolver]
+incompatible-rust-versions = "fallback"
+
+# whisper.cpp's CPU code (whisper-rs-sys, built by cmake) is tuned for the
+# machine that builds it unless told otherwise (GGML_NATIVE). On Windows
+# that would ship whatever the CI runner has (AVX-512 on some) to every
+# PC. whisper-rs-sys passes CMAKE_* variables on to cmake, and this one
+# makes cmake read ggml-x64.cmake first, which fixes the floor at AVX2 on
+# a Windows host and does nothing elsewhere (the Mac build is unchanged).
+[env]
+CMAKE_PROJECT_INCLUDE_BEFORE = { value = ".cargo/ggml-x64.cmake", relative = true }

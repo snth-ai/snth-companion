@@ -1,0 +1,40 @@
+[package]
+name = "connect-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SNTH Connect: the channel between the SNTH Vault browser extension and the running app (native messaging host helper, per-user endpoint, host manifests)."
+publish = false
+
+[lib]
+name = "connect_host"
+path = "src/lib.rs"
+
+# The helper as a stand-alone program, for tests and the self-test. The
+# one that ships is the same `host::main` built into the app's package
+# (app/src-tauri/src/bin/snth-connect-host.rs), so the bundler picks it up.
+[[bin]]
+name = "connect-host"
+path = "src/bin/connect-host.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt", "net", "io-util", "io-std", "time", "sync", "macros"] }
+serde_json.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_System_Pipes",
+    "Win32_Storage_FileSystem",
+] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "test-util"] }

@@ -1,0 +1,535 @@
+/* The face's own styles: the black island shapes the face sits on, the
+   face editor and the review page. Uses the app's tokens (app.css). */
+
+/* ---------- island shapes ---------- */
+
+.face-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0 0 999px 999px;
+  background: #000;
+  flex: none;
+}
+
+.face-card {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 28px;
+  background: #000;
+  flex: none;
+}
+
+/* ---------- review page ---------- */
+
+html:has(.fd),
+html:has(.fd) body {
+  overflow: auto;
+  height: auto;
+}
+
+.fd {
+  padding: 28px 32px 48px;
+  min-height: 100vh;
+}
+
+.fd.fd-bare {
+  display: inline-block;
+  padding: 16px;
+  min-height: 0;
+  background: var(--bg);
+}
+
+.fd-head {
+  margin-bottom: 18px;
+}
+
+.fd-head .fd-chips {
+  margin-top: 12px;
+}
+
+.fd-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.fd-stage {
+  display: grid;
+  grid-template-columns: minmax(0, 620px) minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.fd-screen {
+  position: relative;
+  height: 300px;
+  border-radius: 14px;
+  overflow: hidden;
+  background:
+    radial-gradient(120% 90% at 20% 100%, #4b3a6b 0%, transparent 60%),
+    radial-gradient(90% 80% at 90% 90%, #7a3f5b 0%, transparent 55%),
+    linear-gradient(180deg, #2a2633 0%, #1a1820 100%);
+  box-shadow: var(--shadow);
+}
+
+.fd-screen .fx-bar {
+  width: 100% !important;
+}
+
+.fd-screen.light {
+  background:
+    radial-gradient(120% 90% at 20% 100%, #c9d7f2 0%, transparent 60%),
+    radial-gradient(90% 80% at 90% 90%, #f3cfdc 0%, transparent 55%),
+    linear-gradient(180deg, #eef0f6 0%, #dfe3ee 100%);
+}
+
+.fd-open {
+  position: absolute;
+  top: 60px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 28px 10px 14px;
+  border-radius: 32px;
+  background: #000;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.45);
+}
+
+.fd-open-name {
+  color: #f4f1f2;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.fd-open-state {
+  margin-top: 2px;
+  color: #a39ea0;
+  font-size: 13px;
+}
+
+.fd-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.fd-controls label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.fd-gridtitle {
+  margin-top: 28px;
+}
+
+.fd-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  max-width: 1500px;
+}
+
+.fd-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.fd-label {
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+.fd-grid {
+  border-collapse: separate;
+  border-spacing: 6px;
+}
+
+.fd-grid th {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+  text-align: center;
+  white-space: nowrap;
+}
+
+.fd-grid tbody th {
+  text-align: right;
+  padding-right: 6px;
+}
+
+.fd-notch td {
+  padding: 4px 10px;
+  background: #8a8790;
+}
+
+/* ---------- controls the app does not have yet ---------- */
+
+.face-range {
+  width: 150px;
+  accent-color: var(--accent);
+}
+
+/* ---------- editor ---------- */
+
+.fe {
+  container-type: inline-size;
+}
+
+/* The preview stays in view: a pinned strip in a narrow window ... */
+.fe-preview {
+  position: sticky;
+  top: -22px;
+  z-index: 3;
+  margin: -22px -2px 0;
+  padding: 22px 2px 12px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.fe-preview-stage {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 112px;
+  padding: 0 14px 12px;
+  border-radius: var(--radius);
+  overflow: hidden;
+  background:
+    radial-gradient(110% 120% at 15% 110%, #3d3156 0%, transparent 60%),
+    radial-gradient(90% 100% at 95% 100%, #5e3247 0%, transparent 55%),
+    linear-gradient(180deg, #24212b 0%, #17151c 100%);
+}
+
+.fe-preview-closed {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
+  align-self: flex-start;
+}
+
+.fe-size {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.62);
+  white-space: nowrap;
+}
+
+.fe-preview-open {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 12px 0 0 auto;
+  padding: 8px 18px;
+  border-radius: 26px;
+  background: #000;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+
+.fe-preview-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.fe-preview-bar .select {
+  flex: 0 1 220px;
+  min-width: 0;
+  height: 28px;
+}
+
+.fe-preview-gap {
+  flex: 1;
+}
+
+/* ... and a sticky column once there is room for two. */
+@container (min-width: 760px) {
+  .fe-layout {
+    display: grid;
+    grid-template-columns: 270px minmax(0, 1fr);
+    gap: 26px;
+    align-items: start;
+  }
+
+  .fe-preview {
+    top: 16px;
+    margin: 16px 0 0;
+    padding: 0;
+    border: 0;
+    background: none;
+  }
+
+  .fe-preview-stage {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .fe-preview-open {
+    margin: 4px auto 0;
+  }
+}
+
+.fe-looks {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 8px;
+}
+
+.fe-look {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 5px 5px 7px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  text-align: center;
+  transition: border-color 0.15s var(--ease), background-color 0.15s var(--ease);
+}
+
+.fe-look:hover {
+  background: var(--hover);
+}
+
+.fe-look[aria-checked="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.fe-look-face {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 64px;
+  border-radius: 7px;
+  background: #000;
+}
+
+.fe-look-name {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 550;
+  white-space: nowrap;
+}
+
+.fe-look-name .tag {
+  font-weight: 500;
+}
+
+.fe-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.fe-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.fe-summary::-webkit-details-marker {
+  display: none;
+}
+
+.fe-summary::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 0.15s var(--ease);
+}
+
+.fe-group[open] > .fe-summary::before {
+  transform: rotate(45deg);
+}
+
+.fe-slider {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+
+.fe-num {
+  min-width: 52px;
+  text-align: right;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+}
+
+.fe-colour {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.fe-colour.with-presets {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: 320px;
+}
+
+.fe-colour-presets {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 5px;
+  width: 100%;
+}
+
+.fe-colour-dot {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  cursor: pointer;
+}
+
+.fe-colour-dot[aria-checked="true"] {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.fe-colour .fe-hex {
+  width: 84px;
+  height: 28px;
+  font: 12px var(--mono);
+}
+
+.fe-colour .fe-hex[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.fe-colour input[type="color"] {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: none;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.fe-colour input[type="color"]::-webkit-color-swatch-wrapper {
+  padding: 3px;
+}
+
+.fe-colour input[type="color"]::-webkit-color-swatch {
+  border: 0;
+  border-radius: 5px;
+}
+
+.fe-glyphs {
+  flex-wrap: nowrap;
+  max-width: none;
+  gap: 3px;
+}
+
+.fe-glyphs .swatch {
+  width: 28px;
+  height: 28px;
+  color: var(--text-2);
+}
+
+.fe-glyphs .swatch[aria-checked="true"] {
+  color: var(--accent-text);
+}
+
+.fe-emotes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 0 14px 12px;
+  border-top: 0 !important;
+}
+
+.fe-habit {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.fe-play {
+  width: 24px;
+  height: 24px;
+  color: var(--text-2);
+}
+
+.mock-window.fd-editor {
+  height: auto;
+  min-height: 560px;
+}
+
+.mock-window.fd-editor.wide {
+  width: 1100px;
+}
+
+.mock-window.fd-editor .main {
+  height: auto;
+  overflow: visible;
+}
+
+/* ---------- notch fixture (review only) ---------- */
+
+.fx-bar {
+  flex: none;
+}
+
+.fx-shape {
+  display: flex;
+  align-items: stretch;
+  background: #000;
+}
+
+.fx-slot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.fx-slot[data-guides] {
+  box-shadow: inset 0 0 0 1px rgba(120, 200, 255, 0.35);
+}
+
+.fx-cutout[data-guides] {
+  background: repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.05) 0 4px, transparent 4px 8px);
+}
+
+.fx-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.fx-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #5c5a62;
+}

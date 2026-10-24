@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Your synth works with files on the Desktop only if you shared that folder in SNTH Connect.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Your synth works with files in Downloads only if you shared that folder in SNTH Connect.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>Your synth works with files in Documents only if you shared a folder there in SNTH Connect.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>Your synth works with files on this disk only if you shared a folder on it in SNTH Connect.</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>Your synth works with files on this network disk only if you shared a folder on it in SNTH Connect.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Your synth works with this app (for example your calendar, notes or messages) only if you switched that app on in SNTH Connect, under Apps.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>SNTH Connect listens only while you hold the island's talk key, and sends what you said to your synth as a voice message.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Your synth reaches devices on your home network only if you turned that on in SNTH Connect.</string>
+</dict>
+</plist>

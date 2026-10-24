@@ -1,0 +1,1294 @@
+//! The browser link: what the app says to, and accepts from, the SNTH
+//! Vault extension in the owner's browsers.
+//!
+//! The extension reaches the app through the helper of `connect-host`
+//! (native messaging, then a per-user local endpoint). Each browser
+//! profile that runs the extension is one connection, a `Session` here.
+//!
+//! Safari has no helper: its extension ships inside the app and its own
+//! native handler connects to a second endpoint, in the folder of the app
+//! group the two share. That is a second DOOR (`connect_host::Door`) to
+//! the same room: the same messages, the same checks, and each door takes
+//! only its own callers. Which browser a session is follows from the door
+//! it came in on, never from what it says.
+//!
+//! Three things travel on it:
+//!
+//!  1. PAIRING. The extension asks to be linked to the synth's login
+//!     vault. The owner confirms in THIS app, the app gets a pairing code
+//!     from the synth over the existing link (`vault.pair_code`) and hands
+//!     it to the extension, which redeems it at the hub like a code typed
+//!     by hand. The app never sees a password and never talks to the hub
+//!     about the vault.
+//!  2. COOKIES. When the synth asks for a site's cookies and the owner
+//!     allowed that site, the app may ask a LINKED browser for them. The
+//!     extension asks the owner once per site through the browser's own
+//!     permission prompt. Cookies travel extension -> app only; the app
+//!     sends the extension a site name and nothing else.
+//!  3. STATE. Which browser it is, whether it holds a vault pairing, which
+//!     sites it may read.
+//!
+//! THE RULE this module holds up: passwords are for the synth's cloud
+//! browser only (the hub types them, nobody else sees them); cookies are
+//! for requests made from this computer only. Nothing here sends a cookie
+//! anywhere but back to the caller in this process, and nothing here ever
+//! holds a password.
+//!
+//! Everything a session sends is untrusted. The extension's id is checked
+//! by the browser and again by the helper, but a program of the same user
+//! could speak this protocol too, so the app is built to give such a peer
+//! nothing: it is never sent a secret, a pairing code leaves only after
+//! the owner's click in this app, and cookies are accepted only from a
+//! browser the owner linked here, only for the site just asked about.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use connect_host::frame::{self, FrameError, MAX_FROM_BROWSER, MAX_TO_BROWSER};
+use connect_host::transport::{Conn, Listener};
+use connect_host::{safari, Door};
+use serde::Serialize;
+use serde_json::{json, Value};
+use tokio::io::BufReader;
+use tokio::sync::{mpsc, oneshot, watch};
+
+use crate::cookies::{host_applies, CookieRead, WireCookie};
+use crate::core::{Core, CoreEvent, Shared};
+use crate::grant::{ApprovalRequest, Remember};
+use crate::journal::Entry;
+use crate::logln;
+use crate::settings::{CookiesMode, StoredBrowser};
+
+/// The protocol version both sides name in their hello.
+pub const VERSION: u32 = 1;
+
+/// The capability name of a pairing question in the approval window and
+/// in the journal.
+pub const CAP: &str = "vault";
+
+/// How long a new connection has to say who it is.
+const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+/// Messages waiting to be written to one extension.
+const OUT_QUEUE: usize = 32;
+/// At most this many site names are kept from one extension.
+const MAX_SITES: usize = 200;
+/// At most this many cookies are taken for one site (the synth keeps no
+/// more than that either).
+pub const MAX_COOKIES: usize = 400;
+/// A cookie name or value longer than this is not a cookie a browser
+/// would send (browsers cap name + value near 4 KiB).
+const MAX_COOKIE_FIELD: usize = 8 * 1024;
+/// After a code went to an extension, its "done" is accepted this long.
+const PAIR_WINDOW: Duration = Duration::from_secs(180);
+/// The least time between two pairing questions from one browser.
+const PAIR_COOLDOWN: Duration = Duration::from_secs(3);
+/// Remembered browsers.
+const MAX_BROWSERS: usize = 32;
+/// Connected extensions at once.
+const MAX_SESSIONS: usize = 16;
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+// --- cleaning what an extension says ---
+
+/// The browser's short id, when it is one we know. What came in on the
+/// Safari door is Safari whatever it calls itself, and nothing on the
+/// other door is.
+fn clean_browser(raw: &str, door: Door) -> String {
+    if door == Door::Safari {
+        return safari::BROWSER_ID.to_string();
+    }
+    let id = raw.trim().to_ascii_lowercase();
+    if connect_host::install::browser(&id).is_some() {
+        id
+    } else {
+        "browser".to_string()
+    }
+}
+
+/// The name people know a browser by.
+pub fn browser_name(id: &str) -> &'static str {
+    if id == safari::BROWSER_ID {
+        return safari::BROWSER_NAME;
+    }
+    connect_host::install::browser(id).map(|b| b.name).unwrap_or("Browser")
+}
+
+/// The random id an extension made for its profile: 16 to 64 hex digits.
+fn clean_install(raw: &str) -> Option<String> {
+    let ok = (16..=64).contains(&raw.len()) && raw.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    ok.then(|| raw.to_string())
+}
+
+fn clean_version(raw: &str) -> String {
+    raw.chars().filter(|c| c.is_ascii_digit() || *c == '.').take(20).collect()
+}
+
+/// The vault's device id: "dev_" and hex, as the hub mints it.
+fn clean_device_id(raw: &str) -> String {
+    let ok = raw.len() <= 40
+        && raw.starts_with("dev_")
+        && raw.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+    if ok {
+        raw.to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// A site as this app names it: the registrable domain, lowercase. None
+/// for anything else (a subdomain, an address, a single label).
+pub fn clean_site(raw: &str) -> Option<String> {
+    let s = raw.trim().to_ascii_lowercase();
+    let shaped = !s.is_empty()
+        && s.len() <= 253
+        && s.contains('.')
+        && !s.starts_with('.')
+        && !s.ends_with('.')
+        && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.');
+    (shaped && s.parse::<std::net::IpAddr>().is_err() && psl::domain_str(&s).is_some_and(|d| d == s)).then_some(s)
+}
+
+fn clean_sites(raw: Option<&Value>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for item in raw.and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]) {
+        if out.len() >= MAX_SITES {
+            break;
+        }
+        if let Some(site) = item.as_str().and_then(clean_site) {
+            if !out.contains(&site) {
+                out.push(site);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+fn text_field(c: &Value, key: &str, max: usize) -> Option<String> {
+    let s = c.get(key)?.as_str()?;
+    (s.len() <= max && !s.chars().any(|ch| ch == '\0' || ch == '\r' || ch == '\n')).then(|| s.to_string())
+}
+
+/// The cookies an extension returned for `site`, cut down to what a
+/// cookie of that site can be. A cookie of another site, a malformed one
+/// or one past the count limit is dropped, never an error.
+pub fn clean_cookies(site: &str, raw: Option<&Value>) -> Vec<WireCookie> {
+    let mut out = Vec::new();
+    for c in raw.and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]) {
+        if out.len() >= MAX_COOKIES {
+            break;
+        }
+        let (Some(name), Some(value), Some(domain)) = (
+            text_field(c, "name", MAX_COOKIE_FIELD),
+            text_field(c, "value", MAX_COOKIE_FIELD),
+            text_field(c, "domain", 254),
+        ) else {
+            continue;
+        };
+        let host = domain.trim_start_matches('.');
+        let host_ok = !host.is_empty()
+            && host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+            && host_applies(&domain, site);
+        if !host_ok || name.is_empty() && value.is_empty() {
+            continue;
+        }
+        let path = text_field(c, "path", 2048).filter(|p| p.starts_with('/')).unwrap_or_else(|| "/".into());
+        let expires = c.get("expires").and_then(Value::as_f64).unwrap_or(0.0);
+        let same_site = match c.get("same_site").and_then(Value::as_str).unwrap_or("") {
+            s @ ("none" | "lax" | "strict") => s.to_string(),
+            _ => String::new(),
+        };
+        out.push(WireCookie {
+            name,
+            value,
+            domain: domain.to_ascii_lowercase(),
+            path,
+            expires: if expires.is_finite() && expires > 0.0 { expires as i64 } else { 0 },
+            secure: c.get("secure").and_then(Value::as_bool).unwrap_or(false),
+            http_only: c.get("http_only").and_then(Value::as_bool).unwrap_or(false),
+            same_site,
+        });
+    }
+    out
+}
+
+/// The alphabet of a vault pairing code (the hub's: no I, O, 0 or 1).
+const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+fn clean_code(raw: &str) -> Option<String> {
+    (raw.len() == 8 && raw.bytes().all(|b| CODE_ALPHABET.contains(&b))).then(|| raw.to_string())
+}
+
+// --- sessions ---
+
+#[derive(Default, Clone)]
+struct SessionState {
+    /// The extension said hello.
+    greeted: bool,
+    browser: String,
+    install: String,
+    ext_version: String,
+    /// It says it holds a vault pairing.
+    paired: bool,
+    device_id: String,
+    /// The sites it may read cookies of.
+    sites: Vec<String>,
+    /// The owner let the extension read EVERY site in the browser's own
+    /// settings. The browser then asks nothing per site.
+    all_sites: bool,
+    /// A pairing question from it is being handled.
+    pairing: bool,
+    /// When a code went out to it, and from which synth's vault.
+    code_sent: Option<Instant>,
+    code_synth: String,
+    last_pair: Option<Instant>,
+}
+
+pub(crate) struct Session {
+    id: u64,
+    /// The endpoint it connected to.
+    door: Door,
+    tx: mpsc::Sender<Value>,
+    state: Mutex<SessionState>,
+}
+
+impl Session {
+    fn send(&self, msg: Value) -> bool {
+        self.tx.try_send(msg).is_ok()
+    }
+    fn snapshot(&self) -> SessionState {
+        self.state.lock().unwrap().clone()
+    }
+}
+
+struct Waiting {
+    session: u64,
+    tx: oneshot::Sender<Value>,
+}
+
+/// The connected extensions and the questions waiting for their answers.
+#[derive(Default)]
+pub struct Hub {
+    next_session: AtomicU64,
+    next_request: AtomicU64,
+    sessions: Mutex<Vec<Arc<Session>>>,
+    waiting: Mutex<HashMap<u64, Waiting>>,
+}
+
+impl Hub {
+    fn greeted(&self) -> Vec<Arc<Session>> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|s| s.state.lock().unwrap().greeted)
+            .cloned()
+            .collect()
+    }
+
+    fn by_install(&self, install: &str) -> Option<Arc<Session>> {
+        self.greeted().into_iter().rev().find(|s| s.state.lock().unwrap().install == install)
+    }
+
+    fn remove(&self, id: u64) {
+        self.sessions.lock().unwrap().retain(|s| s.id != id);
+        // Whoever waited for this extension gets no answer.
+        self.waiting.lock().unwrap().retain(|_, w| w.session != id);
+    }
+
+    /// Ask one extension and wait for the message that carries the same
+    /// id. None = no answer in time, or it went away.
+    async fn ask(&self, session: &Arc<Session>, mut msg: Value, wait: Duration) -> Option<Value> {
+        let id = self.next_request.fetch_add(1, Ordering::Relaxed) + 1;
+        msg["id"] = json!(id);
+        let (tx, rx) = oneshot::channel();
+        self.waiting.lock().unwrap().insert(id, Waiting { session: session.id, tx });
+        if !session.send(msg) {
+            self.waiting.lock().unwrap().remove(&id);
+            return None;
+        }
+        let got = tokio::time::timeout(wait, rx).await;
+        self.waiting.lock().unwrap().remove(&id);
+        got.ok().and_then(Result::ok)
+    }
+
+    /// An answer arrived: hand it to whoever asked THAT session.
+    fn answer(&self, session: u64, msg: Value) {
+        let Some(id) = msg.get("id").and_then(Value::as_u64) else {
+            return;
+        };
+        let mut waiting = self.waiting.lock().unwrap();
+        if waiting.get(&id).is_some_and(|w| w.session == session) {
+            if let Some(w) = waiting.remove(&id) {
+                let _ = w.tx.send(msg);
+            }
+        }
+    }
+}
+
+/// One browser as the Logins page shows it.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BrowserView {
+    pub install: String,
+    /// "chrome", "edge", "brave", "chromium", "safari" or "browser".
+    pub browser: String,
+    /// Its extension is talking to the app right now.
+    pub connected: bool,
+    /// The owner linked it here and it holds a vault pairing of a synth
+    /// (`synth_id`). Only a linked browser is asked for cookies, and only
+    /// for its own synth.
+    pub linked: bool,
+    /// The synth whose vault it is linked to (None while not linked).
+    pub synth_id: Option<String>,
+    pub ext_version: String,
+    /// The sites it may hand cookies of (known while connected).
+    pub sites: Vec<String>,
+    /// The owner allowed the extension on every site in the browser's own
+    /// settings (known while connected): that browser no longer asks per
+    /// site, and the answers given in this app are the only gate.
+    pub all_sites: bool,
+    /// Unix seconds of its last hello.
+    pub last_seen: i64,
+}
+
+/// One login the synth's vault holds. Never the login itself.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct VaultSite {
+    pub site: String,
+    pub has_totp: bool,
+    /// Unix seconds; 0 = unknown / never.
+    pub updated: i64,
+    pub last_used: i64,
+    pub use_count: u64,
+}
+
+/// One browser paired with the vault, as the hub lists it.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct VaultDevice {
+    pub id: String,
+    pub name: String,
+    pub created: i64,
+    pub last_seen: i64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
+pub struct VaultList {
+    pub sites: Vec<VaultSite>,
+    pub devices: Vec<VaultDevice>,
+}
+
+/// Why a pairing did not happen, as the extension is told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairRefusal {
+    /// This computer is not linked to a synth.
+    NotLinked,
+    Paused,
+    /// The owner said no (or did not answer).
+    Denied,
+    /// Another pairing of this browser is in flight, or it asks too often.
+    Busy,
+    /// The link to the synth is down.
+    SynthOffline,
+    /// The synth is too old to hand out codes over the link.
+    SynthOutdated,
+    /// The extension is paired with a vault this synth does not know.
+    OtherSynth,
+    /// The computer is linked to several synths: the owner picks the one
+    /// in the app (Logins), not from the browser.
+    ChooseSynth,
+    Failed,
+}
+
+impl PairRefusal {
+    pub fn code(self) -> &'static str {
+        match self {
+            PairRefusal::NotLinked => "not_linked",
+            PairRefusal::Paused => "paused",
+            PairRefusal::Denied => "denied",
+            PairRefusal::Busy => "busy",
+            PairRefusal::SynthOffline => "synth_offline",
+            PairRefusal::SynthOutdated => "synth_outdated",
+            PairRefusal::OtherSynth => "other_synth",
+            PairRefusal::ChooseSynth => "choose_synth",
+            PairRefusal::Failed => "failed",
+        }
+    }
+
+    fn from_link_error(e: &str) -> PairRefusal {
+        if e.contains("needs an update") || e.contains("unknown method") {
+            PairRefusal::SynthOutdated
+        } else if e.contains("not linked") || e.contains("dropped") || e.contains("did not answer") {
+            PairRefusal::SynthOffline
+        } else {
+            PairRefusal::Failed
+        }
+    }
+}
+
+/// How a read through an extension ended.
+pub(crate) enum ExtensionRead {
+    Cookies(CookieRead),
+    /// No linked browser is connected: the caller falls back.
+    NoBrowser,
+    /// The owner refused in the browser.
+    Denied(String),
+    /// The browser is still waiting for the owner.
+    NoAnswer(String),
+    Failed(String),
+}
+
+fn timestamp(v: Option<&Value>) -> i64 {
+    v.and_then(Value::as_i64).filter(|t| *t > 0 && *t < 100_000_000_000).unwrap_or(0)
+}
+
+fn short_text(v: Option<&Value>, max: usize) -> String {
+    v.and_then(Value::as_str)
+        .unwrap_or("")
+        .chars()
+        .filter(|c| !c.is_control() && *c != '<' && *c != '>')
+        .take(max)
+        .collect()
+}
+
+/// The synth's vault list, cut down to names and facts.
+fn parse_vault_list(v: &Value) -> VaultList {
+    let rows = |key: &str| v.get(key).and_then(Value::as_array).cloned().unwrap_or_default();
+    let mut list = VaultList::default();
+    for row in rows("sites").iter().take(500) {
+        // A vault site is a host ("mail.example.com" is fine here).
+        let site = short_text(row.get("site"), 253).to_ascii_lowercase();
+        let ok = site.contains('.') && site.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.');
+        if !ok {
+            continue;
+        }
+        list.sites.push(VaultSite {
+            site,
+            has_totp: row.get("has_totp").and_then(Value::as_bool).unwrap_or(false),
+            updated: timestamp(row.get("updated")),
+            last_used: timestamp(row.get("last_used")),
+            use_count: row.get("use_count").and_then(Value::as_u64).unwrap_or(0),
+        });
+    }
+    list.sites.sort_by(|a, b| a.site.cmp(&b.site));
+    for row in rows("devices").iter().take(50) {
+        let id = clean_device_id(row.get("id").and_then(Value::as_str).unwrap_or(""));
+        if id.is_empty() {
+            continue;
+        }
+        list.devices.push(VaultDevice {
+            id,
+            name: short_text(row.get("name"), 60),
+            created: timestamp(row.get("created")),
+            last_seen: timestamp(row.get("last_seen")),
+        });
+    }
+    list
+}
+
+impl Shared {
+    /// The name the browsers are told for a synth: that synth's, else the
+    /// current one's (the only link), else nothing.
+    fn synth_label_for(&self, synth_id: Option<&str>) -> String {
+        let slot = match synth_id.filter(|id| !id.is_empty()) {
+            Some(id) => self.slot(id),
+            None => self.current_slot(),
+        };
+        slot.map(|s| s.display_name()).unwrap_or_default()
+    }
+
+    /// The link a browser request goes to: the synth given, else the only
+    /// link there is.
+    fn vault_slot(&self, synth_id: Option<&str>) -> Result<Arc<crate::slot::LinkSlot>, String> {
+        match synth_id.filter(|id| !id.is_empty()) {
+            Some(id) => self.slot(id).ok_or_else(|| "unavailable: not linked to that synth".to_string()),
+            None => {
+                let links = self.slots();
+                match links.len() {
+                    0 => Err("unavailable: not linked to a synth".into()),
+                    1 => Ok(links[0].clone()),
+                    _ => Err("bad request: say which synth".into()),
+                }
+            }
+        }
+    }
+
+    /// Does any synth hold a standing answer for this?
+    fn grant_allows_any(&self, capability: &str, scope: &str) -> bool {
+        self.slots().iter().any(|s| self.grants.allows(&s.synth_id, capability, scope))
+    }
+
+    fn stored_browser(&self, install: &str) -> Option<StoredBrowser> {
+        self.persisted.read().unwrap().browsers.iter().find(|b| b.install == install).cloned()
+    }
+
+    /// Change (or add) the record of one browser and write it.
+    fn update_browser(&self, install: &str, f: impl FnOnce(&mut StoredBrowser)) {
+        {
+            let mut p = self.persisted.write().unwrap();
+            let before = p.browsers.clone();
+            if !p.browsers.iter().any(|b| b.install == install) {
+                if p.browsers.len() >= MAX_BROWSERS {
+                    // Drop the one not seen for the longest, never a linked one.
+                    let oldest = p
+                        .browsers
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, b)| !b.linked)
+                        .min_by_key(|(_, b)| b.last_seen)
+                        .map(|(i, _)| i);
+                    match oldest {
+                        Some(i) => {
+                            p.browsers.remove(i);
+                        }
+                        None => return,
+                    }
+                }
+                p.browsers.push(StoredBrowser {
+                    install: install.to_string(),
+                    browser: "browser".into(),
+                    linked: false,
+                    device_id: String::new(),
+                    synth_id: String::new(),
+                    ext_version: String::new(),
+                    last_seen: 0,
+                });
+            }
+            if let Some(b) = p.browsers.iter_mut().find(|b| b.install == install) {
+                f(b);
+            }
+            if p.browsers != before {
+                self.save_persisted(&p);
+            }
+        }
+        self.emit(CoreEvent::Browsers);
+    }
+
+    /// What every extension is told about the app: linked to whom.
+    fn status_for(&self, install: &str) -> Value {
+        let stored = self.stored_browser(install);
+        let own = stored.as_ref().filter(|b| b.linked).map(|b| b.synth_id.clone());
+        json!({
+            "linked": self.has_synth(),
+            "synth": self.synth_label_for(own.as_deref()),
+            "known": stored.is_some_and(|b| b.linked),
+        })
+    }
+
+    /// The app was linked to one more synth: every extension hears the
+    /// news (a computer that was not linked at all is linked now).
+    pub(crate) fn browsers_synth_added(&self) {
+        for s in self.browsers.greeted() {
+            let install = s.snapshot().install;
+            let mut msg = self.status_for(&install);
+            msg["type"] = json!("status");
+            s.send(msg);
+        }
+        self.emit(CoreEvent::Browsers);
+    }
+
+    /// The app was unlinked from one synth (`remaining` links are left).
+    /// The browsers linked to that synth's vault are not linked any more
+    /// and forget the sites they could read; the others keep theirs. With
+    /// no link left, no browser keeps a site.
+    pub(crate) fn browsers_synth_removed(&self, synth_id: &str, remaining: usize) {
+        let unlinked: Vec<String> = {
+            let mut p = self.persisted.write().unwrap();
+            let mut gone = Vec::new();
+            for b in p.browsers.iter_mut() {
+                if b.linked && (b.synth_id == synth_id || remaining == 0) {
+                    b.linked = false;
+                    b.synth_id = String::new();
+                    gone.push(b.install.clone());
+                }
+            }
+            if !gone.is_empty() {
+                self.save_persisted(&p);
+            }
+            gone
+        };
+        for s in self.browsers.greeted() {
+            let install = s.snapshot().install;
+            let mut msg = self.status_for(&install);
+            msg["type"] = json!("status");
+            s.send(msg);
+            if remaining == 0 || unlinked.contains(&install) {
+                // Cookies are a function of the link: a browser whose synth
+                // is gone keeps no site readable.
+                s.send(json!({"type": "sites.clear"}));
+            }
+        }
+        self.emit(CoreEvent::Browsers);
+    }
+
+    /// The owner took a site back from one synth: no browser linked to
+    /// that synth keeps the right to read it (nor a browser linked to no
+    /// synth, once no synth has a standing answer for the site).
+    pub(crate) fn browsers_revoke_site(&self, synth_id: &str, site: &str) {
+        if clean_site(site).is_none() {
+            return;
+        }
+        let still_any = self.grant_allows_any("cookies", site);
+        let stored = self.persisted.read().unwrap().browsers.clone();
+        for s in self.browsers.greeted() {
+            let install = s.snapshot().install;
+            let own = stored.iter().find(|b| b.install == install).filter(|b| b.linked).map(|b| b.synth_id.as_str());
+            let take_back = match own {
+                Some(synth) => synth == synth_id,
+                None => !still_any,
+            };
+            if take_back {
+                s.send(json!({"type": "site.revoke", "site": site}));
+            }
+        }
+    }
+
+    /// May a browser keep its permission for this site after a read? Only
+    /// while the owner's answer for the site is a standing one.
+    fn keeps_site(&self, site: &str) -> bool {
+        match self.settings().cookies.mode {
+            CookiesMode::Auto => true,
+            CookiesMode::AskNew => self.grant_allows("cookies", site),
+            CookiesMode::Ask => false,
+        }
+    }
+
+    /// The linked browser a cookie read would go to right now, and
+    /// whether it may read `site` already.
+    pub(crate) fn extension_for(&self, site: &str) -> Option<(String, bool)> {
+        let s = self.sessions_for(site).into_iter().next()?;
+        let st = s.snapshot();
+        Some((st.browser, st.all_sites || st.sites.iter().any(|x| x == site)))
+    }
+
+    /// The linked browsers in the order a read of `site` tries them: one
+    /// that may read the site already first (it answers without asking
+    /// the owner anything), then the one that connected last.
+    fn sessions_for(&self, site: &str) -> Vec<Arc<Session>> {
+        let mut sessions = self.linked_sessions();
+        sessions.sort_by_key(|s| {
+            let st = s.state.lock().unwrap();
+            !(st.all_sites || st.sites.iter().any(|x| x == site))
+        });
+        sessions
+    }
+
+    /// Connected extensions of browsers the owner linked to the synth
+    /// that asks, the one that connected last first. A browser linked to
+    /// another synth's vault is never asked for this one.
+    fn linked_sessions(&self) -> Vec<Arc<Session>> {
+        let synth = self.current_synth_id();
+        let linked: Vec<String> = self
+            .persisted
+            .read()
+            .unwrap()
+            .browsers
+            .iter()
+            .filter(|b| b.linked && b.synth_id == synth)
+            .map(|b| b.install.clone())
+            .collect();
+        let mut out: Vec<Arc<Session>> = self
+            .browsers
+            .greeted()
+            .into_iter()
+            .filter(|s| linked.contains(&s.state.lock().unwrap().install))
+            .collect();
+        out.reverse();
+        out
+    }
+
+    /// Read a site's cookies through a linked browser. `site` is a
+    /// registrable domain; `wait` is how long the owner has to confirm in
+    /// the browser; `asked` says the owner answered a question about this
+    /// site in the app a moment ago (the browser's window then reads as
+    /// the second step of the same question).
+    ///
+    /// With more than one linked browser (say Chrome and Safari), a
+    /// browser that holds no cookie of the site is not the end: the next
+    /// one is asked, inside the same time limit. A refusal or a silence
+    /// is the owner's answer and ends it.
+    pub(crate) async fn cookies_via_extension(self: &Arc<Self>, site: &str, wait: Duration, asked: bool) -> ExtensionRead {
+        if clean_site(site).as_deref() != Some(site) {
+            return ExtensionRead::NoBrowser;
+        }
+        let sessions = self.sessions_for(site);
+        if sessions.is_empty() {
+            return ExtensionRead::NoBrowser;
+        }
+        let started = Instant::now();
+        let mut nothing: Option<CookieRead> = None;
+        for session in sessions {
+            let left = wait.saturating_sub(started.elapsed());
+            if nothing.is_some() && left < Duration::from_secs(2) {
+                break;
+            }
+            match self.cookies_from(&session, site, left, asked).await {
+                ExtensionRead::Cookies(read) if read.cookies.is_empty() => {
+                    nothing.get_or_insert(read);
+                }
+                other => return other,
+            }
+        }
+        match nothing {
+            Some(read) => ExtensionRead::Cookies(read),
+            None => ExtensionRead::NoBrowser,
+        }
+    }
+
+    /// One read through one linked browser.
+    async fn cookies_from(self: &Arc<Self>, session: &Arc<Session>, site: &str, wait: Duration, asked: bool) -> ExtensionRead {
+        let st = session.snapshot();
+        let name = browser_name(&st.browser);
+        let ask = json!({"type": "cookies.get", "site": site, "synth": self.synth_label_for(None), "asked": asked});
+        let Some(reply) = self.browsers.ask(session, ask, wait).await else {
+            return ExtensionRead::NoAnswer(format!(
+                "no answer from the user ({name} is waiting for the owner to confirm {site}; try again once they did)"
+            ));
+        };
+        if reply.get("ok").and_then(Value::as_bool) != Some(true) {
+            return match reply.get("error").and_then(Value::as_str).unwrap_or("") {
+                "denied" => ExtensionRead::Denied(format!("the owner did not confirm {site} in {name}")),
+                _ => ExtensionRead::Failed(format!("{name} could not read the cookies of {site}")),
+            };
+        }
+        let cookies = clean_cookies(site, reply.get("cookies"));
+        // The extension reads on a standing permission of the browser.
+        // Unless the owner's answer for this site is a standing one too,
+        // the browser gives that permission back now.
+        if self.keeps_site(site) {
+            let mut st = session.state.lock().unwrap();
+            if !st.sites.iter().any(|x| x == site) {
+                st.sites.push(site.to_string());
+                st.sites.sort();
+            }
+        } else {
+            session.send(json!({"type": "site.revoke", "site": site}));
+            session.state.lock().unwrap().sites.retain(|x| x != site);
+        }
+        self.emit(CoreEvent::Browsers);
+        // The synth keeps a source as a plain label (letters, digits,
+        // dots, dashes), so this one is written that way from the start.
+        ExtensionRead::Cookies(CookieRead { cookies, source: format!("{}-extension", st.browser) })
+    }
+
+    fn pair_refused(&self, session: &Session, id: u64, why: PairRefusal, journal: bool) {
+        let st = session.snapshot();
+        session.send(json!({"type": "pair.refused", "id": id, "error": why.code()}));
+        if journal {
+            let outcome = match why {
+                PairRefusal::Denied => "denied: owner".to_string(),
+                PairRefusal::Paused => "denied: paused by the owner".to_string(),
+                other => format!("failed: {}", other.code()),
+            };
+            self.journal().record(Entry::new(CAP, "vault.pair", browser_name(&st.browser), outcome));
+        }
+    }
+
+    /// Link one connected browser to the synth's vault. `ask` = the
+    /// request came from the extension, so the owner confirms it here
+    /// first; false = the owner clicked "link this browser" in this app.
+    async fn pair(self: &Arc<Self>, session: Arc<Session>, id: u64, ask: bool, synth: Option<String>) -> Result<(), PairRefusal> {
+        {
+            let mut st = session.state.lock().unwrap();
+            if st.pairing || st.last_pair.is_some_and(|t| t.elapsed() < PAIR_COOLDOWN) {
+                drop(st);
+                self.pair_refused(&session, id, PairRefusal::Busy, false);
+                return Err(PairRefusal::Busy);
+            }
+            st.pairing = true;
+        }
+        let result = self.pair_inner(&session, id, ask, synth.as_deref()).await;
+        {
+            let mut st = session.state.lock().unwrap();
+            st.pairing = false;
+            st.last_pair = Some(Instant::now());
+        }
+        if let Err(why) = result {
+            self.pair_refused(&session, id, why, true);
+        }
+        result
+    }
+
+    async fn pair_inner(self: &Arc<Self>, session: &Arc<Session>, id: u64, ask: bool, synth: Option<&str>) -> Result<(), PairRefusal> {
+        let st = session.snapshot();
+        let name = browser_name(&st.browser);
+        if !self.has_synth() {
+            return Err(PairRefusal::NotLinked);
+        }
+        // Which synth's vault: the one the owner picked in the app, or
+        // the only one there is. From the browser, with several, the
+        // owner picks in the app.
+        let slot = match synth {
+            Some(id) => self.slot(id).ok_or(PairRefusal::NotLinked)?,
+            None => match self.slots().as_slice() {
+                [one] => one.clone(),
+                _ => return Err(PairRefusal::ChooseSynth),
+            },
+        };
+        let label = slot.display_name();
+        if self.paused() {
+            return Err(PairRefusal::Paused);
+        }
+        if ask {
+            let req = ApprovalRequest::new(CAP, name, "", format!("link {name} to the synth's login vault"))
+                .with_remember(Remember::Never);
+            if !self.ask_scoped(CAP, name, req).await.allow {
+                return Err(PairRefusal::Denied);
+            }
+        }
+
+        if st.paired {
+            // It holds a pairing already (made with a code typed by
+            // hand). It is linked here only when that pairing is with
+            // THIS synth's vault: the synth lists the browsers it knows.
+            let list = slot
+                .requests
+                .call("vault.list", json!({}))
+                .await
+                .map_err(|e| PairRefusal::from_link_error(&e))?;
+            let known = parse_vault_list(&list).devices.iter().any(|d| !st.device_id.is_empty() && d.id == st.device_id);
+            if !known {
+                return Err(PairRefusal::OtherSynth);
+            }
+            self.update_browser(&st.install, |b| {
+                b.linked = true;
+                b.device_id = st.device_id.clone();
+                b.synth_id = slot.synth_id.clone();
+            });
+            session.send(json!({"type": "pair.linked", "id": id, "synth": label}));
+            self.journal().record(Entry::new(CAP, "vault.pair", name, "ok"));
+            return Ok(());
+        }
+
+        let answer = slot
+            .requests
+            .call("vault.pair_code", json!({"browser": st.browser}))
+            .await
+            .map_err(|e| {
+                logln!("vault.pair_code: {e}");
+                PairRefusal::from_link_error(&e)
+            })?;
+        let code = answer.get("code").and_then(Value::as_str).and_then(clean_code).ok_or(PairRefusal::Failed)?;
+        {
+            let mut live = session.state.lock().unwrap();
+            live.code_sent = Some(Instant::now());
+            live.code_synth = slot.synth_id.clone();
+        }
+        // The code is short-lived and single use. It goes to the browser
+        // the owner just confirmed and is written nowhere.
+        if !session.send(json!({"type": "pair.code", "id": id, "code": code, "synth": label})) {
+            return Err(PairRefusal::Failed);
+        }
+        Ok(())
+    }
+
+    /// The extension redeemed the code at the hub (or failed to).
+    fn pair_done(&self, session: &Session, msg: &Value) {
+        let (waiting, synth_id) = {
+            let mut st = session.state.lock().unwrap();
+            let waiting = st.code_sent.take().is_some_and(|t| t.elapsed() < PAIR_WINDOW);
+            (waiting, std::mem::take(&mut st.code_synth))
+        };
+        if !waiting {
+            return; // nobody asked: a "done" out of nowhere links nothing
+        }
+        let st = session.snapshot();
+        let name = browser_name(&st.browser);
+        if msg.get("ok").and_then(Value::as_bool) != Some(true) {
+            self.journal().record(Entry::new(CAP, "vault.pair", name, "failed: the code was not accepted"));
+            return;
+        }
+        let device_id = clean_device_id(msg.get("device_id").and_then(Value::as_str).unwrap_or(""));
+        {
+            let mut live = session.state.lock().unwrap();
+            live.paired = true;
+            live.device_id = device_id.clone();
+        }
+        self.update_browser(&st.install, |b| {
+            b.linked = true;
+            b.device_id = device_id;
+            b.synth_id = synth_id;
+        });
+        self.journal().record(Entry::new(CAP, "vault.pair", name, "ok"));
+    }
+
+    fn hello(&self, session: &Session, msg: &Value) {
+        let Some(install) = msg.get("install").and_then(Value::as_str).and_then(clean_install) else {
+            session.send(json!({"type": "error", "error": "bad_hello"}));
+            return;
+        };
+        if msg.get("v").and_then(Value::as_u64) != Some(u64::from(VERSION)) {
+            session.send(json!({"type": "error", "error": "unsupported_version", "v": VERSION}));
+            return;
+        }
+        let browser = clean_browser(msg.get("browser").and_then(Value::as_str).unwrap_or(""), session.door);
+        let ext_version = clean_version(msg.get("ext_version").and_then(Value::as_str).unwrap_or(""));
+        let paired = msg.get("paired").and_then(Value::as_bool).unwrap_or(false);
+        let device_id = clean_device_id(msg.get("device_id").and_then(Value::as_str).unwrap_or(""));
+        let sites = clean_sites(msg.get("sites"));
+        let all_sites = msg.get("all_sites").and_then(Value::as_bool).unwrap_or(false);
+        {
+            let mut st = session.state.lock().unwrap();
+            st.greeted = true;
+            st.all_sites = all_sites;
+            st.browser = browser.clone();
+            st.install = install.clone();
+            st.ext_version = ext_version.clone();
+            st.paired = paired;
+            st.device_id = device_id.clone();
+            st.sites = sites.clone();
+        }
+        self.update_browser(&install, |b| {
+            b.browser = browser;
+            b.ext_version = ext_version;
+            b.last_seen = now_unix();
+            // It lost its pairing (unpaired in the extension, or removed
+            // at the hub), or holds another one now: no longer linked.
+            if !paired || (!b.device_id.is_empty() && b.device_id != device_id) {
+                b.linked = false;
+                b.device_id = String::new();
+                b.synth_id = String::new();
+            }
+        });
+        let mut ack = self.status_for(&install);
+        ack["type"] = json!("hello_ack");
+        ack["v"] = json!(VERSION);
+        ack["app_version"] = json!(self.app_version);
+        session.send(ack);
+
+        // A site the owner no longer allows must not stay readable in
+        // the browser. (With "never ask" there are no per-site answers
+        // to compare with, so nothing is taken back.)
+        if self.settings().cookies.mode != CookiesMode::Auto {
+            let own = self.stored_browser(&install).filter(|b| b.linked).map(|b| b.synth_id);
+            for site in sites {
+                // The answers of the synth the browser is linked to; a
+                // browser not linked to one keeps what any synth may read.
+                let allowed = match own.as_deref() {
+                    Some(synth) => self.grants.allows(synth, "cookies", &site),
+                    None => self.grant_allows_any("cookies", &site),
+                };
+                if !allowed {
+                    session.send(json!({"type": "site.revoke", "site": site}));
+                    session.state.lock().unwrap().sites.retain(|x| *x != site);
+                }
+            }
+        }
+    }
+
+    fn state_update(&self, session: &Session, msg: &Value) {
+        let install = {
+            let mut st = session.state.lock().unwrap();
+            if let Some(paired) = msg.get("paired").and_then(Value::as_bool) {
+                st.paired = paired;
+                if !paired {
+                    st.device_id.clear();
+                }
+            }
+            if msg.get("sites").is_some() {
+                st.sites = clean_sites(msg.get("sites"));
+            }
+            if let Some(all) = msg.get("all_sites").and_then(Value::as_bool) {
+                st.all_sites = all;
+            }
+            st.install.clone()
+        };
+        if msg.get("paired").and_then(Value::as_bool) == Some(false) {
+            self.update_browser(&install, |b| {
+                b.linked = false;
+                b.device_id = String::new();
+                b.synth_id = String::new();
+            });
+        } else {
+            self.emit(CoreEvent::Browsers);
+        }
+    }
+
+    /// One message from an extension that has said hello.
+    fn dispatch(self: &Arc<Self>, session: &Arc<Session>, ty: &str, msg: Value) {
+        match ty {
+            "hello" => self.hello(session, &msg),
+            "pair.request" => {
+                let id = msg.get("id").and_then(Value::as_u64).unwrap_or(0);
+                let (me, session) = (self.clone(), session.clone());
+                tokio::spawn(async move {
+                    let _ = me.pair(session, id, true, None).await;
+                });
+            }
+            "pair.done" => self.pair_done(session, &msg),
+            "state" => self.state_update(session, &msg),
+            "cookies.result" => self.browsers.answer(session.id, msg),
+            _ => {} // a newer extension may say more; ignored
+        }
+    }
+
+    /// Serve one connection of a helper (or of the Safari extension's
+    /// handler) until it closes. `door` is the endpoint it came in on.
+    pub(crate) async fn serve_browser(self: Arc<Self>, conn: Conn, door: Door) {
+        let mut reader = BufReader::new(conn.reader);
+        // The first line names the extension the connection is for.
+        // Chromium: checked by the browser, by the helper, and here.
+        // Safari: its handler runs for one extension only and says so.
+        // Each door takes its own callers and no others.
+        let open = tokio::time::timeout(OPEN_TIMEOUT, frame::read_line(&mut reader, 4096)).await;
+        let origin = match open {
+            Ok(Ok(v)) if v["type"] == "host.open" && v["v"] == json!(connect_host::host::VERSION) => {
+                v["origin"].as_str().unwrap_or("").to_string()
+            }
+            _ => return,
+        };
+        if !door.admits(&origin) {
+            logln!("browser link: a connection for an unknown extension was closed");
+            return;
+        }
+        if self.browsers.sessions.lock().unwrap().len() >= MAX_SESSIONS {
+            return;
+        }
+
+        let (tx, mut rx) = mpsc::channel::<Value>(OUT_QUEUE);
+        let session = Arc::new(Session {
+            id: self.browsers.next_session.fetch_add(1, Ordering::Relaxed) + 1,
+            door,
+            tx,
+            state: Mutex::new(SessionState::default()),
+        });
+        self.browsers.sessions.lock().unwrap().push(session.clone());
+        // Leaves the list however this task ends (the helper went away,
+        // or the app shuts the link down and the task is dropped).
+        struct Leave(Arc<Shared>, u64, tokio::task::JoinHandle<()>);
+        impl Drop for Leave {
+            fn drop(&mut self) {
+                self.2.abort();
+                self.0.browsers.remove(self.1);
+                self.0.emit(CoreEvent::Browsers);
+            }
+        }
+
+        let mut writer = conn.writer;
+        let write = tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                // The helper would drop what the browser refuses anyway.
+                if serde_json::to_vec(&msg).map(|b| b.len()).unwrap_or(usize::MAX) > MAX_TO_BROWSER {
+                    continue;
+                }
+                if frame::write_line(&mut writer, &msg).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let _leave = Leave(self.clone(), session.id, write);
+
+        loop {
+            // A little over the helper's own limit: it re-serializes.
+            match frame::read_line(&mut reader, MAX_FROM_BROWSER + 4096).await {
+                Ok(msg) => {
+                    let ty = msg["type"].as_str().unwrap_or("").to_string();
+                    if ty != "hello" && !session.state.lock().unwrap().greeted {
+                        continue; // nothing is heard before the hello
+                    }
+                    self.dispatch(&session, &ty, msg);
+                }
+                Err(FrameError::Malformed(_)) => continue,
+                Err(_) => break,
+            }
+        }
+    }
+}
+
+impl Core {
+    /// Listen for the extension's helper on `endpoint` until shutdown.
+    /// Returns an error at once when the endpoint cannot be bound (a
+    /// second copy of the app, a folder that is not ours).
+    pub async fn run_browser_link(
+        &self,
+        endpoint: &connect_host::endpoint::Endpoint,
+        shutdown: watch::Receiver<bool>,
+    ) -> std::io::Result<()> {
+        self.run_browser_door(endpoint, Door::Chromium, shutdown).await
+    }
+
+    /// The same for one door: `Door::Chromium` on the app's own endpoint
+    /// (the helper the Chromium browsers start), `Door::Safari` on the
+    /// endpoint in the app group folder (the handler of the Safari
+    /// extension that ships inside the app). A connection that names the
+    /// other door's caller is closed unheard.
+    pub async fn run_browser_door(
+        &self,
+        endpoint: &connect_host::endpoint::Endpoint,
+        door: Door,
+        mut shutdown: watch::Receiver<bool>,
+    ) -> std::io::Result<()> {
+        // An app that restarts (an update) can come up a moment before
+        // the endpoint of its previous run is gone: try for a few seconds
+        // before deciding that another copy of the app holds it.
+        let mut tries = 0;
+        let mut listener = loop {
+            match Listener::bind(endpoint) {
+                Ok(l) => break l,
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && tries < 10 => {
+                    tries += 1;
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_millis(300)) => {}
+                        _ = shutdown.changed() => return Ok(()),
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        };
+        // Dropped on return: every open connection closes with the
+        // listener, so a helper learns at once that the app is gone.
+        let mut serving = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                conn = listener.accept() => match conn {
+                    Ok(conn) => {
+                        serving.spawn(self.shared().serve_browser(conn, door));
+                    }
+                    Err(e) => {
+                        logln!("browser link: accept: {e}");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                },
+                Some(_) = serving.join_next(), if !serving.is_empty() => {}
+                _ = shutdown.changed() => return Ok(()),
+            }
+        }
+    }
+
+    /// Serve one connection directly (tests, and hosts with their own
+    /// listener).
+    pub async fn serve_browser(&self, conn: Conn) {
+        self.shared().serve_browser(conn, Door::Chromium).await
+    }
+
+    /// The same for a connection that came in on `door`.
+    pub async fn serve_browser_on(&self, conn: Conn, door: Door) {
+        self.shared().serve_browser(conn, door).await
+    }
+
+    /// The browsers whose extension has talked to this app, connected or
+    /// not.
+    pub fn browsers(&self) -> Vec<BrowserView> {
+        let shared = self.shared();
+        let stored = shared.persisted.read().unwrap().browsers.clone();
+        let live = shared.browsers.greeted();
+        let mut out: Vec<BrowserView> = stored
+            .into_iter()
+            .map(|b| {
+                let session = live.iter().rev().find(|s| s.state.lock().unwrap().install == b.install);
+                let live = session.map(|s| s.snapshot());
+                let all_sites = live.as_ref().is_some_and(|s| s.all_sites);
+                let sites = live.map(|s| s.sites).unwrap_or_default();
+                BrowserView {
+                    install: b.install,
+                    browser: b.browser,
+                    connected: session.is_some(),
+                    linked: b.linked,
+                    synth_id: Some(b.synth_id).filter(|id| b.linked && !id.is_empty()),
+                    ext_version: b.ext_version,
+                    sites,
+                    all_sites,
+                    last_seen: b.last_seen,
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| (a.browser.as_str(), a.install.as_str()).cmp(&(b.browser.as_str(), b.install.as_str())));
+        out
+    }
+
+    /// The owner clicked "link this browser" in the app. The browser's
+    /// extension must be connected. `synth_id`: whose vault (None = the
+    /// only synth there is; with several the owner picks one).
+    pub async fn browser_link(&self, install: &str, synth_id: Option<&str>) -> Result<(), PairRefusal> {
+        let shared = self.shared();
+        let session = shared.browsers.by_install(install).ok_or(PairRefusal::Failed)?;
+        shared.pair(session, 0, false, synth_id.map(str::to_string)).await
+    }
+
+    /// Unlink one browser: its extension forgets the vault pairing and
+    /// every site permission, and the synth removes the pairing at the
+    /// vault. What the browser saved to the vault earlier stays there.
+    pub async fn browser_unlink(&self, install: &str) -> Result<(), String> {
+        let shared = self.shared();
+        let stored = shared.stored_browser(install).ok_or("unknown browser")?;
+        if let Some(session) = shared.browsers.by_install(install) {
+            session.send(json!({"type": "unpair"}));
+            session.send(json!({"type": "sites.clear"}));
+            let mut st = session.state.lock().unwrap();
+            st.paired = false;
+            st.device_id.clear();
+            st.sites.clear();
+        }
+        shared.update_browser(install, |b| {
+            b.linked = false;
+            b.device_id = String::new();
+            b.synth_id = String::new();
+        });
+        shared
+            .journal()
+            .record(Entry::new(CAP, "vault.unpair", browser_name(&stored.browser), "ok"));
+        if stored.device_id.is_empty() {
+            return Ok(());
+        }
+        // Best effort: when the synth is offline the pairing stays at the
+        // vault until the owner removes it there (the synth can list it).
+        let slot = shared.vault_slot(Some(&stored.synth_id).filter(|id| !id.is_empty()).map(|s| s.as_str()))?;
+        slot.requests
+            .call("vault.revoke_device", json!({"device_id": stored.device_id}))
+            .await
+            .map(|_| ())
+    }
+
+    /// Forget a browser that is not connected (it is gone, or its
+    /// extension was removed).
+    pub fn browser_forget(&self, install: &str) {
+        let shared = self.shared();
+        {
+            let mut p = shared.persisted.write().unwrap();
+            let before = p.browsers.len();
+            p.browsers.retain(|b| b.install != install || shared.browsers.by_install(install).is_some());
+            if p.browsers.len() != before {
+                shared.save_persisted(&p);
+            }
+        }
+        shared.emit(CoreEvent::Browsers);
+    }
+
+    /// Which sites the synth's vault holds a login for, and which
+    /// browsers are paired with it. Names and dates only: there is no
+    /// request that returns a login.
+    /// `synth_id` None = the only synth there is.
+    pub async fn vault_list(&self, synth_id: Option<&str>) -> Result<VaultList, String> {
+        let slot = self.shared().vault_slot(synth_id)?;
+        let v = slot.requests.call("vault.list", json!({})).await?;
+        Ok(parse_vault_list(&v))
+    }
+
+    /// Delete one login from a synth's vault.
+    pub async fn vault_forget(&self, site: &str, synth_id: Option<&str>) -> Result<(), String> {
+        let shared = self.shared();
+        let slot = shared.vault_slot(synth_id)?;
+        let site = short_text(Some(&json!(site)), 253).to_ascii_lowercase();
+        if !site.contains('.') || !site.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.') {
+            return Err("bad request: not a site".into());
+        }
+        let done = slot.requests.call("vault.forget", json!({"site": site})).await;
+        let outcome = match &done {
+            Ok(_) => "ok".to_string(),
+            Err(e) => format!("failed: {e}"),
+        };
+        shared.journal().record(Entry::new(CAP, "vault.forget", site, outcome));
+        done.map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests;

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Safari loads an extension only when it is sandboxed. -->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<!-- The one thing the handler needs outside its own container: the
+	     folder of the app group it shares with SNTH Connect.app, where
+	     the running app listens on a socket. Nothing else is asked for:
+	     no network, no files of the user's. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>CZAP38JFAE.ai.snth.connect</string>
+	</array>
+</dict>
+</plist>

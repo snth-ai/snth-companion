@@ -1,0 +1,130 @@
+[package]
+name = "snth-connect"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SNTH Connect: the desktop shell (tray app) over connect-core."
+publish = false
+default-run = "snth-connect"
+
+[[bin]]
+name = "snth-connect"
+path = "src/main.rs"
+
+# The helper the browsers start for the SNTH Vault extension. A second
+# program of this package so the bundler ships it next to the app (in
+# Contents/MacOS on macOS, the install folder on Windows, /usr/bin in the
+# Linux packages) and signs it with the app.
+[[bin]]
+name = "snth-connect-host"
+path = "src/bin/snth-connect-host.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# The synth's spoken answer on the island (island/speak.rs, tz-voice-reply
+# .md): decoded here, played through cpal on the default output (macOS, Windows).
+# Pure Rust, no C library in the build: symphonia for mp3 and WAV (0.5:
+# Rust 1.53; rodio would bring a second cpal and needs Rust 1.87), the
+# Ogg pages and a pure-Rust Opus decoder for Ogg Opus. Every target: the
+# decoder is plain code, built (and tested) on Linux too.
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "wav", "pcm"] }
+ogg = "0.9"
+opus-decoder = "0.1"
+connect-core = { path = "../../crates/connect-core" }
+connect-host = { path = "../../crates/connect-host" }
+# macos-private-api: a transparent window on macOS (the island draws its
+# own black shape, the rest of its window is see-through).
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tauri-plugin-deep-link = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-updater = "2"
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+keyring.workspace = true
+directories.workspace = true
+base64.workspace = true
+# The island's screenshot: read the PNG the helper writes, scale it to the
+# protocol's 2560 px and send it as JPEG. Already in the build (Tauri's
+# icons); only the JPEG codec is new.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# The island's speech-to-text model (island/stt/model.rs): download with
+# resume, check against the pinned sha256. Both in the build already
+# (connect-core).
+ureq.workspace = true
+sha2.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# access(2): can the app replace itself where it runs (updates.rs)?
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# crashlog.rs: the load address of the executable, and a stderr handle for
+# an app without a console. Already in the build (connect-host uses it).
+# The island (island/panel.rs): the pointer's position, a window that is
+# never activated and stays out of screenshots.
+# Wake by name (island/wake/system.rs): the microphone's consent store in
+# the registry (another app records), the session's lock state and the
+# input desktop, the running programs, the memory of the process (its
+# test).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_System_Registry", "Win32_System_RemoteDesktop", "Win32_System_Diagnostics_ToolHelp", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_System_StationsAndDesktops"] }
+# Wake by name (island/wake/system.rs): the input devices through the
+# MMDevice API, with the bus each sits on (a Bluetooth microphone is never
+# opened). The same crate and version cpal's WASAPI host uses, so nothing
+# new is built: COM calls are what the `windows` crate is for (windows-sys
+# has no interfaces).
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Shell_PropertiesSystem"] }
+
+# The island's microphone (island/audio.rs): CoreAudio on macOS, WASAPI on
+# Windows. Not on Linux, where the island is not shown (and ALSA would
+# need system headers in the build).
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+cpal = "0.18"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Two calls of SafariServices about the app's own Safari extension: is it
+# switched on, and open Safari's settings at it (safari.rs). Both crates are
+# in the build already (Tauri's window layer uses them). "exception": every
+# send is wrapped in objc2::exception::catch, because an Objective-C
+# exception that reaches Rust aborts the app (the 0.1.7 Logins crash).
+objc2 = { version = "0.6", features = ["exception"] }
+block2 = "0.6"
+# The island's panel (island/panel.rs): geometry types for the NSScreen and
+# NSWindow calls. In the build already (Tauri's window layer), with these
+# features on.
+objc2-foundation = "0.3"
+
+# The island's on-device speech-to-text, whisper engine
+# (island/stt/engine.rs): whisper.cpp with Metal, built from source by
+# cmake. Apple silicon only (build.rs: cfg `whisper_stt`). 0.15 is the
+# line with whisper.cpp 1.7.6 (Silero VAD) that still builds on Rust 1.85;
+# 0.16 needs 1.88.
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+whisper-rs = { version = "=0.15.1", features = ["metal"] }
+
+# Wake by name on Windows x64 (island/wake/ears.rs, build.rs: cfg
+# `wake_whisper`): whisper tiny on whisper.cpp, CPU only, the same pinned
+# line as the Mac's. Built from source by cmake with MSVC; bindgen finds
+# the runner's LLVM (or falls back to the bundled bindings). The CPU floor
+# is AVX2 (.cargo/ggml-x64.cmake), checked at run time before the mode is
+# offered (wake::available).
+[target.'cfg(all(windows, target_arch = "x86_64"))'.dependencies]
+whisper-rs = { version = "=0.15.1" }
+
+# ONNX Runtime, on the CPU: the Parakeet engine (island/stt/parakeet.rs),
+# the ONNX voice detector (island/stt/silero.rs, Windows) and the tone of
+# voice (island/stt/tone/emotion.rs). Apple-silicon Macs and Windows x64
+# (build.rs: cfg `device_stt`); Linux and the Intel half of a universal
+# Mac build keep sending the voice to the synth. Statically linked ONNX
+# Runtime 1.22 (the prebuilt library ort's build script fetches for both
+# targets). rc.10 is the last line that builds on Rust 1.85; later ones
+# need 1.88.
+[target.'cfg(any(all(target_os = "macos", target_arch = "aarch64"), all(windows, target_arch = "x86_64")))'.dependencies]
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "download-binaries"] }

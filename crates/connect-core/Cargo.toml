@@ -1,0 +1,38 @@
+[package]
+name = "connect-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SNTH Connect core: one outbound link from the user's computer to their synth, with per-capability policy. UI-free library."
+publish = false
+
+[lib]
+name = "connect_core"
+path = "src/lib.rs"
+
+[dependencies]
+connect-host = { path = "../connect-host" }
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+yamux.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+rand.workspace = true
+directories.workspace = true
+psl.workspace = true
+rusqlite.workspace = true
+aes.workspace = true
+cbc.workspace = true
+pbkdf2.workspace = true
+hmac.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+keyring.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread", "time", "sync"] }

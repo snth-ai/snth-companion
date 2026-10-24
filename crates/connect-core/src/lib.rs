@@ -1,0 +1,80 @@
+//! SNTH Connect core.
+//!
+//! A library, never a UI. It keeps ONE outbound WebSocket to the owner's
+//! synth and gives it five capabilities under the owner's policy: internet
+//! through this computer (`net`), browser cookies per domain (`cookies`),
+//! computer use through Cua Driver (`computer`), files in chosen folders
+//! (`files`), and the owner's own apps (`apps`). The protocol is v1 as written in connect.md; the
+//! synth side (Go) is the peer.
+//!
+//! A host (the Tauri shell, or the `connectd` CLI) builds one [`Core`]
+//! with an [`Approver`], a [`CookieSource`], a [`SecretStore`] and a
+//! [`HubClient`], then drives it with commands and watches its events.
+
+#[macro_export]
+macro_rules! logln {
+    ($($arg:tt)*) => {{
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let secs = now.as_secs() % 86_400;
+        eprintln!(
+            "{:02}:{:02}:{:02}.{:03}Z [connect-core] {}",
+            secs / 3600,
+            (secs / 60) % 60,
+            secs % 60,
+            now.subsec_millis(),
+            format_args!($($arg)*)
+        );
+    }};
+}
+
+pub mod account;
+pub mod apps;
+pub mod browser;
+pub mod cookies;
+pub mod core;
+pub mod cua;
+pub mod cua_apps;
+pub mod cua_guard;
+pub mod cua_health;
+pub mod cua_install;
+pub mod cua_look;
+pub mod files;
+pub mod grant;
+pub mod island;
+pub mod locked_use;
+pub mod journal;
+pub mod link;
+pub mod mcp;
+pub mod pairing;
+pub mod presence;
+pub mod power;
+pub mod proc;
+pub mod proto;
+pub mod requests;
+pub mod rpc;
+pub mod secret;
+pub mod settings;
+pub mod shell;
+pub mod slot;
+pub mod tcc;
+pub mod tcp;
+#[cfg(test)]
+pub(crate) mod testutil;
+pub mod wire;
+pub mod ws_io;
+
+pub use crate::core::{
+    Brief, Core, CoreConfig, CoreEvent, CuaAttach, CuaSession, LinkState, Shared, Snapshot,
+};
+pub use crate::slot::{LinkBrief, LinkSlot};
+pub use settings::LinkSource;
+pub use cua_install::{FailCode, InstallState};
+pub use cookies::{CookieError, CookieRead, CookieSource, KeySource, MultiReader, WireCookie};
+pub use grant::{Approval, ApprovalRequest, Approver, Duration_, GrantRow, GrantStore};
+pub use journal::{Entry, Journal};
+pub use pairing::{ClaimError, ClaimResult, HubClient, Pending, UreqHubClient};
+pub use proto::Refusal;
+pub use secret::{FileSecretStore, KeyringSecretStore, MemSecretStore, SecretStore};
+pub use settings::{AppRef, AppScope, AppsPolicy, LookSettings, Preset, Root, Settings};

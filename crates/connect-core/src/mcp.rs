@@ -1,0 +1,800 @@
+//! `mcp` streams: computer use through Cua Driver.
+//!
+//! The stream is piped into `cua-driver mcp [--embedded] --socket <s>`,
+//! attached to our private daemon (the product path) or, for read-only
+//! testing, the user's running daemon. One stream = one proxy process =
+//! one persistent MCP connection, so named Cua sessions live for the
+//! stream's life.
+//!
+//! Two gates sit here, on top of Cua's own layers:
+//!
+//!  - at stream open (connect.md): `catalog` streams are served without
+//!    asking; a working stream follows `computer.mode` (`ask` needs a
+//!    grant for "task"; `away` passes only while the owner is idle;
+//!    `auto` passes);
+//!  - per `tools/call`: a catalog stream refuses every call; the tool
+//!    denylist refuses; the owner's choice of apps holds (`cua_apps`:
+//!    "every app except these" is decided here, call by call, and the two
+//!    lists are answered by the app itself, cut down; "only these" is the
+//!    driver's own bounded mode, and decided here once more); a
+//!    foreground-delivery call
+//!    follows `computer.foreground` (never / idle / ask / always); what
+//!    the synth may never trigger is refused whatever the settings say
+//!    (`cua_guard`: recording the screen, installing software, updating or
+//!    reconfiguring the helper, replaying a recording), and the driver
+//!    writes a file only into a folder shared for writing; the owner's
+//!    look stays the owner's (`cua_look::gate`: the synth's calls that
+//!    change the cursor are refused, and a screenshot is asked for within
+//!    the owner's limit).
+//!
+//! A stream holds our daemon for as long as it lives (`CuaSession`), so a
+//! new look or a new choice of apps, which need a new daemon, never cut a
+//! task short. The synth keeps its stream open between tasks, though, so
+//! "the next session" would never come: a call that arrives after a quiet
+//! spell (`TASK_GAP`, the time after which the driver has ended every
+//! named session anyway) on a daemon that is out of date is answered with
+//! a labeled error and the stream is closed. The synth's next call opens a
+//! new one, on a new daemon.
+
+use std::process::Stdio;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use serde_json::{json, Value};
+use tokio::io::{AsyncWriteExt, BufReader};
+use tokio::process::Child;
+use tokio::sync::Mutex;
+
+use crate::core::Shared;
+use crate::cua;
+use crate::cua_guard::RefusalKind;
+use crate::grant::ApprovalRequest;
+use crate::journal::Entry;
+use crate::presence;
+use crate::proto::{read_line, reply_ok, reply_refusal, MuxStream, Refusal, StreamHeader};
+use crate::settings::{ComputerMode, Foreground};
+use crate::logln;
+
+/// One JSON-RPC line. A screenshot result is a few MiB of base64.
+const MAX_RPC_LINE: usize = 64 * 1024 * 1024;
+
+/// A stream with no call for this long is between tasks: the driver ends
+/// a named session after five minutes without one.
+const TASK_GAP: Duration = Duration::from_secs(5 * 60);
+
+/// What the synth is told when its stream is closed so that a change of
+/// the owner's applies.
+const REOPEN: &str = "unavailable: SNTH Connect is restarting its helper so that the owner's current settings for computer control apply; this connection is closed and nothing was done; call again, starting with a fresh list_windows";
+
+/// Start the `cua-driver mcp` proxy for one session against a daemon's
+/// endpoint. It speaks line-delimited JSON-RPC on its stdin / stdout and
+/// ends when its stdin closes. The app's mcp streams and the self-test
+/// both start it here.
+pub fn spawn_proxy(shared: &Shared, socket: &str, embedded: bool) -> std::io::Result<Child> {
+    // The proxy of the same version as the daemon it talks to.
+    let argv = cua::mcp_argv(&shared.cua_proxy_bin(), socket, embedded);
+    let mut cmd = crate::proc::command(&argv[0]);
+    cmd.args(&argv[1..]);
+    shared.cua_env.apply(&mut cmd);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+}
+
+pub async fn handle(mut s: MuxStream, hdr: StreamHeader, shared: &Arc<Shared>) {
+    if hdr.server != "desktop" {
+        // v1 reserves "desktop"; the P0a spike app served "cua", so accept
+        // that alias too for back-compat with the existing Go peer.
+        if hdr.server != "cua" {
+            let why = Refusal::Denied(format!("unknown mcp server {:?}", hdr.server));
+            reply_refusal(&mut s, &why).await;
+            return;
+        }
+    }
+    let is_catalog = hdr.purpose == crate::proto::PURPOSE_CATALOG;
+
+    // Open gate (working streams only; a catalog stream is served freely).
+    let mode_at_open = if !is_catalog {
+        match open_gate(shared, &hdr).await {
+            Ok(mode) => Some(mode),
+            Err(why) => {
+                shared
+                    .journal()
+                    .record(Entry::new("computer", "mcp.open", "desktop", why.to_string()));
+                logln!("mcp: refused: {why}");
+                reply_refusal(&mut s, &why).await;
+                return;
+            }
+        }
+    } else { None };
+
+    // Held until this function returns, however it ends.
+    let session = match shared.cua_session().await {
+        Ok(v) => v,
+        Err(why) => {
+            shared
+                .journal()
+                .record(Entry::new("computer", "mcp.open", "desktop", why.to_string()));
+            logln!("mcp: refused: {why}");
+            reply_refusal(&mut s, &why).await;
+            return;
+        }
+    };
+
+    let mut child = match spawn_proxy(shared, &session.socket, session.embedded) {
+        Ok(c) => c,
+        Err(e) => {
+            let why = Refusal::Failed(format!("unavailable: spawn cua-driver mcp: {e}"));
+            logln!("mcp: refused: {why}");
+            reply_refusal(&mut s, &why).await;
+            return;
+        }
+    };
+    let mut child_in = child.stdin.take().expect("piped stdin");
+    let child_out = child.stdout.take().expect("piped stdout");
+    let child_err = child.stderr.take().expect("piped stderr");
+    if reply_ok(&mut s).await.is_err() {
+        return;
+    }
+    shared
+        .journal()
+        .record(Entry::new("computer", "mcp.open", "desktop", "ok"));
+    logln!("mcp: session open (pid {:?}, catalog={is_catalog})", child.id());
+
+    tokio::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let mut lines = BufReader::new(child_err).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            logln!("mcp cua stderr: {line}");
+        }
+    });
+
+    let (sr, sw) = tokio::io::split(s);
+    let mut sr = BufReader::with_capacity(64 * 1024, sr);
+    let sw = Arc::new(Mutex::new(sw));
+
+    // A persistent MCP connection is not an active task. Only a forwarded
+    // tool call may wake the display; the hold expires between calls.
+    let display_hold = std::sync::Mutex::new(None::<(crate::power::Hold, Instant)>);
+    let policy_revoked = std::sync::atomic::AtomicBool::new(false);
+    let watch_session = async {
+        if is_catalog { std::future::pending::<()>().await; }
+        let mut tick = tokio::time::interval(Duration::from_millis(250));
+        loop {
+            tick.tick().await;
+            if let Err(why) = working_policy(shared, presence::read()) {
+                logln!("mcp: ending session: {why}");
+                break;
+            }
+            let s = shared.settings();
+            if Some(s.computer.mode) != mode_at_open { break; }
+            let mut hold = display_hold.lock().unwrap();
+            if !s.computer.keep_awake || hold.as_ref().is_some_and(|(_, last)| last.elapsed() >= TASK_GAP) {
+                *hold = None;
+            } else if let Some((active, _)) = hold.as_mut() {
+                // Keep long-running driver calls awake too. The five-minute
+                // task gap is the driver's existing session idle boundary;
+                // each OS assertion still has its own 30-second timeout.
+                if let Err(error) = active.renew(crate::power::Kind::Display) {
+                    logln!("mcp: {error}");
+                    break;
+                }
+            }
+        }
+    };
+
+    let shared_for_gate = shared.clone();
+    let session_ref = &session;
+    let to_driver = async {
+        let mut forwarded = 0u64;
+        let mut refused = 0u64;
+        // When this stream last carried a call.
+        let mut last_call: Option<Instant> = None;
+        loop {
+            let line = match read_line(&mut sr, MAX_RPC_LINE).await {
+                Ok(Some(l)) => l,
+                Ok(None) => break,
+                Err(e) => {
+                    logln!("mcp: read from synth: {e}");
+                    break;
+                }
+            };
+            if !is_catalog {
+                if let Some(id) = call_id(&line) {
+                    // Between tasks, on a daemon the owner's settings have
+                    // moved on from, and nobody else holds it: end here so
+                    // the next call starts on a new one.
+                    if between_tasks(last_call.map(|at| at.elapsed()), shared_for_gate.cua_sessions_open())
+                        && session_ref.outdated()
+                    {
+                        logln!("mcp: the settings changed since this session began; closing it between tasks");
+                        let mut b = serde_json::to_vec(&jsonrpc_unavailable(id, REOPEN)).unwrap_or_default();
+                        b.push(b'\n');
+                        let mut w = sw.lock().await;
+                        let _ = w.write_all(&b).await;
+                        let _ = w.flush().await;
+                        refused += 1;
+                        break;
+                    }
+                    last_call = Some(Instant::now());
+                }
+            }
+            match filter_scoped(&shared_for_gate, &session_ref.scope, is_catalog, &line).await {
+                Gate::Forward(bytes) => {
+                    if !is_catalog && call_id(&bytes).is_some() {
+                        // An approval/app lookup can have yielded while the
+                        // owner locked the Mac or changed policy.
+                        if working_policy(&shared_for_gate, presence::read()).is_err()
+                            || Some(shared_for_gate.settings().computer.mode) != mode_at_open
+                        {
+                            policy_revoked.store(true, std::sync::atomic::Ordering::Relaxed);
+                            break;
+                        }
+                        if cfg!(target_os = "macos") && shared_for_gate.settings().computer.keep_awake {
+                            let mut hold = display_hold.lock().unwrap();
+                            let result = match hold.as_mut() {
+                                Some((hold, last)) => {
+                                    *last = Instant::now();
+                                    hold.renew(crate::power::Kind::Display)
+                                }
+                                None => crate::power::Hold::acquire(crate::power::Kind::Display)
+                                    .map(|h| *hold = Some((h, Instant::now()))),
+                            };
+                            if let Err(error) = result {
+                                logln!("mcp: {error}");
+                                break;
+                            }
+                        }
+                    }
+                    forwarded += 1;
+                    if child_in.write_all(&bytes).await.is_err()
+                        || child_in.write_all(b"\n").await.is_err()
+                        || child_in.flush().await.is_err()
+                    {
+                        break;
+                    }
+                }
+                Gate::Answer(answer) => {
+                    // The app's own answer (a list cut down to the apps
+                    // the synth may use): the driver is not asked.
+                    forwarded += 1;
+                    let mut b = serde_json::to_vec(&answer).unwrap_or_default();
+                    b.push(b'\n');
+                    let mut w = sw.lock().await;
+                    if w.write_all(&b).await.is_err() || w.flush().await.is_err() {
+                        break;
+                    }
+                }
+                Gate::Refuse(err) => {
+                    refused += 1;
+                    let mut b = serde_json::to_vec(&err).unwrap_or_default();
+                    b.push(b'\n');
+                    let mut w = sw.lock().await;
+                    if w.write_all(&b).await.is_err() || w.flush().await.is_err() {
+                        break;
+                    }
+                }
+                Gate::Drop(why) => {
+                    refused += 1;
+                    logln!("mcp: dropped a message: {why}");
+                }
+            }
+        }
+        (forwarded, refused)
+    };
+
+    let from_driver = async {
+        let mut out = BufReader::with_capacity(64 * 1024, child_out);
+        loop {
+            match read_line(&mut out, MAX_RPC_LINE).await {
+                Ok(Some(mut line)) => {
+                    line.push(b'\n');
+                    let mut w = sw.lock().await;
+                    if w.write_all(&line).await.is_err() || w.flush().await.is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    logln!("mcp: read from driver: {e}");
+                    break;
+                }
+            }
+        }
+    };
+
+    let (forwarded, refused, policy_ended) = tokio::select! {
+        counts = to_driver => (counts.0, counts.1, false),
+        _ = from_driver => (0, 0, false),
+        _ = watch_session => (0, 0, true),
+    };
+    // Release before waiting for the proxy to shut down, including when
+    // the owner pauses or returns in away-only mode.
+    *display_hold.lock().unwrap() = None;
+    if policy_ended || policy_revoked.load(std::sync::atomic::Ordering::Relaxed) {
+        // A proxy's exit alone does not cancel work already submitted to
+        // our persistent daemon. Stop that daemon as well on revocation.
+        shared.stop_cua().await;
+    }
+    let _ = sw.lock().await.shutdown().await;
+    let _ = child.start_kill();
+    let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+    logln!("mcp: session closed (forwarded {forwarded}, refused {refused})");
+    drop(session);
+    if !is_catalog {
+        shared.clear_task();
+    }
+    if shared.cua_sessions_open() == 0 {
+        // Nobody needs the app's own reading of the apps any more.
+        shared.cua_directory().stop().await;
+    }
+}
+
+/// Is a stream between tasks, so that ending it cuts nothing short? It
+/// has carried a call before, the last one was `TASK_GAP` ago or more
+/// (`since_last_call`), and no other session holds the daemon (ending this
+/// one would not free it otherwise).
+fn between_tasks(since_last_call: Option<Duration>, sessions_open: usize) -> bool {
+    since_last_call.is_some_and(|gap| gap >= TASK_GAP) && sessions_open <= 1
+}
+
+/// The id of a `tools/call`, when this line is one.
+fn call_id(line: &[u8]) -> Option<Value> {
+    let msg = serde_json::from_slice::<Value>(line).ok()?;
+    cua::tool_name(&msg)?;
+    Some(msg.get("id").cloned().unwrap_or(Value::Null))
+}
+
+/// The open gate for a working stream.
+async fn open_gate(shared: &Arc<Shared>, hdr: &StreamHeader) -> Result<ComputerMode, Refusal> {
+    open_gate_observing(shared, hdr, presence::read).await
+}
+
+async fn open_gate_observing(
+    shared: &Arc<Shared>, hdr: &StreamHeader, observe: impl Fn() -> presence::Presence,
+) -> Result<ComputerMode, Refusal> {
+    working_policy(shared, observe())?;
+    let s = shared.settings();
+    if s.computer.mode == ComputerMode::Ask && !shared.grant_allows("computer", "task") {
+        let req = ApprovalRequest::new("computer", "task", &hdr.reason,
+            "let the synth use this computer for a task");
+        if !shared.ask_scoped("computer", "task", req).await.allow {
+            return Err(Refusal::Denied("the owner did not allow computer use for this task".into()));
+        }
+    }
+    if shared.settings().computer.mode != s.computer.mode {
+        return Err(Refusal::Denied("computer-use policy changed; start a new task".into()));
+    }
+    // A remembered grant must not skip the lock check; an approval may
+    // also have been pending while the screen locked or policy changed.
+    working_policy(shared, observe())?;
+    Ok(s.computer.mode)
+}
+
+fn working_policy(shared: &Shared, observed: presence::Presence) -> Result<(), Refusal> {
+    if shared.paused() {
+        return Err(Refusal::Denied("computer use is paused by the owner".into()));
+    }
+    let s = shared.settings();
+    if !s.computer.enabled {
+        return Err(Refusal::Denied("computer use is turned off on this computer".into()));
+    }
+    if s.computer.mode == ComputerMode::Away
+        && !cua::away_allows(ComputerMode::Away, s.computer.away_idle_minutes, observed.idle_seconds)
+    {
+        return Err(Refusal::Denied(format!(
+            "computer use is allowed only while you are away ({} min idle); you are active",
+            s.computer.away_idle_minutes
+        )));
+    }
+
+    // A locked screen is a separate capability. Accessibility and Screen
+    // Recording do not grant access to loginwindow; only the owner's opt-in
+    // and the signed macOS authorization plug-in can keep this turn alive.
+    if observed.screen_locked {
+        if !s.computer.locked_use {
+            return Err(Refusal::Denied(
+                "the screen is locked and locked use is turned off on this computer".into(),
+            ));
+        }
+        crate::locked_use::authorize_active_turn().map_err(Refusal::Failed)?;
+    }
+    Ok(())
+}
+
+/// What the pipe does with one line from the synth.
+pub enum Gate {
+    /// Hand these bytes (one JSON-RPC message, no newline) to the driver.
+    Forward(Vec<u8>),
+    /// Do not hand it over; answer the synth with this JSON-RPC result,
+    /// which the app made itself.
+    Answer(Value),
+    /// Do not hand it over; answer the synth with this JSON-RPC error.
+    Refuse(Value),
+    /// Not a message at all: say nothing.
+    Drop(&'static str),
+}
+
+/// The answer to a refused `tools/call`. `message` is the sentence for the
+/// synth (and for older synths, which read only that); `kind` goes into
+/// `error.data` as `{"class": ..., "code": ...}`, so a synth can tell the
+/// owner's policy (stop, tell the owner) from an argument it can correct.
+/// Every refusal of the pipe goes through here, and there is no way to
+/// build one without a kind (`RefusalKind::default()` is `owner_policy`).
+fn jsonrpc_error(id: Value, message: String, kind: RefusalKind) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32001, "message": message, "data": kind.data()}})
+}
+
+/// The answer to a call that came when the stream had to be closed so the
+/// owner's current settings apply (`REOPEN`). Not a refusal: nothing was
+/// decided about the call, and the synth calls again on a new stream. It
+/// has no class (the synth reads its `unavailable: ` prefix).
+fn jsonrpc_unavailable(id: Value, message: &str) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32001, "message": message}})
+}
+
+/// Decide one line from the synth by the owner's settings as they are now.
+/// A session decides by the choice of apps its daemon was started with
+/// (`filter_scoped`); this is for a caller that holds no session.
+///
+/// Public for the self-test, which sends a synth's lines through the very
+/// filter the app uses and hands the driver only what comes out.
+pub async fn filter_line(shared: &Arc<Shared>, is_catalog: bool, line: &[u8]) -> Gate {
+    let scope = crate::cua_apps::Scope::of(&shared.settings());
+    filter_scoped(shared, &scope, is_catalog, line).await
+}
+
+/// Decide one line from the synth. Only `tools/call` is gated; everything
+/// else (initialize, tools/list, ...) is forwarded, re-serialized so the
+/// driver reads exactly what was checked. `scope`: which apps the synth
+/// may use in this session.
+pub async fn filter_scoped(
+    shared: &Arc<Shared>,
+    scope: &crate::cua_apps::Scope,
+    is_catalog: bool,
+    line: &[u8],
+) -> Gate {
+    let Ok(mut msg) = serde_json::from_slice::<Value>(line) else {
+        return Gate::Drop("not valid JSON");
+    };
+    if !msg.is_object() {
+        return Gate::Drop("not a JSON object");
+    }
+    let Some(tool) = cua::tool_name(&msg).map(str::to_string) else {
+        // Not a tools/call: forward the canonical re-serialization.
+        return match serde_json::to_vec(&msg) {
+            Ok(b) => Gate::Forward(b),
+            Err(_) => Gate::Drop("cannot re-serialize"),
+        };
+    };
+    let tool = tool.as_str();
+    let id = msg.get("id").cloned().unwrap_or(Value::Null);
+
+    if is_catalog {
+        shared
+            .journal()
+            .record(Entry::new("computer", "tools/call", tool, "denied: catalog stream"));
+        return Gate::Refuse(jsonrpc_error(
+            id,
+            "denied: a catalog stream may not call tools".into(),
+            RefusalKind::owner_policy("catalog_stream"),
+        ));
+    }
+
+    let s = shared.settings();
+
+    if let Err(why) = working_policy(shared, presence::read()) {
+        shared.journal().record(Entry::new("computer", "tools/call", tool, why.to_string()));
+        return Gate::Refuse(jsonrpc_error(id, why.to_string(), RefusalKind::owner_policy("session_unavailable")));
+    }
+
+    // Never, whatever the owner's settings say: recording the screen,
+    // installing software, updating or reconfiguring the helper, replaying
+    // a recording (the list and the reasons: `cua_guard::NEVER`).
+    if let Some(why) = crate::cua_guard::refusal(tool) {
+        shared.journal().record(Entry::new(
+            "computer",
+            "tools/call",
+            tool,
+            "denied: never allowed for the synth",
+        ));
+        return Gate::Refuse(jsonrpc_error(id, why, RefusalKind::owner_policy("never_allowed")));
+    }
+
+    // Tool denylist.
+    if s.computer.tool_denylist.iter().any(|t| t == tool) {
+        shared
+            .journal()
+            .record(Entry::new("computer", "tools/call", tool, "denied: tool on the denylist"));
+        return Gate::Refuse(jsonrpc_error(
+            id,
+            format!("denied: tool {tool:?} is on this computer's denylist"),
+            RefusalKind::owner_policy("tool_denylist"),
+        ));
+    }
+
+    // One synth drives at a time. While another synth's actions are
+    // recent, this one may look but not act (`cua_apps::LOOK_ONLY_TOOLS`).
+    let acting = crate::cua_apps::is_action(tool);
+    let (synth_id, synth_name) = match shared.current_slot() {
+        Some(slot) => (slot.synth_id.clone(), slot.display_name()),
+        None => (String::new(), String::new()),
+    };
+    let driven_by_other = shared.lease_check(&synth_id).err();
+    if acting {
+        if let Some(driver) = driven_by_other {
+            return busy(shared, id, tool, &driver);
+        }
+    }
+
+    // The label the synth gave this task, for the owner's status line.
+    // Kept in memory in the bounded form the driver itself shows; the
+    // journal never gets it. A synth that only looks while another one
+    // drives does not rename the task that runs.
+    if acting || shared.computer_driver().is_none() {
+        shared.note_task(msg.pointer("/params/arguments/session").and_then(Value::as_str));
+    }
+
+    // The owner's choice of apps: which app is this call about, and may
+    // the synth use it? (Nothing is decided here for "every app".)
+    match crate::cua_apps::decide(scope, tool, &msg, shared.cua_directory()).await {
+        crate::cua_apps::Verdict::Pass => {}
+        crate::cua_apps::Verdict::Refuse { tell, journal, kind } => {
+            shared.journal().record(Entry::new("computer", "tools/call", tool, journal));
+            return Gate::Refuse(jsonrpc_error(id, tell, kind));
+        }
+        crate::cua_apps::Verdict::Answer(result) => {
+            shared.journal().record(Entry::new("computer", "tools/call", tool, "ok"));
+            return Gate::Answer(json!({"jsonrpc": "2.0", "id": id, "result": result}));
+        }
+    }
+
+    // Foreground-delivery gate.
+    if cua::wants_foreground(&msg) {
+        let idle = presence::read().idle_seconds;
+        let allowed = match cua::foreground_decision(
+            s.computer.foreground,
+            s.computer.away_idle_minutes,
+            idle,
+        ) {
+            Some(b) => b,
+            None => {
+                // Foreground = ask: consult the approver per call.
+                let req = ApprovalRequest::new(
+                    "computer",
+                    format!("foreground:{tool}"),
+                    "",
+                    format!("let the synth bring a window to the foreground ({tool})"),
+                );
+                shared
+                    .ask_scoped("computer", &format!("foreground:{tool}"), req)
+                    .await
+                    .allow
+            }
+        };
+        if !allowed {
+            let (reason, code) = match s.computer.foreground {
+                Foreground::Never => ("foreground delivery is turned off", "foreground_off"),
+                Foreground::Idle => (
+                    "foreground delivery is allowed only while you are away",
+                    "foreground_away_only",
+                ),
+                _ => ("the owner did not allow foreground delivery", "foreground_not_allowed"),
+            };
+            shared.journal().record(Entry::new(
+                "computer",
+                "tools/call",
+                tool,
+                format!("denied: {reason}"),
+            ));
+            return Gate::Refuse(jsonrpc_error(
+                id,
+                format!("denied: {reason}"),
+                RefusalKind::owner_policy(code),
+            ));
+        }
+    }
+
+    // A file the driver writes (a screenshot, a download) goes into a
+    // folder the owner shared for writing, or nowhere.
+    if let Err(why) = crate::cua_guard::confine_paths(&mut msg, &s.files).await {
+        shared.journal().record(Entry::new(
+            "computer",
+            "tools/call",
+            tool,
+            "denied: outside the shared folders",
+        ));
+        return Gate::Refuse(jsonrpc_error(id, why.tell, why.kind));
+    }
+
+    // The owner's look: the synth does not change the cursor, and gets a
+    // screenshot within the owner's limit.
+    match crate::cua_look::gate(tool, &mut msg, &s.computer.look) {
+        crate::cua_look::Gate::Refuse(why, kind) => {
+            shared.journal().record(Entry::new(
+                "computer",
+                "tools/call",
+                tool,
+                "denied: the look is the owner's to set",
+            ));
+            return Gate::Refuse(jsonrpc_error(id, format!("denied: {why}"), kind));
+        }
+        // Forwarded with its arguments changed (a screenshot within the
+        // owner's limit, a session without the synth's cursor theme).
+        crate::cua_look::Gate::Changed(_) | crate::cua_look::Gate::Pass => {}
+    }
+
+    // The action goes to the driver now: this synth holds the computer
+    // (checked again under the lease's lock, so two synths cannot both
+    // pass the check above and both act).
+    if acting {
+        if let Err(driver) = shared.lease_take(&synth_id, &synth_name) {
+            return busy(shared, id, tool, &driver);
+        }
+    }
+
+    shared
+        .journal()
+        .record(Entry::new("computer", "tools/call", tool, "ok"));
+    // Where the synth's pointer goes on the screen, for the island's eyes:
+    // a call with screen coordinates (no window to be relative to).
+    if let Some((x, y)) = screen_point(&msg) {
+        shared.note_agent_cursor(x, y);
+    }
+    match serde_json::to_vec(&msg) {
+        Ok(b) => Gate::Forward(b),
+        Err(_) => Gate::Drop("cannot re-serialize"),
+    }
+}
+
+/// The screen point of a call that names one: `x`/`y` with no window
+/// or process they would be relative to (`move_cursor`, a click on the
+/// desktop).
+fn screen_point(msg: &Value) -> Option<(f64, f64)> {
+    let args = msg.pointer("/params/arguments")?;
+    if args.get("window_id").is_some() || args.get("pid").is_some() {
+        return None;
+    }
+    Some((args.get("x")?.as_f64()?, args.get("y")?.as_f64()?))
+}
+
+/// Another synth drives the computer: one plain line, as `unavailable`
+/// (it passes: the synth tries again in a minute; nothing about the call
+/// was decided).
+fn busy(shared: &Arc<Shared>, id: Value, tool: &str, driver: &str) -> Gate {
+    shared.journal().record(Entry::new(
+        "computer",
+        "tools/call",
+        tool,
+        format!("denied: {driver} is controlling the computer"),
+    ));
+    Gate::Refuse(jsonrpc_busy(id, driver))
+}
+
+/// The answer to an action while another synth controls the computer.
+fn jsonrpc_busy(id: Value, driver: &str) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "error": {
+        "code": -32001,
+        "message": format!("unavailable: {driver} is controlling this computer right now; try again in a minute"),
+        "data": {"code": "computer_busy"},
+    }})
+}
+
+#[cfg(test)]
+mod tests {
+    // The per-line decision is exercised through the pure predicates in
+    // `cua` (cua::wants_foreground, tool_name, gates), through `cua_apps`
+    // (the owner's choice of apps) and through the core's net/computer
+    // policy tests. A full pipe test needs a live driver and is
+    // `connectd selftest cua`.
+    use super::*;
+
+    fn task_header() -> StreamHeader {
+        serde_json::from_value(json!({"kind": "mcp", "server": "desktop"})).unwrap()
+    }
+
+    #[tokio::test]
+    async fn remembered_task_grant_does_not_skip_locked_screen() {
+        let owner = crate::testutil::Owner::new(crate::Approval::deny());
+        let core = crate::testutil::core(owner.clone());
+        core.mutate_settings(|s| s.computer.enabled = true);
+        let shared = core.shared();
+        shared.grants.record("", "computer", "task", crate::Approval::always());
+        let locked = || presence::Presence { idle_seconds: 600, screen_locked: true };
+        assert!(open_gate_observing(&shared, &task_header(), locked).await.is_err());
+        core.mutate_settings(|s| s.computer.locked_use = true);
+        assert!(open_gate_observing(&shared, &task_header(), locked).await.is_err());
+        assert_eq!(owner.asks(), 0);
+    }
+
+    #[tokio::test]
+    async fn locking_while_approval_is_pending_refuses_the_turn() {
+        let owner = crate::testutil::Owner::new(crate::Approval::once());
+        let core = crate::testutil::core(owner.clone());
+        core.mutate_settings(|s| s.computer.enabled = true);
+        let read = std::cell::Cell::new(0);
+        let observe = || {
+            let n = read.get();
+            read.set(n + 1);
+            presence::Presence { idle_seconds: 600, screen_locked: n > 0 }
+        };
+        assert!(open_gate_observing(&core.shared(), &task_header(), observe).await.is_err());
+        assert_eq!(owner.asks(), 1);
+    }
+
+    #[tokio::test]
+    async fn ongoing_turn_rechecks_pause_disable_and_returning_owner() {
+        let core = crate::testutil::core(crate::testutil::Owner::new(crate::Approval::deny()));
+        core.apply_preset(crate::Preset::Full);
+        let away = presence::Presence { idle_seconds: 600, screen_locked: false };
+        let shared = core.shared();
+        assert!(working_policy(&shared, away).is_ok());
+        core.pause().await;
+        assert!(working_policy(&shared, away).is_err());
+        core.resume();
+        core.mutate_settings(|s| s.computer.enabled = false);
+        assert!(working_policy(&shared, away).is_err());
+        core.mutate_settings(|s| { s.computer.enabled = true; s.computer.mode = ComputerMode::Away; });
+        assert!(working_policy(&shared, away).is_ok());
+        assert!(working_policy(&shared, presence::Presence::default()).is_err());
+    }
+
+    #[test]
+    fn a_stream_is_ended_for_a_change_only_between_tasks() {
+        // The first call of a stream is never the end of it.
+        assert!(!between_tasks(None, 1));
+        // A task in progress: calls a few seconds or minutes apart.
+        assert!(!between_tasks(Some(Duration::from_secs(3)), 1));
+        assert!(!between_tasks(Some(TASK_GAP - Duration::from_secs(1)), 1));
+        // Quiet for as long as the driver keeps a named session alive.
+        assert!(between_tasks(Some(TASK_GAP), 1));
+        assert!(between_tasks(Some(Duration::from_secs(3600)), 1));
+        // Another session holds the daemon: ending this one frees nothing.
+        assert!(!between_tasks(Some(Duration::from_secs(3600)), 2));
+    }
+
+    #[test]
+    fn a_refusal_carries_its_class_and_code_next_to_the_unchanged_sentence() {
+        let said = jsonrpc_error(
+            Value::from(7),
+            "denied: an app the owner excluded".into(),
+            RefusalKind::owner_policy("app_excluded"),
+        );
+        assert_eq!(
+            said,
+            json!({"jsonrpc": "2.0", "id": 7, "error": {
+                "code": -32001,
+                "message": "denied: an app the owner excluded",
+                "data": {"class": "owner_policy", "code": "app_excluded"}
+            }})
+        );
+        let bad = jsonrpc_error(Value::Null, "denied: x".into(), RefusalKind::bad_argument("window_not_named"));
+        assert_eq!(bad["error"]["data"], json!({"class": "bad_argument", "code": "window_not_named"}));
+        // A refusal nobody classified is the owner's policy.
+        let plain = jsonrpc_error(Value::from(1), "denied: y".into(), RefusalKind::default());
+        assert_eq!(plain["error"]["data"]["class"], "owner_policy");
+        // The stream closing for new settings is not a refusal.
+        assert!(jsonrpc_unavailable(Value::from(2), REOPEN)["error"].get("data").is_none());
+    }
+
+    #[test]
+    fn a_point_on_the_screen_is_told_from_a_point_in_a_window() {
+        let call = |args: Value| json!({"method": "tools/call", "params": {"name": "move_cursor", "arguments": args}});
+        assert_eq!(screen_point(&call(json!({"session": "t", "x": 10, "y": 20.5}))), Some((10.0, 20.5)));
+        assert_eq!(screen_point(&call(json!({"x": 10, "y": 20, "window_id": 3}))), None);
+        assert_eq!(screen_point(&call(json!({"x": 10, "y": 20, "pid": 3}))), None);
+        assert_eq!(screen_point(&call(json!({"x": 10}))), None);
+    }
+
+    #[test]
+    fn the_id_of_a_call_is_found_and_nothing_else_is_a_call() {
+        let call = br#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"click","arguments":{}}}"#;
+        assert_eq!(call_id(call), Some(Value::from(7)));
+        assert_eq!(call_id(br#"{"jsonrpc":"2.0","id":8,"method":"tools/list"}"#), None);
+        assert_eq!(call_id(b"not json"), None);
+        // The synth is told to call again, in the label it knows.
+        assert!(REOPEN.starts_with("unavailable: ") && REOPEN.contains("call again"));
+    }
+}

@@ -1,0 +1,422 @@
+{
+  "v": 1,
+  "default_pool": ["classic", "cat", "robot", "shy", "cool", "sage"],
+  "presets": [
+    {
+      "name": "classic",
+      "title_en": "Classic",
+      "title_ru": "Классика",
+      "blurb_en": "Round, bright and friendly. Gets along with everyone.",
+      "blurb_ru": "Круглые ясные глаза. Ладит со всеми.",
+      "face": {
+        "v": 1,
+        "preset": "classic",
+        "eyes": {
+          "shape": "round",
+          "size": 0.62,
+          "spacing": 0.5,
+          "tilt": 0,
+          "sclera": "#F7F5F2",
+          "iris": { "color": "#3D7BFF", "size": 0.62 },
+          "pupil": { "color": "#0A0D1A", "size": 0.5, "shape": "round" },
+          "shine": 0.85,
+          "lids": { "color": "#000000", "rest": 0.06 },
+          "lashes": "none",
+          "glow": 0
+        },
+        "brows": { "style": "thin", "color": "#DCD8D2" },
+        "mouth": { "style": "smile", "color": "#F2EDE6" },
+        "cheeks": { "blush": 0.25, "color": "#FF8FA3" },
+        "accessory": "none",
+        "accessory_color": "#DCD8D2",
+        "palette": { "accent": "#6FA4FF" },
+        "motion": { "blink": 0.5, "curiosity": 0.7, "liveliness": 0.5, "sleepy_after_min": 10 },
+        "idle_emotes": ["wink", "look_around", "surprised", "squint"]
+      }
+    },
+    {
+      "name": "mia",
+      "title_en": "Mia",
+      "title_ru": "Мия",
+      "blurb_en": "Violet eyes, long lashes and a wink always ready.",
+      "blurb_ru": "Фиолетовые глаза, длинные ресницы, всегда готова подмигнуть.",
+      "face": {
+        "v": 1,
+        "preset": "mia",
+        "eyes": {
+          "shape": "oval",
+          "size": 0.66,
+          "spacing": 0.46,
+          "tilt": 0.14,
+          "sclera": "#FFF7FA",
+          "iris": { "color": "#8A5CFF", "size": 0.68 },
+          "pupil": { "color": "#120A24", "size": 0.46, "shape": "round" },
+          "shine": 0.65,
+          "lids": { "color": "#000000", "rest": 0.1 },
+          "lashes": "full",
+          "glow": 0.15
+        },
+        "brows": { "style": "arched", "color": "#F3C7D8" },
+        "mouth": { "style": "cat", "color": "#F5A8C2" },
+        "cheeks": { "blush": 0.2, "color": "#FF7FAE" },
+        "accessory": "none",
+        "accessory_color": "#F083AA",
+        "palette": { "accent": "#F083AA" },
+        "motion": { "blink": 0.55, "curiosity": 0.85, "liveliness": 0.7, "sleepy_after_min": 12 },
+        "idle_emotes": ["wink", "heart_eyes", "look_around", "surprised"]
+      }
+    },
+    {
+      "name": "sleepy",
+      "title_en": "Sleepy",
+      "title_ru": "Соня",
+      "blurb_en": "Heavy lids, slow blinks. Awake, technically.",
+      "blurb_ru": "Тяжелые веки, медленно моргает. Формально не спит.",
+      "face": {
+        "v": 1,
+        "preset": "sleepy",
+        "eyes": {
+          "shape": "droopy",
+          "size": 0.58,
+          "spacing": 0.52,
+          "tilt": -0.2,
+          "sclera": "#EDE9F7",
+          "iris": { "color": "#9A7BD1", "size": 0.62 },
+          "pupil": { "color": "#1B1530", "size": 0.42, "shape": "round" },
+          "shine": 0.45,
+          "lids": { "color": "#3B3354", "rest": 0.42 },
+          "lashes": "light",
+          "glow": 0
+        },
+        "brows": { "style": "flat", "color": "#B9B0D6" },
+        "mouth": { "style": "line", "color": "#CFC6EA" },
+        "cheeks": { "blush": 0.2, "color": "#C98BD8" },
+        "accessory": "none",
+        "accessory_color": "#B9B0D6",
+        "palette": { "accent": "#A88BEB" },
+        "motion": { "blink": 0.25, "curiosity": 0.3, "liveliness": 0.15, "sleepy_after_min": 3 },
+        "idle_emotes": ["yawn", "squint", "look_around"]
+      }
+    },
+    {
+      "name": "cat",
+      "title_en": "Cat",
+      "title_ru": "Кошка",
+      "blurb_en": "Slit pupils, ginger ears. Will chase your cursor.",
+      "blurb_ru": "Зрачки-щелки, рыжие уши. Охотится за курсором.",
+      "face": {
+        "v": 1,
+        "preset": "cat",
+        "eyes": {
+          "shape": "cat",
+          "size": 0.64,
+          "spacing": 0.5,
+          "tilt": 0.25,
+          "sclera": "#D8F06A",
+          "iris": { "color": "#B5DA3E", "size": 1 },
+          "pupil": { "color": "#0B0F05", "size": 0.55, "shape": "slit" },
+          "shine": 0.75,
+          "lids": { "color": "#000000", "rest": 0.1 },
+          "lashes": "none",
+          "glow": 0.2
+        },
+        "brows": { "style": "none", "color": "#E9A15B" },
+        "mouth": { "style": "cat", "color": "#FFB3C1" },
+        "cheeks": { "blush": 0.15, "color": "#FF9EAF" },
+        "accessory": "cat_ears",
+        "accessory_color": "#E9A15B",
+        "palette": { "accent": "#C6E65A" },
+        "motion": { "blink": 0.18, "curiosity": 1, "liveliness": 0.55, "sleepy_after_min": 6 },
+        "idle_emotes": ["squint", "look_around", "yawn", "surprised"]
+      }
+    },
+    {
+      "name": "robot",
+      "title_en": "Robot",
+      "title_ru": "Робот",
+      "blurb_en": "Glowing eyes and an antenna. Calm, precise, quietly kind.",
+      "blurb_ru": "Светящиеся глаза и антенна. Спокойный, точный, добрый.",
+      "face": {
+        "v": 1,
+        "preset": "robot",
+        "eyes": {
+          "shape": "oval",
+          "size": 0.6,
+          "spacing": 0.56,
+          "tilt": 0,
+          "sclera": "#7DEBFF",
+          "iris": { "color": "#7DEBFF", "size": 0 },
+          "pupil": { "color": "#04121A", "size": 0, "shape": "round" },
+          "shine": 0.2,
+          "lids": { "color": "#000000", "rest": 0 },
+          "lashes": "none",
+          "glow": 0.35
+        },
+        "brows": { "style": "none", "color": "#7DEBFF" },
+        "mouth": { "style": "none", "color": "#7DEBFF" },
+        "cheeks": { "blush": 0, "color": "#7DEBFF" },
+        "accessory": "antenna",
+        "accessory_color": "#7DEBFF",
+        "palette": { "accent": "#7DEBFF" },
+        "motion": { "blink": 0.3, "curiosity": 0.6, "liveliness": 0.3, "sleepy_after_min": 15 },
+        "idle_emotes": ["look_around", "squint", "surprised"]
+      }
+    },
+    {
+      "name": "star",
+      "title_en": "Star",
+      "title_ru": "Звезда",
+      "blurb_en": "Starry pupils and a little crown. Lives for the spotlight.",
+      "blurb_ru": "Зрачки-звездочки и корона. Создана для сцены.",
+      "face": {
+        "v": 1,
+        "preset": "star",
+        "eyes": {
+          "shape": "round",
+          "size": 0.7,
+          "spacing": 0.5,
+          "tilt": 0.05,
+          "sclera": "#FFFFFF",
+          "iris": { "color": "#6B3BFF", "size": 0.72 },
+          "pupil": { "color": "#FFE07A", "size": 0.5, "shape": "star" },
+          "shine": 1,
+          "lids": { "color": "#000000", "rest": 0 },
+          "lashes": "light",
+          "glow": 0.1
+        },
+        "brows": { "style": "arched", "color": "#FFE7A3" },
+        "mouth": { "style": "open", "color": "#FF8FB8" },
+        "cheeks": { "blush": 0.15, "color": "#FF6FA8" },
+        "accessory": "crown",
+        "accessory_color": "#FFD24D",
+        "palette": { "accent": "#FFD24D" },
+        "motion": { "blink": 0.6, "curiosity": 0.85, "liveliness": 0.9, "sleepy_after_min": 15 },
+        "idle_emotes": ["wink", "heart_eyes", "surprised", "look_around"]
+      }
+    },
+    {
+      "name": "shy",
+      "title_en": "Shy",
+      "title_ru": "Скромница",
+      "blurb_en": "Bead eyes and a deep blush. Easily flustered.",
+      "blurb_ru": "Глазки-бусинки и вечный румянец. Легко смущается.",
+      "face": {
+        "v": 1,
+        "preset": "shy",
+        "eyes": {
+          "shape": "dot",
+          "size": 0.55,
+          "spacing": 0.44,
+          "tilt": -0.1,
+          "sclera": "#FFEDE4",
+          "iris": { "color": "#FFEDE4", "size": 0 },
+          "pupil": { "color": "#2A1A1C", "size": 0.5, "shape": "round" },
+          "shine": 0.9,
+          "lids": { "color": "#000000", "rest": 0.05 },
+          "lashes": "light",
+          "glow": 0.1
+        },
+        "brows": { "style": "worried", "color": "#F4CFC2" },
+        "mouth": { "style": "dot", "color": "#F7A9B5" },
+        "cheeks": { "blush": 0.85, "color": "#FF7D98" },
+        "accessory": "bow",
+        "accessory_color": "#FF9EC4",
+        "palette": { "accent": "#FF9EC4" },
+        "motion": { "blink": 0.75, "curiosity": 0.35, "liveliness": 0.4, "sleepy_after_min": 8 },
+        "idle_emotes": ["look_around", "heart_eyes", "squint"]
+      }
+    },
+    {
+      "name": "cool",
+      "title_en": "Cool",
+      "title_ru": "Невозмутимый",
+      "blurb_en": "Mirror shades, slow moves. Nothing surprises this one.",
+      "blurb_ru": "Зеркальные очки, медленные движения. Ничем не удивить.",
+      "face": {
+        "v": 1,
+        "preset": "cool",
+        "eyes": {
+          "shape": "almond",
+          "size": 0.56,
+          "spacing": 0.5,
+          "tilt": -0.05,
+          "sclera": "#F2F2F2",
+          "iris": { "color": "#2FD6B5", "size": 0.6 },
+          "pupil": { "color": "#06110F", "size": 0.45, "shape": "round" },
+          "shine": 0.5,
+          "lids": { "color": "#000000", "rest": 0.38 },
+          "lashes": "none",
+          "glow": 0
+        },
+        "brows": { "style": "flat", "color": "#E6E6E6" },
+        "mouth": { "style": "line", "color": "#E6E6E6" },
+        "cheeks": { "blush": 0, "color": "#FF8FA3" },
+        "accessory": "sunglasses",
+        "accessory_color": "#FF7A59",
+        "palette": { "accent": "#FF7A59" },
+        "motion": { "blink": 0.2, "curiosity": 0.25, "liveliness": 0.2, "sleepy_after_min": 20 },
+        "idle_emotes": ["squint", "look_around", "wink"]
+      }
+    },
+    {
+      "name": "sage",
+      "title_en": "Sage",
+      "title_ru": "Мудрец",
+      "blurb_en": "Amber owl eyes behind gold rims. Thinks before it blinks.",
+      "blurb_ru": "Янтарные совиные глаза в золотой оправе. Сначала думает.",
+      "face": {
+        "v": 1,
+        "preset": "sage",
+        "eyes": {
+          "shape": "round",
+          "size": 0.6,
+          "spacing": 0.52,
+          "tilt": 0,
+          "sclera": "#F4EEDC",
+          "iris": { "color": "#D08E2E", "size": 0.66 },
+          "pupil": { "color": "#140C02", "size": 0.5, "shape": "round" },
+          "shine": 0.6,
+          "lids": { "color": "#000000", "rest": 0.18 },
+          "lashes": "none",
+          "glow": 0
+        },
+        "brows": { "style": "thick", "color": "#D9CDB4" },
+        "mouth": { "style": "line", "color": "#E2D6BC" },
+        "cheeks": { "blush": 0.1, "color": "#E7A77A" },
+        "accessory": "round_glasses",
+        "accessory_color": "#D9B26A",
+        "palette": { "accent": "#E3B866" },
+        "motion": { "blink": 0.3, "curiosity": 0.5, "liveliness": 0.25, "sleepy_after_min": 10 },
+        "idle_emotes": ["squint", "look_around", "yawn"]
+      }
+    },
+    {
+      "name": "imp",
+      "title_en": "Imp",
+      "title_ru": "Бесенок",
+      "blurb_en": "Fiery eyes and little horns. Clearly up to something.",
+      "blurb_ru": "Огненные глаза и рожки. Явно что-то замышляет.",
+      "face": {
+        "v": 1,
+        "preset": "imp",
+        "eyes": {
+          "shape": "almond",
+          "size": 0.6,
+          "spacing": 0.5,
+          "tilt": 0.35,
+          "sclera": "#FFF2E0",
+          "iris": { "color": "#FF5A3C", "size": 0.64 },
+          "pupil": { "color": "#1A0500", "size": 0.48, "shape": "round" },
+          "shine": 0.7,
+          "lids": { "color": "#000000", "rest": 0.16 },
+          "lashes": "none",
+          "glow": 0.3
+        },
+        "brows": { "style": "arched", "color": "#FF9F80" },
+        "mouth": { "style": "smile", "color": "#FF9F80" },
+        "cheeks": { "blush": 0.2, "color": "#FF6A4D" },
+        "accessory": "horns",
+        "accessory_color": "#FF4D3A",
+        "palette": { "accent": "#FF6A3D" },
+        "motion": { "blink": 0.45, "curiosity": 0.9, "liveliness": 0.8, "sleepy_after_min": 10 },
+        "idle_emotes": ["wink", "squint", "look_around", "surprised"]
+      }
+    },
+    {
+      "name": "angel",
+      "title_en": "Angel",
+      "title_ru": "Ангел",
+      "blurb_en": "Calm, half-closed sky-blue eyes and a soft halo. Endlessly patient.",
+      "blurb_ru": "Спокойный небесный взгляд из-под век и мягкий нимб. Бесконечное терпение.",
+      "face": {
+        "v": 1,
+        "preset": "angel",
+        "eyes": {
+          "shape": "almond",
+          "size": 0.6,
+          "spacing": 0.5,
+          "tilt": -0.15,
+          "sclera": "#FFFFFF",
+          "iris": { "color": "#6CBEFF", "size": 0.66 },
+          "pupil": { "color": "#0B1A2A", "size": 0.42, "shape": "round" },
+          "shine": 0.95,
+          "lids": { "color": "#000000", "rest": 0.24 },
+          "lashes": "light",
+          "glow": 0.25
+        },
+        "brows": { "style": "thin", "color": "#FFF3D6" },
+        "mouth": { "style": "smile", "color": "#FFD9E2" },
+        "cheeks": { "blush": 0.3, "color": "#FFB3C7" },
+        "accessory": "halo",
+        "accessory_color": "#FFE9A8",
+        "palette": { "accent": "#FFE9A8" },
+        "motion": { "blink": 0.4, "curiosity": 0.6, "liveliness": 0.35, "sleepy_after_min": 12 },
+        "idle_emotes": ["heart_eyes", "look_around", "wink"]
+      }
+    },
+    {
+      "name": "dj",
+      "title_en": "DJ",
+      "title_ru": "Диджей",
+      "blurb_en": "Vinyl pupils and violet headphones. Always on the beat.",
+      "blurb_ru": "Зрачки-пластинки и фиолетовые наушники. Всегда в ритме.",
+      "face": {
+        "v": 1,
+        "preset": "dj",
+        "eyes": {
+          "shape": "round",
+          "size": 0.6,
+          "spacing": 0.48,
+          "tilt": 0,
+          "sclera": "#F5F5F5",
+          "iris": { "color": "#E040A0", "size": 0.68 },
+          "pupil": { "color": "#0A0A0A", "size": 0.62, "shape": "ring" },
+          "shine": 0.7,
+          "lids": { "color": "#000000", "rest": 0.15 },
+          "lashes": "none",
+          "glow": 0.15
+        },
+        "brows": { "style": "thick", "color": "#EDEDED" },
+        "mouth": { "style": "smile", "color": "#FF8CC6" },
+        "cheeks": { "blush": 0.15, "color": "#FF5CB0" },
+        "accessory": "headphones",
+        "accessory_color": "#B45CFF",
+        "palette": { "accent": "#E86CC0" },
+        "motion": { "blink": 0.5, "curiosity": 0.7, "liveliness": 1, "sleepy_after_min": 15 },
+        "idle_emotes": ["look_around", "wink", "surprised", "squint"]
+      }
+    },
+    {
+      "name": "buddy",
+      "title_en": "Buddy",
+      "title_ru": "Дружок",
+      "blurb_en": "Two white beans and a little smile. Says it all with a squish.",
+      "blurb_ru": "Две белые фасолинки и улыбка. Все чувства видно по форме глаз.",
+      "face": {
+        "v": 1,
+        "preset": "buddy",
+        "eyes": {
+          "shape": "pill",
+          "size": 0.8,
+          "spacing": 0.9,
+          "tilt": 0,
+          "sclera": "#FAFAFA",
+          "iris": { "color": "#FAFAFA", "size": 0 },
+          "pupil": { "color": "#000000", "size": 0, "shape": "round" },
+          "shine": 0,
+          "lids": { "color": "#000000", "rest": 0 },
+          "lashes": "none",
+          "glow": 0
+        },
+        "brows": { "style": "none", "color": "#FAFAFA" },
+        "mouth": { "style": "smile", "color": "#FAFAFA" },
+        "cheeks": { "blush": 0, "color": "#FF8FA3" },
+        "accessory": "none",
+        "accessory_color": "#FAFAFA",
+        "palette": { "accent": "#FAFAFA" },
+        "motion": { "blink": 0.6, "curiosity": 0.85, "liveliness": 0.7, "sleepy_after_min": 10 },
+        "idle_emotes": ["look_around", "wink", "squint", "surprised", "yawn", "heart_eyes"]
+      }
+    }
+  ]
+}

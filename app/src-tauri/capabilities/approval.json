@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "approval-window",
+  "description": "What the approval window may do: read the state, list the pending requests and answer them. Nothing else.",
+  "windows": ["approval"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-get-state",
+    "allow-approvals-pending",
+    "allow-approval-answer",
+    "allow-pause"
+  ]
+}

@@ -1,0 +1,63 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "SNTH Connect",
+  "identifier": "ai.snth.connect",
+  "version": "../package.json",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "devCsp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' http://127.0.0.1:1420 ws://127.0.0.1:1420 ipc: http://ipc.localhost; img-src 'self' data: http://127.0.0.1:1420"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Utility",
+    "shortDescription": "Link this computer to your synth, on your terms.",
+    "longDescription": "SNTH Connect links your computer to your cloud companion and lets you decide what it may do here: use this computer's internet, sign in to sites as you, control the computer, work in folders you choose, and use your own apps.",
+    "copyright": "SNTH",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "12.0",
+      "entitlements": "Entitlements.plist"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "./windows/hooks.nsh"
+      }
+    },
+    "linux": {
+      "deb": {
+        "section": "utils"
+      }
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["snth"]
+      }
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRCQTBBRTc5QUUxREJFMUYKUldRZnZoMnVlYTZnUzFTUXgyY2ExTVFyMnRndW1ML0I2Ui9SczErTTMwbmtQcjVWbE5IeDhhNTEK",
+      "endpoints": [
+        "https://github.com/snth-ai/snth-companion/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

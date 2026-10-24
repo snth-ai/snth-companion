@@ -1,0 +1,131 @@
+# Release build of SNTH Connect (app/) for Windows x64 and Linux x64.
+# Attaches the installers and the update feed (latest.json) to a DRAFT
+# GitHub release for the tag.
+#
+# macOS is NOT built here. It is built, signed with the Developer ID and
+# notarized on the release Mac by scripts/release-macos.sh, which adds its
+# files and the darwin entry to this draft release. An unsigned or
+# differently signed macOS update would make macOS forget the permissions
+# testers granted to the app.
+#
+# Start it by pushing the tag `connect-v<version>` (the version in
+# app/package.json), or by hand from the Actions tab. The whole flow is in
+# app/README.md, "Releasing".
+#
+# Never run as a whole yet: expect to fix small things on the first run.
+
+name: connect-release
+
+on:
+  push:
+    tags:
+      - "connect-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: connect-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+          # AppImage is the Linux format that updates itself. The .deb is
+          # for people who want a system package: it tells them when a new
+          # version exists and they install the new .deb themselves.
+          - name: Linux x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bundles: appimage,deb
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The tag must match the app version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          version="$(node -p "require('./app/package.json').version")"
+          if [ "connect-v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match app/package.json version $version (expected connect-v$version)."
+            exit 1
+          fi
+
+      - name: Linux build packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev libssl-dev libdbus-1-dev libfuse2 patchelf \
+            pkg-config build-essential curl wget file
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: npm ci
+
+      # The update files are signed with the updater key from the repo
+      # secrets. Without the key there is no feed, and a release without a
+      # feed never reaches anyone, so that is an error here.
+      - name: Updater signing key
+        shell: bash
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::The secret TAURI_SIGNING_PRIVATE_KEY is missing: cannot sign the update files."
+            exit 1
+          fi
+          if grep -q "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY" app/src-tauri/tauri.conf.json; then
+            echo "::error::app/src-tauri/tauri.conf.json still has the placeholder updater public key."
+            exit 1
+          fi
+          {
+            echo "TAURI_SIGNING_PRIVATE_KEY<<SNTH_EOF"
+            echo "$KEY"
+            echo "SNTH_EOF"
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+      # tauri.release.conf.json turns the updater files on. tauri-action
+      # creates the draft release on the first job and merges each
+      # platform into the same latest.json.
+      - name: Build and attach to the draft release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: app
+          tagName: connect-v__VERSION__
+          releaseName: SNTH Connect v__VERSION__
+          releaseBody: |
+            Draft. Not complete until scripts/release-macos.sh has added the macOS files and the darwin entry to latest.json. Check, then publish.
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: true
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config src-tauri/tauri.release.conf.json

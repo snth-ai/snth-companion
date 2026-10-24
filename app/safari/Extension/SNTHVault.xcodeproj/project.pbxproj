@@ -1,0 +1,194 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		5A0000000000000000000101 /* Frame.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0000000000000000000001 /* Frame.swift */; };
+		5A0000000000000000000102 /* Socket.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0000000000000000000002 /* Socket.swift */; };
+		5A0000000000000000000103 /* Relay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0000000000000000000003 /* Relay.swift */; };
+		5A0000000000000000000104 /* Appex.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0000000000000000000004 /* Appex.swift */; };
+		5A0000000000000000000105 /* SafariWebExtensionHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0000000000000000000005 /* SafariWebExtensionHandler.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		5A0000000000000000000001 /* Frame.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = Frame.swift; path = ../Sources/ConnectRelay/Frame.swift; sourceTree = "<group>"; };
+		5A0000000000000000000002 /* Socket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = Socket.swift; path = ../Sources/ConnectRelay/Socket.swift; sourceTree = "<group>"; };
+		5A0000000000000000000003 /* Relay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = Relay.swift; path = ../Sources/ConnectRelay/Relay.swift; sourceTree = "<group>"; };
+		5A0000000000000000000004 /* Appex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = Appex.swift; path = ../Sources/ConnectRelay/Appex.swift; sourceTree = "<group>"; };
+		5A0000000000000000000005 /* SafariWebExtensionHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafariWebExtensionHandler.swift; sourceTree = "<group>"; };
+		5A0000000000000000000006 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		5A0000000000000000000007 /* SNTH Vault.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "SNTH Vault.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		5A0000000000000000000201 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		5A0000000000000000000301 = {
+			isa = PBXGroup;
+			children = (
+				5A0000000000000000000005 /* SafariWebExtensionHandler.swift */,
+				5A0000000000000000000006 /* Info.plist */,
+				5A0000000000000000000302 /* ConnectRelay */,
+				5A0000000000000000000303 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		5A0000000000000000000302 /* ConnectRelay */ = {
+			isa = PBXGroup;
+			children = (
+				5A0000000000000000000001 /* Frame.swift */,
+				5A0000000000000000000002 /* Socket.swift */,
+				5A0000000000000000000003 /* Relay.swift */,
+				5A0000000000000000000004 /* Appex.swift */,
+			);
+			name = ConnectRelay;
+			sourceTree = "<group>";
+		};
+		5A0000000000000000000303 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				5A0000000000000000000007 /* SNTH Vault.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		5A0000000000000000000401 /* SNTH Vault */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5A0000000000000000000602 /* Build configuration list for PBXNativeTarget "SNTH Vault" */;
+			buildPhases = (
+				5A0000000000000000000202 /* Sources */,
+				5A0000000000000000000201 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "SNTH Vault";
+			productName = "SNTH Vault";
+			productReference = 5A0000000000000000000007 /* SNTH Vault.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		5A0000000000000000000501 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastUpgradeCheck = 2700;
+			};
+			buildConfigurationList = 5A0000000000000000000601 /* Build configuration list for PBXProject "SNTHVault" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 5A0000000000000000000301;
+			productRefGroup = 5A0000000000000000000303 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				5A0000000000000000000401 /* SNTH Vault */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		5A0000000000000000000202 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5A0000000000000000000101 /* Frame.swift in Sources */,
+				5A0000000000000000000102 /* Socket.swift in Sources */,
+				5A0000000000000000000103 /* Relay.swift in Sources */,
+				5A0000000000000000000104 /* Appex.swift in Sources */,
+				5A0000000000000000000105 /* SafariWebExtensionHandler.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		5A0000000000000000000701 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		5A0000000000000000000702 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				CURRENT_PROJECT_VERSION = 0;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MARKETING_VERSION = 0.0.0;
+				OTHER_LDFLAGS = (
+					"-framework",
+					SafariServices,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.snth.connect.safari;
+				PRODUCT_MODULE_NAME = SNTHVault;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		5A0000000000000000000601 /* Build configuration list for PBXProject "SNTHVault" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5A0000000000000000000701 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		5A0000000000000000000602 /* Build configuration list for PBXNativeTarget "SNTH Vault" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5A0000000000000000000702 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 5A0000000000000000000501 /* Project object */;
+}
