@@ -57,6 +57,8 @@ pub fn capabilities_value(
             "mode": computer_mode,
             "foreground": foreground,
             "experiment": experiment,
+            // Do not advertise the stored opt-in as an implemented capability.
+            "locked_use": false,
             "cua_version": cua_version,
             "status": cua_status,
         },

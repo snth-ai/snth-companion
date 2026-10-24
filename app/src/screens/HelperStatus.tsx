@@ -167,6 +167,17 @@ export function HelperStatus(props: { live: boolean; notReadyNote?: string }) {
                 </button>
               ) : null}
             </div>
+            <div className="row">
+              <div className="row-text">
+                <div className="row-title">{t.lockedUseTitle}</div>
+                <div className="row-desc">
+                  {cua?.locked_use?.supported ? (cua.locked_use.detail || t.lockedUseNeedsPlugin) : t.lockedUseUnsupported}
+                </div>
+              </div>
+              {cua?.locked_use?.supported ? (
+                <PermState value={cua.locked_use.installed && cua.locked_use.registered} yes={t.lockedUseReady} no={t.lockedUseMissing} />
+              ) : null}
+            </div>
           </>
         ) : null}
       </div>

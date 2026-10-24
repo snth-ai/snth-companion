@@ -402,6 +402,8 @@ pub fn matching_preset(s: &Settings) -> Preset {
         probe.computer.look = s.computer.look.clone();
         probe.computer.apps = s.computer.apps.clone();
         probe.computer.experiment = s.computer.experiment;
+        probe.computer.locked_use = s.computer.locked_use;
+        probe.computer.keep_awake = s.computer.keep_awake;
         // The command line is off in every preset: on, the settings are
         // custom; its mode alone (while off) does not count.
         probe.shell.mode = s.shell.mode;

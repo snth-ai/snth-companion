@@ -189,6 +189,9 @@ export interface Settings {
   cookies: { enabled: boolean; mode: CookiesMode };
   computer: {
     enabled: boolean;
+    /** Allow an active computer task to continue after macOS locks. */
+    locked_use: boolean;
+    keep_awake: boolean;
     mode: ComputerMode;
     foreground: Foreground;
     away_idle_minutes: number;
@@ -739,6 +742,13 @@ export interface CuaStatus {
   /** macOS only, null elsewhere: what the system allows this app. */
   accessibility: boolean | null;
   screen_recording: boolean | null;
+  /** macOS authorization plug-in state for Locked use. */
+  locked_use: {
+    supported: boolean;
+    installed: boolean;
+    registered: boolean;
+    detail: string;
+  };
 }
 
 /** Why this copy of the app cannot replace itself. */

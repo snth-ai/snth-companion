@@ -285,7 +285,7 @@ function presetSettings(preset: Exclude<Preset, "custom">, roots: Settings["file
   const base: Settings = {
     net: { enabled: true, mode: "ask", domains: [], allow_local_network: false, monthly_cap_bytes: 0, skip_on_metered: true },
     cookies: { enabled: true, mode: "ask" },
-    computer: { enabled: true, mode: "ask", foreground: "never", away_idle_minutes: 5, apps: { policy: "all", except: [], only: [] }, tool_denylist: [], look: defaultLook(), experiment: "default" },
+    computer: { enabled: true, locked_use: false, keep_awake: false, mode: "ask", foreground: "never", away_idle_minutes: 5, apps: { policy: "all", except: [], only: [] }, tool_denylist: [], look: defaultLook(), experiment: "default" },
     files: { enabled: true, roots, ask_on_write: true },
     apps: { enabled: true, mode: "ask", apps: {} },
     // Off in every preset.
@@ -341,7 +341,7 @@ function offSettings(): Settings {
   return {
     net: { enabled: false, mode: "ask", domains: [], allow_local_network: false, monthly_cap_bytes: 0, skip_on_metered: false },
     cookies: { enabled: false, mode: "ask" },
-    computer: { enabled: false, mode: "ask", foreground: "never", away_idle_minutes: 5, apps: { policy: "all", except: [], only: [] }, tool_denylist: [], look: defaultLook(), experiment: "default" },
+    computer: { enabled: false, locked_use: false, keep_awake: false, mode: "ask", foreground: "never", away_idle_minutes: 5, apps: { policy: "all", except: [], only: [] }, tool_denylist: [], look: defaultLook(), experiment: "default" },
     files: { enabled: false, roots: [], ask_on_write: false },
     apps: { enabled: false, mode: "ask", apps: {} },
     shell: { enabled: false, mode: "ask" },
@@ -1543,11 +1543,13 @@ class MockBackend implements Backend {
   applyPreset(preset: Exclude<Preset, "custom">) {
     // A preset is a policy: the look and the experiment the owner chose stay.
     // The command line is off in every preset; its mode stays.
-    const { look, experiment } = this.state.core.settings.computer;
+    const { look, experiment, locked_use, keep_awake } = this.state.core.settings.computer;
     const shellMode = this.state.core.settings.shell.mode;
     this.state.core.settings = presetSettings(preset, this.state.core.settings.files.roots);
     this.state.core.settings.computer.look = look;
     this.state.core.settings.computer.experiment = experiment;
+    this.state.core.settings.computer.locked_use = locked_use;
+    this.state.core.settings.computer.keep_awake = keep_awake;
     this.state.core.settings.shell.mode = shellMode;
     this.refreshApps();
     return this.changed();
@@ -1570,6 +1572,8 @@ class MockBackend implements Backend {
       const probe = presetSettings(p, next.files.roots);
       probe.computer.look = next.computer.look;
       probe.computer.experiment = next.computer.experiment;
+      probe.computer.locked_use = next.computer.locked_use;
+      probe.computer.keep_awake = next.computer.keep_awake;
       probe.shell.mode = next.shell.mode;
       if (JSON.stringify(probe) === JSON.stringify({ ...next, preset: p })) next.preset = p;
     }
@@ -1826,6 +1830,12 @@ class MockBackend implements Backend {
         helper: structuredClone(this.state.helper),
         retry_at: this.state.helper_retry_at,
         pinned_version: "0.34.1",
+        locked_use: {
+          supported: this.state.app.os === "macos",
+          installed: false,
+          registered: false,
+          detail: this.state.app.os === "macos" ? "native unlock is not implemented in this build" : "locked use is available only on macOS",
+        },
         ...this.permissions,
       },
       80,

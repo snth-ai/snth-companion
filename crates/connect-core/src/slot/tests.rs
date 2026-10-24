@@ -299,6 +299,8 @@ fn refused_with(g: &Gate) -> Option<String> {
 #[tokio::test]
 async fn one_synth_drives_the_computer_at_a_time_and_another_may_only_look() {
     let (core, _, _) = two_links();
+    // These calls now also pass through the live computer-enabled gate.
+    core.mutate_settings(|s| s.computer.enabled = true);
     let sh = core.shared();
     let (mia, maya) = (sh.slot("mia").unwrap(), sh.slot("maya").unwrap());
 

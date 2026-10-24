@@ -315,6 +315,17 @@ export function Computer() {
         <div style={{ marginTop: 8 }}>
           <Notice kind={c.enabled ? "warn" : "info"}>{t.reach(name)}</Notice>
         </div>
+        {state.app.os === "macos" ? (
+          <div style={{ marginTop: 8 }}>
+            <SwitchRow
+              title={t.keepAwakeTitle}
+              desc={t.keepAwakeDesc}
+              checked={c.keep_awake}
+              disabled={!c.enabled}
+              onChange={(v) => edit((d) => void (d.computer.keep_awake = v))}
+            />
+          </div>
+        ) : null}
       </Section>
 
       <fieldset disabled={!c.enabled}>

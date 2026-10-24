@@ -556,6 +556,9 @@ pub struct CuaDto {
     /// embedded helper works under the app's permissions.
     accessibility: Option<bool>,
     screen_recording: Option<bool>,
+    /// Whether the macOS SecurityAgent plug-in required for Locked use is
+    /// installed and present in the screen-unlock authorization chain.
+    locked_use: connect_core::locked_use::Status,
 }
 
 /// Where the helper stands and whether the app has the two macOS
@@ -570,6 +573,7 @@ pub fn cua_check(ctx: Cx<'_>) -> CuaDto {
         pinned_version: connect_core::cua::PINNED_VERSION,
         accessibility: permissions.map(|p| p.accessibility),
         screen_recording: permissions.map(|p| p.screen_recording),
+        locked_use: connect_core::locked_use::status(),
     }
 }
 

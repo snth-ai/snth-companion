@@ -166,6 +166,7 @@ fn setup(app: &mut tauri::App, updater_ready: bool) -> Result<(), Box<dyn std::e
     // Subscribe before the link starts so no event is missed.
     spawn_event_forwarder(ctx.clone());
     spawn_link(ctx.clone(), shutdown_rx.clone());
+    tauri::async_runtime::spawn(connect_core::power::run_availability(ctx.core.clone(), shutdown_rx.clone()));
     // The island's demo (a debug build only) has no use for the helper.
     if !island::demo() {
         spawn_helper(ctx.clone(), shutdown_rx.clone());

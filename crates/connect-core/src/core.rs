@@ -878,7 +878,7 @@ impl Shared {
         }
     }
 
-    async fn stop_cua(&self) {
+    pub(crate) async fn stop_cua(&self) {
         let d = self.cua_daemon.lock().await.take();
         if let Some(d) = d {
             d.stop(&self.cua_env).await;
@@ -1444,11 +1444,15 @@ impl Core {
             let look = s.computer.look.clone();
             let apps = s.computer.apps.clone();
             let experiment = s.computer.experiment;
+            let locked_use = s.computer.locked_use;
+            let keep_awake = s.computer.keep_awake;
             let shell_mode = s.shell.mode;
             *s = Settings::from_preset(preset, roots);
             s.computer.look = look;
             s.computer.apps = apps;
             s.computer.experiment = experiment;
+            s.computer.locked_use = locked_use;
+            s.computer.keep_awake = keep_awake;
             s.shell.mode = shell_mode;
         })
     }
@@ -2265,6 +2269,17 @@ mod tests {
         assert!(core.settings().net.enabled);
         let rev2 = core.add_root(PathBuf::from("/tmp"), true);
         assert_eq!(rev2, 2);
+    }
+
+    #[test]
+    fn presets_preserve_explicit_wake_and_locked_use_choices() {
+        let (core, _) = test_core();
+        core.mutate_settings(|s| { s.computer.keep_awake = true; s.computer.locked_use = true; });
+        for preset in [Preset::Careful, Preset::Balanced, Preset::Full] {
+            core.apply_preset(preset);
+            assert!(core.settings().computer.keep_awake);
+            assert!(core.settings().computer.locked_use);
+        }
     }
 
     #[tokio::test]

@@ -325,6 +325,14 @@ fn plain_line(text: &str, max: usize) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ComputerSettings {
     pub enabled: bool,
+    /// Allow an active computer-use task to continue after macOS locks the
+    /// screen. This is intentionally separate from `enabled`: enabling it
+    /// opts into the macOS SecurityAgent authorization plug-in path.
+    #[serde(default)]
+    pub locked_use: bool,
+    /// Keep this Mac reachable and wake its display for permitted tasks.
+    #[serde(default)]
+    pub keep_awake: bool,
     pub mode: ComputerMode,
     pub foreground: Foreground,
     /// Idle minutes required in `away` mode and for the `idle` foreground
@@ -510,6 +518,8 @@ impl Default for Settings {
             },
             computer: ComputerSettings {
                 enabled: false,
+                locked_use: false,
+                keep_awake: false,
                 mode: ComputerMode::Ask,
                 foreground: Foreground::Never,
                 away_idle_minutes: 5,
@@ -591,6 +601,8 @@ impl Settings {
                 };
                 s.computer = ComputerSettings {
                     enabled: true,
+                    locked_use: false,
+                    keep_awake: false,
                     mode: ComputerMode::Ask,
                     foreground: Foreground::Never,
                     away_idle_minutes: 5,
@@ -620,6 +632,8 @@ impl Settings {
                 };
                 s.computer = ComputerSettings {
                     enabled: true,
+                    locked_use: false,
+                    keep_awake: false,
                     mode: ComputerMode::Auto,
                     foreground: Foreground::Idle,
                     away_idle_minutes: 5,
@@ -649,6 +663,8 @@ impl Settings {
                 };
                 s.computer = ComputerSettings {
                     enabled: true,
+                    locked_use: false,
+                    keep_awake: false,
                     mode: ComputerMode::Auto,
                     foreground: Foreground::Always,
                     away_idle_minutes: 5,
@@ -1002,6 +1018,19 @@ mod tests {
         let full = Settings::from_preset(Preset::Full, vec![]);
         assert_eq!(full.cookies.mode, CookiesMode::Auto);
         assert_eq!(full.computer.foreground, Foreground::Always);
+    }
+
+    #[test]
+    fn old_settings_and_presets_do_not_opt_in_to_wake_or_unlock() {
+        let mut old = serde_json::to_value(Settings::default()).unwrap();
+        old["computer"].as_object_mut().unwrap().remove("keep_awake");
+        old["computer"].as_object_mut().unwrap().remove("locked_use");
+        let loaded: Settings = serde_json::from_value(old).unwrap();
+        assert!(!loaded.computer.keep_awake && !loaded.computer.locked_use);
+        for preset in [Preset::Careful, Preset::Balanced, Preset::Full] {
+            let settings = Settings::from_preset(preset, vec![]);
+            assert!(!settings.computer.keep_awake && !settings.computer.locked_use);
+        }
     }
 
     #[test]

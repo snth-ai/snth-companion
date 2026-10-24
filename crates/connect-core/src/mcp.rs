@@ -96,16 +96,19 @@ pub async fn handle(mut s: MuxStream, hdr: StreamHeader, shared: &Arc<Shared>) {
     let is_catalog = hdr.purpose == crate::proto::PURPOSE_CATALOG;
 
     // Open gate (working streams only; a catalog stream is served freely).
-    if !is_catalog {
-        if let Err(why) = open_gate(shared, &hdr).await {
-            shared
-                .journal()
-                .record(Entry::new("computer", "mcp.open", "desktop", why.to_string()));
-            logln!("mcp: refused: {why}");
-            reply_refusal(&mut s, &why).await;
-            return;
+    let mode_at_open = if !is_catalog {
+        match open_gate(shared, &hdr).await {
+            Ok(mode) => Some(mode),
+            Err(why) => {
+                shared
+                    .journal()
+                    .record(Entry::new("computer", "mcp.open", "desktop", why.to_string()));
+                logln!("mcp: refused: {why}");
+                reply_refusal(&mut s, &why).await;
+                return;
+            }
         }
-    }
+    } else { None };
 
     // Held until this function returns, however it ends.
     let session = match shared.cua_session().await {
@@ -152,6 +155,36 @@ pub async fn handle(mut s: MuxStream, hdr: StreamHeader, shared: &Arc<Shared>) {
     let mut sr = BufReader::with_capacity(64 * 1024, sr);
     let sw = Arc::new(Mutex::new(sw));
 
+    // A persistent MCP connection is not an active task. Only a forwarded
+    // tool call may wake the display; the hold expires between calls.
+    let display_hold = std::sync::Mutex::new(None::<(crate::power::Hold, Instant)>);
+    let policy_revoked = std::sync::atomic::AtomicBool::new(false);
+    let watch_session = async {
+        if is_catalog { std::future::pending::<()>().await; }
+        let mut tick = tokio::time::interval(Duration::from_millis(250));
+        loop {
+            tick.tick().await;
+            if let Err(why) = working_policy(shared, presence::read()) {
+                logln!("mcp: ending session: {why}");
+                break;
+            }
+            let s = shared.settings();
+            if Some(s.computer.mode) != mode_at_open { break; }
+            let mut hold = display_hold.lock().unwrap();
+            if !s.computer.keep_awake || hold.as_ref().is_some_and(|(_, last)| last.elapsed() >= TASK_GAP) {
+                *hold = None;
+            } else if let Some((active, _)) = hold.as_mut() {
+                // Keep long-running driver calls awake too. The five-minute
+                // task gap is the driver's existing session idle boundary;
+                // each OS assertion still has its own 30-second timeout.
+                if let Err(error) = active.renew(crate::power::Kind::Display) {
+                    logln!("mcp: {error}");
+                    break;
+                }
+            }
+        }
+    };
+
     let shared_for_gate = shared.clone();
     let session_ref = &session;
     let to_driver = async {
@@ -190,6 +223,31 @@ pub async fn handle(mut s: MuxStream, hdr: StreamHeader, shared: &Arc<Shared>) {
             }
             match filter_scoped(&shared_for_gate, &session_ref.scope, is_catalog, &line).await {
                 Gate::Forward(bytes) => {
+                    if !is_catalog && call_id(&bytes).is_some() {
+                        // An approval/app lookup can have yielded while the
+                        // owner locked the Mac or changed policy.
+                        if working_policy(&shared_for_gate, presence::read()).is_err()
+                            || Some(shared_for_gate.settings().computer.mode) != mode_at_open
+                        {
+                            policy_revoked.store(true, std::sync::atomic::Ordering::Relaxed);
+                            break;
+                        }
+                        if cfg!(target_os = "macos") && shared_for_gate.settings().computer.keep_awake {
+                            let mut hold = display_hold.lock().unwrap();
+                            let result = match hold.as_mut() {
+                                Some((hold, last)) => {
+                                    *last = Instant::now();
+                                    hold.renew(crate::power::Kind::Display)
+                                }
+                                None => crate::power::Hold::acquire(crate::power::Kind::Display)
+                                    .map(|h| *hold = Some((h, Instant::now()))),
+                            };
+                            if let Err(error) = result {
+                                logln!("mcp: {error}");
+                                break;
+                            }
+                        }
+                    }
                     forwarded += 1;
                     if child_in.write_all(&bytes).await.is_err()
                         || child_in.write_all(b"\n").await.is_err()
@@ -247,10 +305,19 @@ pub async fn handle(mut s: MuxStream, hdr: StreamHeader, shared: &Arc<Shared>) {
         }
     };
 
-    let (forwarded, refused) = tokio::select! {
-        counts = to_driver => counts,
-        _ = from_driver => (0, 0),
+    let (forwarded, refused, policy_ended) = tokio::select! {
+        counts = to_driver => (counts.0, counts.1, false),
+        _ = from_driver => (0, 0, false),
+        _ = watch_session => (0, 0, true),
     };
+    // Release before waiting for the proxy to shut down, including when
+    // the owner pauses or returns in away-only mode.
+    *display_hold.lock().unwrap() = None;
+    if policy_ended || policy_revoked.load(std::sync::atomic::Ordering::Relaxed) {
+        // A proxy's exit alone does not cancel work already submitted to
+        // our persistent daemon. Stop that daemon as well on revocation.
+        shared.stop_cua().await;
+    }
     let _ = sw.lock().await.shutdown().await;
     let _ = child.start_kill();
     let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
@@ -281,7 +348,32 @@ fn call_id(line: &[u8]) -> Option<Value> {
 }
 
 /// The open gate for a working stream.
-async fn open_gate(shared: &Arc<Shared>, hdr: &StreamHeader) -> Result<(), Refusal> {
+async fn open_gate(shared: &Arc<Shared>, hdr: &StreamHeader) -> Result<ComputerMode, Refusal> {
+    open_gate_observing(shared, hdr, presence::read).await
+}
+
+async fn open_gate_observing(
+    shared: &Arc<Shared>, hdr: &StreamHeader, observe: impl Fn() -> presence::Presence,
+) -> Result<ComputerMode, Refusal> {
+    working_policy(shared, observe())?;
+    let s = shared.settings();
+    if s.computer.mode == ComputerMode::Ask && !shared.grant_allows("computer", "task") {
+        let req = ApprovalRequest::new("computer", "task", &hdr.reason,
+            "let the synth use this computer for a task");
+        if !shared.ask_scoped("computer", "task", req).await.allow {
+            return Err(Refusal::Denied("the owner did not allow computer use for this task".into()));
+        }
+    }
+    if shared.settings().computer.mode != s.computer.mode {
+        return Err(Refusal::Denied("computer-use policy changed; start a new task".into()));
+    }
+    // A remembered grant must not skip the lock check; an approval may
+    // also have been pending while the screen locked or policy changed.
+    working_policy(shared, observe())?;
+    Ok(s.computer.mode)
+}
+
+fn working_policy(shared: &Shared, observed: presence::Presence) -> Result<(), Refusal> {
     if shared.paused() {
         return Err(Refusal::Denied("computer use is paused by the owner".into()));
     }
@@ -289,37 +381,27 @@ async fn open_gate(shared: &Arc<Shared>, hdr: &StreamHeader) -> Result<(), Refus
     if !s.computer.enabled {
         return Err(Refusal::Denied("computer use is turned off on this computer".into()));
     }
-    match s.computer.mode {
-        ComputerMode::Auto => Ok(()),
-        ComputerMode::Away => {
-            let idle = presence::read().idle_seconds;
-            if cua::away_allows(ComputerMode::Away, s.computer.away_idle_minutes, idle) {
-                Ok(())
-            } else {
-                Err(Refusal::Denied(format!(
-                    "computer use is allowed only while you are away ({} min idle); you are active",
-                    s.computer.away_idle_minutes
-                )))
-            }
-        }
-        ComputerMode::Ask => {
-            if shared.grant_allows("computer", "task") {
-                return Ok(());
-            }
-            let req = ApprovalRequest::new(
-                "computer",
-                "task",
-                &hdr.reason,
-                "let the synth use this computer for a task",
-            );
-            let appr = shared.ask_scoped("computer", "task", req).await;
-            if appr.allow {
-                Ok(())
-            } else {
-                Err(Refusal::Denied("the owner did not allow computer use for this task".into()))
-            }
-        }
+    if s.computer.mode == ComputerMode::Away
+        && !cua::away_allows(ComputerMode::Away, s.computer.away_idle_minutes, observed.idle_seconds)
+    {
+        return Err(Refusal::Denied(format!(
+            "computer use is allowed only while you are away ({} min idle); you are active",
+            s.computer.away_idle_minutes
+        )));
     }
+
+    // A locked screen is a separate capability. Accessibility and Screen
+    // Recording do not grant access to loginwindow; only the owner's opt-in
+    // and the signed macOS authorization plug-in can keep this turn alive.
+    if observed.screen_locked {
+        if !s.computer.locked_use {
+            return Err(Refusal::Denied(
+                "the screen is locked and locked use is turned off on this computer".into(),
+            ));
+        }
+        crate::locked_use::authorize_active_turn().map_err(Refusal::Failed)?;
+    }
+    Ok(())
 }
 
 /// What the pipe does with one line from the synth.
@@ -402,6 +484,11 @@ pub async fn filter_scoped(
     }
 
     let s = shared.settings();
+
+    if let Err(why) = working_policy(shared, presence::read()) {
+        shared.journal().record(Entry::new("computer", "tools/call", tool, why.to_string()));
+        return Gate::Refuse(jsonrpc_error(id, why.to_string(), RefusalKind::owner_policy("session_unavailable")));
+    }
 
     // Never, whatever the owner's settings say: recording the screen,
     // installing software, updating or reconfiguring the helper, replaying
@@ -603,6 +690,56 @@ mod tests {
     // policy tests. A full pipe test needs a live driver and is
     // `connectd selftest cua`.
     use super::*;
+
+    fn task_header() -> StreamHeader {
+        serde_json::from_value(json!({"kind": "mcp", "server": "desktop"})).unwrap()
+    }
+
+    #[tokio::test]
+    async fn remembered_task_grant_does_not_skip_locked_screen() {
+        let owner = crate::testutil::Owner::new(crate::Approval::deny());
+        let core = crate::testutil::core(owner.clone());
+        core.mutate_settings(|s| s.computer.enabled = true);
+        let shared = core.shared();
+        shared.grants.record("", "computer", "task", crate::Approval::always());
+        let locked = || presence::Presence { idle_seconds: 600, screen_locked: true };
+        assert!(open_gate_observing(&shared, &task_header(), locked).await.is_err());
+        core.mutate_settings(|s| s.computer.locked_use = true);
+        assert!(open_gate_observing(&shared, &task_header(), locked).await.is_err());
+        assert_eq!(owner.asks(), 0);
+    }
+
+    #[tokio::test]
+    async fn locking_while_approval_is_pending_refuses_the_turn() {
+        let owner = crate::testutil::Owner::new(crate::Approval::once());
+        let core = crate::testutil::core(owner.clone());
+        core.mutate_settings(|s| s.computer.enabled = true);
+        let read = std::cell::Cell::new(0);
+        let observe = || {
+            let n = read.get();
+            read.set(n + 1);
+            presence::Presence { idle_seconds: 600, screen_locked: n > 0 }
+        };
+        assert!(open_gate_observing(&core.shared(), &task_header(), observe).await.is_err());
+        assert_eq!(owner.asks(), 1);
+    }
+
+    #[tokio::test]
+    async fn ongoing_turn_rechecks_pause_disable_and_returning_owner() {
+        let core = crate::testutil::core(crate::testutil::Owner::new(crate::Approval::deny()));
+        core.apply_preset(crate::Preset::Full);
+        let away = presence::Presence { idle_seconds: 600, screen_locked: false };
+        let shared = core.shared();
+        assert!(working_policy(&shared, away).is_ok());
+        core.pause().await;
+        assert!(working_policy(&shared, away).is_err());
+        core.resume();
+        core.mutate_settings(|s| s.computer.enabled = false);
+        assert!(working_policy(&shared, away).is_err());
+        core.mutate_settings(|s| { s.computer.enabled = true; s.computer.mode = ComputerMode::Away; });
+        assert!(working_policy(&shared, away).is_ok());
+        assert!(working_policy(&shared, presence::Presence::default()).is_err());
+    }
 
     #[test]
     fn a_stream_is_ended_for_a_change_only_between_tasks() {
