@@ -1154,6 +1154,17 @@ export const en = {
     askDesign: (n: string) => `Ask ${n} to design their own face`,
     askDesignSent: (n: string) => `Asked. ${n} picks a face and tells you about it.`,
     askDesignFailed: (n: string) => `${n} could not be asked right now.`,
+    // The synth's voice reply on this computer.
+    voiceReply: "Reply with voice",
+    voiceReplyNote: (n: string) =>
+      `When you talk to ${n} by voice from the island, ${n} can answer aloud on this computer, in ${n}'s own voice. The chat gets the answer as text either way. What you type always gets text. Holding a key, saying the name or a click on the island stops the voice.`,
+    voiceReplyAlways: "Always",
+    voiceReplyAlwaysDesc: "Asked by voice, answered by voice",
+    voiceReplyAuto: "Synth decides",
+    voiceReplyAutoDesc: (n: string) => `${n} chooses when to speak and when to write`,
+    voiceReplyOff: "Text only",
+    voiceReplyOffDesc: "Answers come as text, as before",
+    voiceReplyOld: (n: string) => `${n} cannot answer with voice yet. Until ${n} is updated, answers come as text.`,
     // On-device speech-to-text.
     stt: "Speech recognition",
     sttNote:
@@ -1216,6 +1227,7 @@ export const en = {
       locked: "Paused: the screen is locked.",
       mic_busy: "Paused: another app uses the microphone (a call).",
       bt_mic: "The microphone is in your headphones: listening all the time would ruin their sound.",
+      speaking: "Paused while the synth speaks, so it does not hear its own name.",
     } as Record<string, string>,
     wakeWaiting: {
       island: "Waiting: the island is off or no synth is linked.",
@@ -1275,7 +1287,10 @@ export const en = {
         locked: "Not listening for the name: the screen is locked",
         mic_busy: "Not listening for the name: the microphone is in use",
         bt_mic: "Not listening for the name: the microphone is in your headphones",
+        speaking: "Not listening for the name while I speak",
       } as Record<string, string>,
+      speaking: "Speaking",
+      speakingHint: "Click to stop",
       channel: {
         telegram: "Telegram",
         tguser: "Telegram",

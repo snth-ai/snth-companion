@@ -63,6 +63,7 @@ fn voice(ms: u64, bytes: usize) -> OwnerMessage {
         images: vec![],
         voice_transcript: None,
         voice_tone: None,
+        voice_reply: None,
     }
 }
 
@@ -260,7 +261,7 @@ fn a_message_is_built_within_every_limit() {
     shot.images = vec![shot.images[0].clone(), shot.images[0].clone(), shot.images[0].clone()];
     assert_eq!(shot.params().unwrap_err().code, "too_large");
 
-    let mut text = OwnerMessage { client_id: "c-2".into(), mode: Mode::Text, text: "  find me a flight  ".into(), audio: None, images: vec![], voice_transcript: None, voice_tone: None };
+    let mut text = OwnerMessage { client_id: "c-2".into(), mode: Mode::Text, text: "  find me a flight  ".into(), audio: None, images: vec![], voice_transcript: None, voice_tone: None, voice_reply: None };
     assert_eq!(text.params().unwrap()["text"], "find me a flight");
     text.text = "   ".into();
     assert_eq!(text.params().unwrap_err().code, "empty");
@@ -674,4 +675,174 @@ async fn the_tone_goes_only_to_a_synth_that_takes_it() {
         shared.slot(id).unwrap().requests.resolve(&json!({"type": "response", "id": sent["id"], "result": {"accepted": true, "message_id": "m-1"}}));
         assert_eq!(call.await.unwrap().unwrap(), "m-1");
     }
+}
+
+// --- the synth's voice reply (tz-voice-reply.md) ---
+
+const WITH_VOICE: &[&str] = &["requests", "island", "island_device_stt", "island_voice_reply"];
+
+#[test]
+fn the_voice_reply_is_always_by_default_and_in_an_old_file() {
+    assert_eq!(IslandSettings::default().voice_reply(), VoiceReply::Always);
+    let old: IslandSettings = serde_json::from_value(json!({"enabled": true, "stt": "device"})).unwrap();
+    assert_eq!(old.voice_reply, None);
+    assert_eq!(old.voice_reply(), VoiceReply::Always);
+    // The default writes nothing, so an older app reads the file as it was.
+    assert!(serde_json::to_value(&old).unwrap().get("voice_reply").is_none());
+    for (s, v) in [("always", VoiceReply::Always), ("auto", VoiceReply::Auto), ("off", VoiceReply::Off)] {
+        let set: IslandSettings = serde_json::from_value(json!({"voice_reply": s})).unwrap();
+        assert_eq!(set.voice_reply(), v);
+        assert_eq!(serde_json::to_value(&set).unwrap()["voice_reply"], s);
+        assert_eq!(VoiceReply::parse(s), Some(v));
+        assert_eq!(v.as_str(), s);
+    }
+    assert_eq!(VoiceReply::parse("loud"), None);
+}
+
+#[test]
+fn the_voice_reply_rides_only_with_a_voice_message() {
+    let with = |m: OwnerMessage, r: VoiceReply| OwnerMessage { voice_reply: Some(r), ..m };
+    // The audio, and the text recognized here.
+    assert_eq!(with(voice(1000, 10), VoiceReply::Always).params().unwrap()["voice_reply"], "always");
+    assert_eq!(with(spoken("привет"), VoiceReply::Auto).params().unwrap()["voice_reply"], "auto");
+    assert_eq!(with(spoken("привет"), VoiceReply::Off).params().unwrap()["voice_reply"], "off");
+    let shot = Image { mime: "image/jpeg".into(), data: vec![1; 10], long_edge: 100 };
+    let screen = OwnerMessage { mode: Mode::ScreenVoice, images: vec![shot], ..spoken("что тут") };
+    assert_eq!(with(screen, VoiceReply::Always).params().unwrap()["voice_reply"], "always");
+    // Not set: not sent (an old app, byte for byte).
+    assert!(voice(1000, 10).params().unwrap().get("voice_reply").is_none());
+    // A line of text is always answered in text.
+    let text = OwnerMessage { mode: Mode::Text, text: "hi".into(), audio: None, voice_transcript: None, ..voice(0, 0) };
+    assert!(with(text, VoiceReply::Always).params().unwrap().get("voice_reply").is_none());
+}
+
+#[tokio::test]
+async fn the_voice_reply_goes_only_to_a_synth_that_announces_it() {
+    let (core, mut q) = linked(&[("new", WITH_VOICE), ("old", WITH_STT)]);
+    let shared = core.shared();
+    assert!(supports_voice_reply(&shared.slot("new").unwrap()));
+    assert!(!supports_voice_reply(&shared.slot("old").unwrap()));
+    let view = core.island_view();
+    assert_eq!(view.voice_reply.get("new"), Some(&true));
+    assert_eq!(view.voice_reply.get("old"), Some(&false));
+    for (i, id) in ["new", "old"].into_iter().enumerate() {
+        let call = tokio::spawn({
+            let shared = shared.clone();
+            async move { send(&shared, id, &OwnerMessage { voice_reply: Some(VoiceReply::Always), ..spoken("привет") }).await }
+        });
+        let sent = q[i].recv().await.unwrap();
+        if id == "new" {
+            assert_eq!(sent["params"]["voice_reply"], "always");
+        } else {
+            assert!(sent["params"].get("voice_reply").is_none(), "a synth without the feature gets no voice_reply");
+        }
+        shared.slot(id).unwrap().requests.resolve(&json!({"type": "response", "id": sent["id"], "result": {"accepted": true, "message_id": "m-1"}}));
+        assert_eq!(call.await.unwrap().unwrap(), "m-1");
+    }
+}
+
+#[test]
+fn speech_types_are_read_with_their_usual_aliases() {
+    assert_eq!(speech_mime("audio/mpeg"), Some("audio/mpeg"));
+    assert_eq!(speech_mime("Audio/MP3"), Some("audio/mpeg"));
+    assert_eq!(speech_mime("audio/wav"), Some("audio/wav"));
+    assert_eq!(speech_mime("audio/x-wav"), Some("audio/wav"));
+    assert_eq!(speech_mime("audio/ogg; codecs=opus"), Some("audio/ogg"));
+    assert_eq!(speech_mime("audio/opus"), Some("audio/ogg"));
+    assert_eq!(speech_mime("audio/aac"), None);
+    assert_eq!(speech_mime(""), None);
+}
+
+#[tokio::test]
+async fn a_spoken_answer_reaches_the_shell_with_its_audio() {
+    use base64::Engine;
+    let (core, _q) = linked(&[("mia", WITH_VOICE)]);
+    let mut events = core.subscribe();
+    core.set_island(|i| i.enabled = true);
+    while events.try_recv().is_ok() {}
+
+    let audio = vec![0xffu8, 0xfb, 0x90, 0x44, 1, 2, 3];
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&audio);
+    let ok = event_from(
+        &core,
+        "mia",
+        json!({"kind": "speech", "message_id": "m-9", "audio": {"mime": "audio/mpeg", "data": b64}, "text": "Нашла рейс\nна 9:40", "duration_ms": 2100}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ok, json!({"ok": true}));
+    match events.try_recv() {
+        Ok(CoreEvent::IslandSpeech(s)) => {
+            assert_eq!(s.synth_id, "mia");
+            assert_eq!(s.message_id, "m-9");
+            assert_eq!(s.mime, "audio/mpeg");
+            assert_eq!(*s.audio.0, audio);
+            assert_eq!(s.text, "Нашла рейс на 9:40");
+            assert_eq!(s.duration_ms, Some(2100));
+            // Never printed: the debug line says the size only.
+            assert!(format!("{s:?}").contains("<7 bytes of audio>"));
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // "b64" (owner.message's own key) is read too, and an alias of the type.
+    event_from(&core, "mia", json!({"kind": "speech", "message_id": "m", "audio": {"mime": "audio/x-wav", "b64": "AAEC"}})).await.unwrap();
+    assert!(matches!(events.try_recv(), Ok(CoreEvent::IslandSpeech(s)) if s.mime == "audio/wav" && s.text.is_empty() && s.duration_ms.is_none()));
+
+    // Refused, with a reason for the synth's log.
+    let bad_type = event_from(&core, "mia", json!({"kind": "speech", "audio": {"mime": "audio/aac", "data": "AAEC"}})).await.unwrap_err();
+    assert!(bad_type.contains("not played here"), "{bad_type}");
+    let no_audio = event_from(&core, "mia", json!({"kind": "speech", "message_id": "m"})).await.unwrap_err();
+    assert!(no_audio.starts_with("bad request"), "{no_audio}");
+    let not_b64 = event_from(&core, "mia", json!({"kind": "speech", "audio": {"mime": "audio/mpeg", "data": "%%%"}})).await.unwrap_err();
+    assert!(not_b64.contains("base64"), "{not_b64}");
+    let huge = "A".repeat(MAX_SPEECH_BYTES / 3 * 4 + 400);
+    let too_big = event_from(&core, "mia", json!({"kind": "speech", "audio": {"mime": "audio/mpeg", "data": huge}})).await.unwrap_err();
+    assert!(too_big.starts_with("too_large"), "{too_big}");
+    assert!(events.try_recv().is_err(), "nothing refused reaches the shell");
+
+    // About 90 s of mp3 (1.5 MB, 2 MB of base64) fits.
+    let big = base64::engine::general_purpose::STANDARD.encode(vec![7u8; 1_500_000]);
+    event_from(&core, "mia", json!({"kind": "speech", "message_id": "m", "audio": {"mime": "audio/mpeg", "data": big}})).await.unwrap();
+    assert!(matches!(events.try_recv(), Ok(CoreEvent::IslandSpeech(s)) if s.audio.0.len() == 1_500_000));
+
+    // The island switched off since the message went: the answer still
+    // plays (the shell decides); every other kind is refused.
+    core.set_island(|i| i.enabled = false);
+    while events.try_recv().is_ok() {}
+    event_from(&core, "mia", json!({"kind": "speech", "message_id": "m", "audio": {"mime": "audio/mpeg", "data": "AAEC"}})).await.unwrap();
+    assert!(matches!(events.try_recv(), Ok(CoreEvent::IslandSpeech(_))));
+    assert!(event_from(&core, "mia", json!({"kind": "done", "message_id": "m"})).await.unwrap_err().starts_with("denied: "));
+}
+
+/// The shell's sink answers within the synth's rpc: taken (playback goes
+/// on after the answer) or refused with its reason, which the synth reads
+/// as "this computer will not play it" (under auto: a voice note to the
+/// chat instead).
+#[tokio::test]
+async fn the_shell_answers_a_spoken_answer_within_the_rpc() {
+    let (core, _q) = linked(&[("mia", WITH_VOICE)]);
+    core.set_island(|i| i.enabled = true);
+    let mut events = core.subscribe();
+    while events.try_recv().is_ok() {}
+    let taken = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = taken.clone();
+    core.set_speech_sink(Arc::new(move |s: IslandSpeech| {
+        if s.message_id == "om_refused" {
+            return Err("unavailable: a call, the microphone is in use".into());
+        }
+        seen.lock().unwrap().push(s.message_id);
+        Ok(())
+    }));
+    let ev = |id: &str| json!({"kind": "speech", "message_id": id, "audio": {"mime": "audio/ogg", "data": "AAEC"}, "text": "hi"});
+    assert_eq!(event_from(&core, "mia", ev("om_1")).await.unwrap(), json!({"ok": true}));
+    let refused = event_from(&core, "mia", ev("om_refused")).await.unwrap_err();
+    assert!(refused.starts_with("unavailable: a call"), "{refused}");
+    assert_eq!(*taken.lock().unwrap(), vec!["om_1".to_string()]);
+    // With a sink nothing goes out as an event.
+    assert!(events.try_recv().is_err());
+    // Whatever the synth sizes to the advertised line (its room: the line
+    // less its slack and the text, as base64) is within the limit here.
+    let synth_room = (crate::rpc::MAX_REQUEST_LINE - 1024) / 4 * 3;
+    assert!(synth_room <= MAX_SPEECH_BYTES && b64_len(MAX_SPEECH_BYTES) <= crate::rpc::MAX_REQUEST_LINE);
 }

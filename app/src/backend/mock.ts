@@ -75,6 +75,7 @@
 
 import type {
   IslandPositionChoice,
+  VoiceReply,
   AccountState,
   AccountSynth,
   LinkBrief,
@@ -2029,8 +2030,8 @@ class MockBackend implements Backend {
 
   // --- the island ---
 
-  islandSet(enabled: boolean | null, mainSynth: string | null, position?: IslandPositionChoice) {
-    return this.islandScreen.set(enabled, mainSynth, position);
+  islandSet(enabled: boolean | null, mainSynth: string | null, position?: IslandPositionChoice, voiceReply?: VoiceReply) {
+    return this.islandScreen.set(enabled, mainSynth, position, voiceReply);
   }
 
   islandHotkeySet(which: HotkeyKind, accelerator: string) {
@@ -2087,6 +2088,10 @@ class MockBackend implements Backend {
 
   islandWakeDelete() {
     return this.islandScreen.wakeDelete();
+  }
+
+  islandSpeechStop() {
+    return this.islandWin.speechStop();
   }
 
   islandWakeCancel() {

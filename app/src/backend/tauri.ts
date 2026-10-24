@@ -66,8 +66,14 @@ export const tauriBackend: Backend = {
   diagnostics: () => invoke("diagnostics"),
   openExternal: (target) => invoke("open_external", { target }),
 
-  islandSet: (enabled, mainSynth, position) =>
-    invoke("island_set", { enabled, mainSynth, vertical: position?.vertical ?? null, horizontal: position?.horizontal ?? null }),
+  islandSet: (enabled, mainSynth, position, voiceReply) =>
+    invoke("island_set", {
+      enabled,
+      mainSynth,
+      vertical: position?.vertical ?? null,
+      horizontal: position?.horizontal ?? null,
+      voiceReply: voiceReply ?? null,
+    }),
   islandHotkeySet: (which, accelerator) => invoke("island_hotkey_set", { which, accelerator }),
   islandHotkeyReset: (which) => invoke("island_hotkey_reset", { which }),
   faceRefresh: (synthId) => invoke("face_refresh", { synthId }),
@@ -96,6 +102,7 @@ export const tauriBackend: Backend = {
   islandSttOffer: (accept) => invoke("island_stt_offer", { accept }),
   islandSttCardHide: () => invoke("island_stt_card_hide"),
   islandWakeCancel: () => invoke("island_wake_cancel"),
+  islandSpeechStop: () => invoke("island_speech_stop"),
   subscribeIsland(listener) {
     let stopped = false;
     const offs: Array<() => void> = [];

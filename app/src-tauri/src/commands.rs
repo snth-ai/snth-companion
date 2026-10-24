@@ -1051,10 +1051,16 @@ pub async fn island_set(
     main_synth: Option<String>,
     vertical: Option<String>,
     horizontal: Option<String>,
+    voice_reply: Option<String>,
 ) -> Result<UiState, String> {
     if enabled == Some(true) && !crate::island::supported_os() {
         return Err("unsupported".into());
     }
+    // "always", "auto", "off" (tz-voice-reply.md).
+    let voice_reply = match voice_reply.as_deref().map(str::trim) {
+        None => None,
+        Some(v) => Some(connect_core::island::VoiceReply::parse(v).ok_or("bad_voice_reply")?),
+    };
     if let Some(id) = &main_synth {
         if !id.is_empty() && !ctx.core.link_ids().contains(id) {
             return Err("unknown_synth".into());
@@ -1079,7 +1085,14 @@ pub async fn island_set(
             i.main_synth = id;
         }
         i.position = position;
+        if let Some(v) = voice_reply {
+            i.voice_reply = Some(v);
+        }
     });
+    // Text only from now on: an answer that plays stops.
+    if voice_reply == Some(connect_core::island::VoiceReply::Off) && voice_reply != before.voice_reply {
+        crate::island::stop_speech(&ctx, "the owner chose text only");
+    }
     // Just switched on: read every linked synth's face.
     if now.enabled && !before.enabled {
         for id in ctx.core.link_ids() {
@@ -1308,6 +1321,13 @@ pub async fn island_stop(ctx: Cx<'_>) -> Result<(), String> {
         ui::notify_paused(&ctx.app);
     }
     Ok(())
+}
+
+/// The island window: a click on the island while the synth speaks
+/// stops its voice.
+#[tauri::command]
+pub fn island_speech_stop(ctx: Cx<'_>) {
+    crate::island::stop_speech(&ctx, "a click on the island");
 }
 
 /// The island window: open the app (its Island screen).

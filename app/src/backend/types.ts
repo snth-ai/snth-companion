@@ -403,6 +403,10 @@ export type SttMode = "synth" | "device";
  * Latin letters) or NVIDIA Parakeet (much faster). Each has its own
  * model. */
 export type SttEngine = "whisper" | "parakeet";
+/** How the synth answers a voice message from the island: aloud on this
+ * computer every time (the default), when it chooses to speak, or in
+ * text only. A typed message always gets text. */
+export type VoiceReply = "always" | "auto" | "off";
 /** The synth's one-time offer of on-device speech-to-text. */
 export type SttOffer = "pending" | "shown" | "accepted" | "declined";
 
@@ -427,12 +431,15 @@ export interface IslandSettings {
   /** Where the island sits; {} = this system's default. Missing from an
    * older shell: the default. */
   position?: IslandPosition;
+  /** The synth's voice reply; missing = "always" (the default, and an
+   * older shell). */
+  voice_reply?: VoiceReply;
 }
 
 /** Why wake by name does not listen at all yet. */
 export type WakeNeed = "island" | "synth" | "mic" | "model" | "loading";
 /** Why it paused by itself. */
-export type WakePause = "app_paused" | "hold" | "locked" | "mic_busy" | "bt_mic";
+export type WakePause = "app_paused" | "hold" | "locked" | "mic_busy" | "bt_mic" | "speaking";
 /** What wake by name does now. "woke": the name was heard, the request
  * is being recorded (the island shows it as a hold). */
 export type WakeStatus =
@@ -504,6 +511,9 @@ export interface IslandState {
   supported: Record<string, boolean>;
   /** synth_id -> it takes a voice message as text recognized here. */
   device_stt: Record<string, boolean>;
+  /** synth_id -> it can answer a voice message with its voice here
+   * (announced `island_voice_reply`). Missing from an older shell. */
+  voice_reply?: Record<string, boolean>;
   /** On-device speech-to-text. */
   stt: SttState;
   /** Wake by name. */
@@ -585,6 +595,16 @@ export interface IslandMessage {
   channel: string;
 }
 
+/** The synth speaks its answer on this computer right now. */
+export interface IslandSpeaking {
+  message_id: string;
+  /** The words being spoken. */
+  text: string;
+  /** When it began (unix ms), and how long it is. */
+  since_ms: number;
+  ms: number;
+}
+
 export interface IslandNotice {
   code: string;
   detail: string;
@@ -627,6 +647,8 @@ export interface IslandView {
   stt_card: SttCard | null;
   /** Wake by name: the dot in the right ear while it listens. */
   wake: WakeStatus;
+  /** The synth's spoken answer plays now (missing from an older shell). */
+  speaking?: IslandSpeaking | null;
 }
 
 export type IslandSignal =
@@ -893,7 +915,7 @@ export interface Backend {
   // --- the island: the Island screen ---
   /** `position`: the owner's spot, each axis "default" for this
    * system's own. Err: unsupported, unknown_synth, bad_position. */
-  islandSet(enabled: boolean | null, mainSynth: string | null, position?: IslandPositionChoice): Promise<UiState>;
+  islandSet(enabled: boolean | null, mainSynth: string | null, position?: IslandPositionChoice, voiceReply?: VoiceReply): Promise<UiState>;
   /** Err: bad_shortcut, conflict:<voice|screen_voice|text|stop>, shortcut_unavailable. */
   islandHotkeySet(which: HotkeyKind, accelerator: string): Promise<UiState>;
   islandHotkeyReset(which: HotkeyKind): Promise<UiState>;
@@ -943,6 +965,8 @@ export interface Backend {
   islandSttCardHide(): Promise<void>;
   /** A click on the island while a wake records: cancel it. */
   islandWakeCancel(): Promise<void>;
+  /** A click on the island while the synth speaks: stop its voice. */
+  islandSpeechStop(): Promise<void>;
   /** The island window's own signals: its view, the gaze, the mic level. */
   subscribeIsland(listener: (signal: IslandSignal) => void): () => void;
 

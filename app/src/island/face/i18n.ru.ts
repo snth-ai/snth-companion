@@ -111,6 +111,7 @@ export const faceRu: FaceStrings = {
     idle: "Ждет",
     sleeping: "Спит",
     listening: "Слушает",
+    speaking: "Говорит",
     accepted: "Принято",
     thinking: "Думает",
     working: "Работает",

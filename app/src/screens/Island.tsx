@@ -5,10 +5,13 @@
 // through the synth (the default) or on this computer, with the model's
 // download, status and removal. Wake by name: the switch, the names it
 // answers to, an extra phrase, what it does now, its own small model.
+// Reply with voice (tz-voice-reply.md): always (the default), the synth
+// decides, or text only; shown even when the synth cannot do it yet,
+// with a note saying so.
 
 import { useEffect, useRef, useState } from "react";
 import { backend } from "../backend";
-import type { FaceConfig, HotkeyKind, IslandAlign, IslandEdge, SttEngine, SttMode, UiState } from "../backend/types";
+import type { FaceConfig, HotkeyKind, IslandAlign, IslandEdge, SttEngine, SttMode, UiState, VoiceReply } from "../backend/types";
 import { FaceEditor } from "../island/faceApi";
 import { sttEngines } from "../island/sttView";
 import { acceleratorFromEvent, formatBytes, shortcutKeys } from "../lib/format";
@@ -96,6 +99,29 @@ function PositionSection() {
           </div>
         </div>
       </div>
+    </Section>
+  );
+}
+
+/** How the synth answers a voice message: aloud here, its choice, or
+ * text only. */
+function VoiceReplySection(props: { name: string; canSpeak: boolean }) {
+  const { state, s, act } = useStore();
+  const t = s.island;
+  const value: VoiceReply = state.island.settings.voice_reply ?? "always";
+  return (
+    <Section title={t.voiceReply} note={t.voiceReplyNote(props.name)}>
+      {!props.canSpeak && value !== "off" ? <Notice kind="info">{t.voiceReplyOld(props.name)}</Notice> : null}
+      <ChoiceList<VoiceReply>
+        label={t.voiceReply}
+        value={value}
+        options={[
+          { value: "always", title: t.voiceReplyAlways, desc: t.voiceReplyAlwaysDesc },
+          { value: "auto", title: t.voiceReplyAuto, desc: t.voiceReplyAutoDesc(props.name) },
+          { value: "off", title: t.voiceReplyOff, desc: t.voiceReplyOffDesc },
+        ]}
+        onChange={(next) => void act(() => backend.islandSet(null, null, undefined, next))}
+      />
     </Section>
   );
 }
@@ -645,6 +671,8 @@ export function Island() {
               </Section>
 
               <SttSection name={name} takesText={mainId ? isl.device_stt[mainId] === true : false} />
+
+              <VoiceReplySection name={name} canSpeak={mainId ? isl.voice_reply?.[mainId] === true : false} />
 
               {isl.wake?.available ? <WakeSection name={name} /> : null}
 

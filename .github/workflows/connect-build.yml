@@ -57,6 +57,12 @@ jobs:
       - name: Island tests
         run: cargo test -p snth-connect "island::"
 
+      # The synth's spoken answer through WASAPI on the runner: a short
+      # mp3 decoded and played to the end on the default output. A runner
+      # without an output device says so and passes (printed).
+      - name: Spoken answer, the output now
+        run: cargo test -p snth-connect "island::speak::tests::speak_real_device" -- --ignored --nocapture
+
       # What wake by name's Windows calls say on the runner (another app
       # recording, the lock, the input devices and their buses): printed.
       - name: Wake by name, the system now

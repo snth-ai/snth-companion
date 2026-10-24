@@ -21,7 +21,9 @@
 //!
 //! It pauses by itself (`pause.rs`, `system.rs`): while the app is paused,
 //! while a hold key is down, while the screen is locked, while another app
-//! records (a call). It never opens a Bluetooth microphone (`device.rs`:
+//! records (a call), while the synth's spoken answer plays here and
+//! `speak::TAIL` after it (so it never wakes on its own name; a wake that
+//! was being decoded when the answer began is dropped). It never opens a Bluetooth microphone (`device.rs`:
 //! that turns AirPods, or any headset, into a phone line): with a
 //! Bluetooth default it listens on the built-in microphone, and pauses
 //! where there is none. Whisper tiny and the voice detector are their own
@@ -346,6 +348,11 @@ fn start(ctx: &Arc<Ctx>, recording: audio::Recording) -> Result<u64, (audio::Rec
     if ctx.island.inner.lock().unwrap().text_open {
         return Err((recording, "the line of text is open".into()));
     }
+    // Never on the synth's own voice (the listener pauses while it
+    // speaks; this is a wake decoded just before the answer began).
+    if ctx.island.speaker.ears_off() {
+        return Err((recording, "the synth's answer plays".into()));
+    }
     let action = ctx.island.hold.lock().unwrap().down(HotkeyKind::Voice, Instant::now());
     if action != hold::Action::Start(HotkeyKind::Voice) {
         return Err((recording, "a hold runs".into()));
@@ -551,6 +558,7 @@ fn run(ctx: &Arc<Ctx>) {
             mic_busy: system.0,
             bt_only: matches!(mic, device::Mic::BluetoothOnly { .. }),
             woke,
+            speaking: !woke && ctx.island.speaker.ears_off(),
         };
         // Whisper tiny is in memory only while the mode is on.
         if Status::wants_ears(&inputs) {
@@ -571,7 +579,11 @@ fn run(ctx: &Arc<Ctx>) {
         let status = pause::status(&Inputs { ears_loaded: ears.is_some(), ..inputs });
         let before = std::mem::replace(&mut *wake.status.lock().unwrap(), status);
         if before != status {
-            if !matches!((before, status), (Status::Listening, Status::Woke) | (Status::Woke, Status::Listening)) {
+            // Every wake and every spoken answer would be two lines: the
+            // wake has its own, the answer its one line (`on_speech`).
+            let speaking = Status::Paused { reason: pause::Pause::Speaking };
+            let quiet = matches!((before, status), (Status::Listening, Status::Woke) | (Status::Woke, Status::Listening)) || before == speaking || status == speaking;
+            if !quiet {
                 connect_core::logln!("island: wake: {}", serde_json::to_string(&status).unwrap_or_default());
             }
             let ctx2 = ctx.clone();

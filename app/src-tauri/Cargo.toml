@@ -24,6 +24,15 @@ path = "src/bin/snth-connect-host.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# The synth's spoken answer on the island (island/speak.rs, tz-voice-reply
+# .md): decoded here, played through cpal on the default output (macOS, Windows).
+# Pure Rust, no C library in the build: symphonia for mp3 and WAV (0.5:
+# Rust 1.53; rodio would bring a second cpal and needs Rust 1.87), the
+# Ogg pages and a pure-Rust Opus decoder for Ogg Opus. Every target: the
+# decoder is plain code, built (and tested) on Linux too.
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "wav", "pcm"] }
+ogg = "0.9"
+opus-decoder = "0.1"
 connect-core = { path = "../../crates/connect-core" }
 connect-host = { path = "../../crates/connect-host" }
 # macos-private-api: a transparent window on macOS (the island draws its

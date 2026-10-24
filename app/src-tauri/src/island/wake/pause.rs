@@ -4,10 +4,11 @@
 //! the island on, the main synth linked, the microphone allowed, the
 //! models. Then it pauses by itself (`Pause`) while the app is paused,
 //! while a hold runs, while the screen is locked, while another app uses
-//! the microphone (a call), and while the only microphone is a Bluetooth
+//! the microphone (a call), while the only microphone is a Bluetooth
 //! headset's (`device.rs`: open all the time it ruins the headset's
-//! sound). A pause stops the microphone; the island
-//! and Settings say why.
+//! sound), and while the synth's spoken answer plays here, with a short
+//! tail after it (`speak.rs`: it would hear its own name). A pause stops
+//! the microphone; the island and Settings say why.
 
 use serde::Serialize;
 
@@ -41,6 +42,8 @@ pub enum Pause {
     MicBusy,
     /// The only microphone is in a Bluetooth headset.
     BtMic,
+    /// The synth's answer plays on this computer (and a moment after).
+    Speaking,
 }
 
 /// What the island and Settings show.
@@ -74,6 +77,9 @@ pub struct Inputs {
     pub bt_only: bool,
     /// A wake of ours is recording.
     pub woke: bool,
+    /// The synth's answer plays here, or ended a moment ago
+    /// (`Speaker::ears_off`).
+    pub speaking: bool,
 }
 
 /// The status, in this order: what is missing, then why it pauses.
@@ -108,6 +114,8 @@ pub fn status(i: &Inputs) -> Status {
         Some(Pause::MicBusy)
     } else if i.bt_only {
         Some(Pause::BtMic)
+    } else if i.speaking {
+        Some(Pause::Speaking)
     } else if i.holding {
         Some(Pause::Hold)
     } else {
@@ -169,6 +177,10 @@ mod tests {
         assert_eq!(paused(Inputs { mic_busy: true, holding: true, ..ready() }), Some(Pause::MicBusy));
         assert_eq!(paused(Inputs { app_paused: true, locked: true, ..ready() }), Some(Pause::AppPaused));
         assert!(!status(&Inputs { mic_busy: true, ..ready() }).listens(), "the microphone closes");
+        // The synth's own voice: never heard as a wake.
+        assert_eq!(paused(Inputs { speaking: true, ..ready() }), Some(Pause::Speaking));
+        assert!(!status(&Inputs { speaking: true, ..ready() }).listens(), "the microphone closes while the synth speaks");
+        assert_eq!(serde_json::to_value(status(&Inputs { speaking: true, ..ready() })).unwrap(), serde_json::json!({"state": "paused", "reason": "speaking"}));
         // The call ended.
         assert_eq!(status(&ready()), Status::Listening);
         // Its own wake is not a pause.

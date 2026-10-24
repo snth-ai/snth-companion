@@ -17,13 +17,19 @@
 //         wakecall = paused, another app uses the microphone; wakebt =
 //         paused, the only microphone is in AirPods; wakemic = waiting
 //         for the microphone (on Windows: its privacy settings refused
-//         it). With &os=windows the Windows texts and file sizes)
+//         it). With &os=windows the Windows texts and file sizes. Voice
+//         reply: &voice=always|auto|off is the owner's choice (default
+//         always); island=voiceold = on, but Mia does not answer with her
+//         voice yet)
 //   island.html?island=idle|hover|listening|screen|sending|accepted|thinking|
 //        working|driving|done|error|approval|text|offline|outdated|
 //        micdenied|asking|paused|two|shot|live|liveloading|livesent|
 //        heardnothing|offer|offerdl|offerready|offerfail|wakeidle|
-//        wakepaused|woke|wokename
-//        (live = a hold with its words recognized on this computer;
+//        wakepaused|woke|wokename|speaking|speakingwake
+//        (speaking = Mia speaks her answer on this computer (the face
+//         talks with the voice's level, the summary under it; a click
+//         stops it); speakingwake = the same with wake by name on: the
+//         dot paused while she speaks; live = a hold with its words recognized on this computer;
 //         liveloading = the same while the model is still loading;
 //         heardnothing = a hold dropped as silence by the voice detector;
 //         livesent = the text going after the release; offer = Mia's offer
@@ -75,6 +81,7 @@ import type {
   SttModelStatus,
   UiState,
   WakeStatus,
+  VoiceReply,
   IslandPosition,
   IslandPositionChoice,
 } from "./types";
@@ -175,6 +182,10 @@ export function stagedIslandState(os: string, links: LinkBrief[]): IslandState {
   const pkModel: SttModelStatus = win && stt ? sttModelOf(scenario, pkSize) : scenario === "sttparakeet" ? { state: "ready" } : { state: "missing" };
   const deviceStt: Record<string, boolean> = {};
   for (const l of links) deviceStt[l.synth_id] = scenario !== "sttold";
+  const voiceReply: Record<string, boolean> = {};
+  for (const l of links) voiceReply[l.synth_id] = !(scenario === "voiceold" && l.synth_id === "mia");
+  const voiceParam = params.get("voice");
+  const voiceChoice: VoiceReply | undefined = voiceParam === "auto" || voiceParam === "off" || voiceParam === "always" ? voiceParam : undefined;
   const model: SttModelStatus = scenario === "sttparakeet" ? { state: "missing" } : sttModelOf(scenario, STT_SIZE);
   const wakeOn = scenario.startsWith("wake") && scenario !== "wakeintel";
   const wakeSize = win ? WAKE_WIN_SIZE : WAKE_SIZE;
@@ -204,11 +215,13 @@ export function stagedIslandState(os: string, links: LinkBrief[]): IslandState {
       wake_phrase: "",
       stt_tone: true,
       position: stagedPosition(),
+      ...(voiceChoice ? { voice_reply: voiceChoice } : {}),
     },
     main_synth: mainId,
     faces: scenario === "off" ? {} : { mia: MIA_FACE },
     supported,
     device_stt: deviceStt,
+    voice_reply: voiceReply,
     stt: {
       available: (os === "macos" && scenario !== "sttintel") || win,
       choices: win ? ["parakeet"] : ["whisper", "parakeet"],
@@ -244,8 +257,9 @@ export class MockIslandScreen {
     private changed: () => Promise<UiState>,
   ) {}
 
-  set(enabled: boolean | null, mainSynth: string | null, position?: IslandPositionChoice): Promise<UiState> {
+  set(enabled: boolean | null, mainSynth: string | null, position?: IslandPositionChoice, voiceReply?: VoiceReply): Promise<UiState> {
     const isl = this.state().island;
+    if (voiceReply) isl.settings.voice_reply = voiceReply;
     if (position) {
       const next: IslandPosition = { ...(isl.settings.position ?? {}) };
       if (position.vertical === "default") delete next.vertical;
@@ -583,6 +597,10 @@ function notchPlacement(os: string, top: number): IslandPlacement {
   };
 }
 
+/** What Mia says aloud in the mock. */
+const SPOKEN_EN = "Found a Friday flight at 9:40, 214 euros with a bag. The details are in Telegram.";
+const SPOKEN_RU = "Нашла рейс в пятницу в 9:40, 214 евро с багажом. Подробности в Telegram.";
+
 const APPROVAL: ApprovalRequest = {
   id: 1,
   capability: "cookies",
@@ -637,7 +655,15 @@ export class MockIslandWindow {
       transcript: null,
       stt_loading: scenario === "liveloading",
       stt_card: null,
-      wake: scenario === "wakepaused" ? { state: "paused", reason: "mic_busy" } : scenario.startsWith("wake") || scenario.startsWith("woke") ? { state: "listening" } : { state: "off" },
+      wake:
+        scenario === "wakepaused"
+          ? { state: "paused", reason: "mic_busy" }
+          : scenario === "speakingwake"
+            ? { state: "paused", reason: "speaking" }
+            : scenario.startsWith("wake") || scenario.startsWith("woke")
+              ? { state: "listening" }
+              : { state: "off" },
+      speaking: null,
     };
     const ru = lang === "ru";
     const spoken = ru
@@ -712,6 +738,15 @@ export class MockIslandWindow {
         this.view.wake = { state: "woke" };
         this.view.transcript = ru ? "Мия." : "Mia.";
         break;
+      case "speaking":
+      case "speakingwake": {
+        const said = ru ? SPOKEN_RU : SPOKEN_EN;
+        this.view.message = { ...msg("done", said) };
+        this.view.speaking = { message_id: "m-1", text: said, since_ms: now, ms: 3_600_000 };
+        // The voice's level, for as long as a reviewer looks.
+        this.speakLevels(3_600_000 / 50);
+        break;
+      }
     }
     // Stills stay still: no notice expires while a reviewer looks.
     if (this.view.notice) this.view.notice.at_ms = now + 3_600_000;
@@ -740,6 +775,7 @@ export class MockIslandWindow {
 
   private busy(): boolean {
     const v = this.view;
+    if (v.speaking) return true;
     const now = Date.now();
     const m = v.message;
     const fresh = m ? (m.stage === "accepted" ? now - m.at_ms < 1500 : (m.stage === "done" || m.stage === "error") && now - m.at_ms < 6000) : false;
@@ -828,6 +864,8 @@ export class MockIslandWindow {
 
   /** A hold of the voice key: listening with a level, then the answer. */
   playHold(kind: "voice" | "screen_voice") {
+    // Barge-in: the owner talks over Mia's voice.
+    if (this.view.speaking) this.endSpeech(this.view.wake);
     this.view.hold = kind;
     this.view.hold_since_ms = Date.now();
     this.view.message = null;
@@ -844,6 +882,8 @@ export class MockIslandWindow {
   /** A hold with on-device speech-to-text: the words come as the owner
    * talks, the text goes on release. */
   playLiveHold() {
+    // Barge-in: the owner talks over Mia's voice.
+    if (this.view.speaking) this.endSpeech(this.view.wake);
     const ru = this.view.lang === "ru";
     const words = (
       ru
@@ -878,6 +918,8 @@ export class MockIslandWindow {
    * island opens listening as for a hold, the words come, a second of
    * silence sends it (the name stripped), the answer follows. */
   playWake(nameOnly = false) {
+    // Barge-in: the owner talks over Mia's voice.
+    if (this.view.speaking) this.endSpeech(this.view.wake);
     const ru = this.view.lang === "ru";
     const name = ru ? "Мия" : "Mia";
     const request = (ru ? "найди билеты в Бангкок на пятницу" : "find me tickets to Bangkok for Friday").split(" ");
@@ -915,6 +957,56 @@ export class MockIslandWindow {
       this.send({ type: "level", level: 0 });
       this.playAnswer();
     });
+  }
+
+  /** A level like a voice's, every 50 ms (the face's mouth follows it). */
+  private speakLevels(n: number) {
+    for (let i = 0; i < n; i++) {
+      this.later(i * 50, () => {
+        if (!this.view.speaking) return;
+        // Syllables (about 5 a second) with short pauses between phrases.
+        const syl = Math.abs(Math.sin(i * 0.65)) * 0.75 + Math.random() * 0.25;
+        this.send({ type: "level", level: i % 40 > 34 ? 0.03 : syl });
+      });
+    }
+  }
+
+  /** Mia's answer spoken on this computer: the voice after "done", the
+   * face talking, then quiet (wake by name pauses meanwhile). */
+  playSpeech() {
+    const ru = this.view.lang === "ru";
+    const said = ru ? SPOKEN_RU : SPOKEN_EN;
+    this.view.hold = null;
+    this.view.notice = null;
+    this.view.stt_card = null;
+    const ms = 4200;
+    this.view.message = { synth_id: "mia", message_id: "m-3", stage: "done", at_ms: Date.now(), summary: said, channel: "telegram" };
+    this.view.speaking = { message_id: "m-3", text: said, since_ms: Date.now(), ms };
+    const wakeBefore = this.view.wake;
+    if (wakeBefore.state === "listening") this.view.wake = { state: "paused", reason: "speaking" };
+    this.changed();
+    this.speakLevels(ms / 50);
+    this.later(ms, () => this.endSpeech(wakeBefore));
+  }
+
+  private endSpeech(wakeBefore: WakeStatus) {
+    if (!this.view.speaking) return;
+    this.view.speaking = null;
+    this.send({ type: "level", level: 0 });
+    this.changed();
+    // The ears come back after the tail.
+    this.later(300, () => {
+      if (this.view.wake.state === "paused" && this.view.wake.reason === "speaking") {
+        this.view.wake = wakeBefore.state === "paused" && wakeBefore.reason === "speaking" ? { state: "listening" } : wakeBefore;
+        this.changed();
+      }
+    });
+  }
+
+  /** A click on the island while Mia speaks: her voice stops. */
+  speechStop() {
+    this.endSpeech(this.view.wake);
+    return Promise.resolve();
   }
 
   /** The listener pauses for a call, and comes back after it. */

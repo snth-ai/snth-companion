@@ -46,6 +46,8 @@ const SCENARIOS = [
   "wakepaused",
   "woke",
   "wokename",
+  "speaking",
+  "speakingwake",
 ];
 
 const POSITIONS = [
@@ -200,6 +202,9 @@ export function IslandStage() {
         </button>
         <button type="button" className="btn small" onClick={() => win.playAnswer(true)}>
           answer fails
+        </button>
+        <button type="button" className="btn small" onClick={() => win.playSpeech()}>
+          answer aloud
         </button>
         <button type="button" className="btn small" onClick={() => win.playApproval()}>
           request
