@@ -432,8 +432,9 @@ function PendingCard({
   const [editing, setEditing] = useState(false)
   const [text, setText] = useState(p.draft_text)
   const attachment = parseAttachment(p.attachment_json)
+  const failed = p.status === "failed"
   return (
-    <Card>
+    <Card className={failed ? "border-destructive" : undefined}>
       <CardHeader>
         <CardTitle className="text-sm flex items-center justify-between">
           <span className="flex items-center gap-2">
@@ -446,6 +447,9 @@ function PendingCard({
                 {attachment.kind}
               </Badge>
             )}
+            {failed && (
+              <Badge variant="destructive">delivery failed</Badge>
+            )}
           </span>
           <span className="text-xs opacity-60 flex items-center gap-1">
             <Clock className="w-3 h-3" />
@@ -454,6 +458,19 @@ function PendingCard({
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
+        {failed && p.last_error && (
+          // Mia outbound silent-fail 2026-05-25 — surface the actual
+          // Telegram/transport rejection so the operator sees why the
+          // post did not go out instead of staring at a green queue.
+          <div className="text-xs bg-destructive/10 border border-destructive/40 text-destructive p-2 rounded font-mono whitespace-pre-wrap">
+            {p.failed_at && (
+              <div className="opacity-70 mb-1">
+                {new Date(p.failed_at).toLocaleString()}
+              </div>
+            )}
+            {p.last_error}
+          </div>
+        )}
         {attachment && <AttachmentPreview a={attachment} />}
         {editing ? (
           <Textarea
