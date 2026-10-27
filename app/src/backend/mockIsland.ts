@@ -58,6 +58,17 @@
 //         bar and the island back, as the shell does. &face=<preset>
 //         puts that preset on Mia instead of her own look, e.g.
 //         &face=buddy.)
+//        &limits=claude|codex|blocked|stale|none adds the synth's
+//         subscription limits to any of these (tz-island-limits.md):
+//         claude = Claude Max at 34% (5h) and 61% (week), no dot;
+//         codex = ChatGPT Plus at 85%: the yellow dot, a yellow bar;
+//         blocked = Claude Max refused at 100%: the red dot; stale = a
+//         snapshot of 40 minutes ago with a third row (the Opus week);
+//         none (or no &limits) = a synth on another runtime: nothing.
+//         The block shows on hover (island=hover), the dot on the
+//         closed island (island=idle, or island=wakeidle beside the
+//         wake dot). &hover=1 opens any scenario as if the pointer were
+//         over it (island=done&hover=1&limits=claude: the tallest case).
 //
 // Nothing here touches the network or the computer.
 
@@ -68,6 +79,7 @@ import type {
   FaceSetResult,
   HotkeyKind,
   Hotkeys,
+  IslandLimits,
   IslandNotice,
   IslandPlacement,
   IslandRect,
@@ -101,6 +113,60 @@ export const WAKE_SIZE = 885_098 + 32_152_673;
 export const WAKE_WIN_SIZE = 2_327_524 + 32_152_673;
 
 const params = new URLSearchParams(window.location.search);
+
+/** The staged subscription limits (`&limits=`), or null. */
+export function stagedLimits(now: number): IslandLimits | null {
+  const kind = params.get("limits");
+  const at = (ms: number) => new Date(now + ms).toISOString();
+  const h = 3_600_000;
+  const win = (id: string, ru: string, en: string, pct: number, resetsIn: number) => ({
+    id,
+    label_ru: ru,
+    label_en: en,
+    used_pct: pct,
+    resets_at: at(resetsIn),
+  });
+  const base = { blocked: false, fetched_at: at(-60_000), received_ms: now - 60_000 };
+  switch (kind) {
+    case "claude":
+      return {
+        ...base,
+        provider: "claude",
+        plan: "Claude Max",
+        windows: [win("five_hour", "5ч", "5h", 34, 2.3 * h), win("seven_day", "неделя", "week", 61.4, 4.5 * 24 * h)],
+      };
+    case "codex":
+      return {
+        ...base,
+        provider: "codex",
+        plan: "ChatGPT Plus",
+        windows: [win("five_hour", "5ч", "5h", 85, 1.6 * h), win("seven_day", "неделя", "week", 47, 3.2 * 24 * h)],
+      };
+    case "blocked":
+      return {
+        ...base,
+        provider: "claude",
+        plan: "Claude Max",
+        blocked: true,
+        windows: [win("five_hour", "5ч", "5h", 100, 0.75 * h), win("seven_day", "неделя", "week", 72, 4.5 * 24 * h)],
+      };
+    case "stale":
+      return {
+        provider: "claude",
+        plan: "Claude Max",
+        blocked: false,
+        fetched_at: at(-40 * 60_000),
+        received_ms: now - 40 * 60_000,
+        windows: [
+          win("five_hour", "5ч", "5h", 12, 4.1 * h),
+          win("seven_day", "неделя", "week", 58, 4.5 * 24 * h),
+          win("seven_day_opus", "неделя Opus", "week Opus", 81, 4.5 * 24 * h),
+        ],
+      };
+    default:
+      return null;
+  }
+}
 
 export function defaultHotkeys(os: string): Hotkeys {
   return os === "macos"
@@ -493,6 +559,8 @@ export class MockIslandScreen {
 // --- the island window ---
 
 /** The stage's desktop (IslandStage), in points. */
+/** The island window's height (geometry.rs WINDOW_H). */
+export const WINDOW_H = 360;
 export const STAGE_W = 1512;
 export const STAGE_H = 520;
 /** The Windows taskbar on the stage. */
@@ -534,7 +602,7 @@ function spotPlacement(os: string): IslandPlacement | null {
   const above = area.y;
   const below = STAGE_H - (area.y + area.h);
   const w = 480;
-  const h = 300;
+  const h = WINDOW_H;
   const pw = 84;
   const ph = 28;
   const x = align === "left" ? area.x : align === "right" ? area.x + area.w - w : area.x + area.w / 2 - w / 2;
@@ -560,11 +628,11 @@ function placement(os: string): IslandPlacement {
   if (spot) return spot;
   if (os === "windows") {
     // As geometry.rs places it: a floating 84 x 28 pill 8 points above the
-    // taskbar (or under one on the top edge), in a 480 x 300 window kept
+    // taskbar (or under one on the top edge), in a 480 x 360 window kept
     // inside the work area.
     const top = params.get("taskbar") === "top";
     const w = 480;
-    const h = 300;
+    const h = WINDOW_H;
     const pill = { x: w / 2 - 42, y: top ? 8 : h - 8 - 28, w: 84, h: 28 };
     return {
       window: { x: STAGE_W / 2 - w / 2, y: top ? STAGE_TASKBAR : STAGE_H - STAGE_TASKBAR - h, w, h },
@@ -588,7 +656,7 @@ function notchPlacement(os: string, top: number): IslandPlacement {
   const w = 480;
   const ear = 84;
   return {
-    window: { x: 1512 / 2 - w / 2, y: top, w, h: 300 },
+    window: { x: 1512 / 2 - w / 2, y: top, w, h: WINDOW_H },
     notch: { x: w / 2 - notchW / 2, y: 0, w: notchW, h: notchH },
     pill: { x: w / 2 - notchW / 2 - ear, y: 0, w: notchW + 2 * ear, h: notchH },
     real_notch: real,
@@ -648,7 +716,8 @@ export class MockIslandWindow {
       message: null,
       notice: null,
       approval: scenario === "approval" ? { ...APPROVAL, asked_at_ms: now, expires_at_ms: now + 55_000 } : null,
-      hover: scenario === "hover" || scenario === "two",
+      // &hover=1: any scenario with the pointer over the island.
+      hover: scenario === "hover" || scenario === "two" || params.get("hover") === "1",
       hidden: false,
       hotkeys: defaultHotkeys(os),
       mic: scenario === "micdenied" ? "denied" : scenario === "asking" ? "not_asked" : "granted",
@@ -664,6 +733,7 @@ export class MockIslandWindow {
               ? { state: "listening" }
               : { state: "off" },
       speaking: null,
+      limits: stagedLimits(now),
     };
     const ru = lang === "ru";
     const spoken = ru

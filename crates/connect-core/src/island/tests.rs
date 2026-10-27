@@ -847,3 +847,134 @@ async fn the_shell_answers_a_spoken_answer_within_the_rpc() {
     let synth_room = (crate::rpc::MAX_REQUEST_LINE - 1024) / 4 * 3;
     assert!(synth_room <= MAX_SPEECH_BYTES && b64_len(MAX_SPEECH_BYTES) <= crate::rpc::MAX_REQUEST_LINE);
 }
+
+// --- subscription limits ---
+
+const WITH_LIMITS: &[&str] = &["requests", "island", "island_limits"];
+
+fn claude_limits() -> Value {
+    json!({
+        "provider": "claude",
+        "plan": "Claude Max",
+        "windows": [
+            {"id": "five_hour", "label_ru": "5ч", "label_en": "5h", "used_pct": 34, "resets_at": "2026-10-28T10:20:00Z"},
+            {"id": "seven_day", "label_ru": "неделя", "label_en": "week", "used_pct": 61.4, "resets_at": "2026-11-02T03:00:00Z"}
+        ],
+        "blocked": false,
+        "fetched_at": "2026-10-28T08:01:02Z"
+    })
+}
+
+#[test]
+fn limits_parse_the_wire_shape_and_null() {
+    let l = limits::parse(&json!({"kind": "limits", "limits": claude_limits()})).unwrap().unwrap();
+    assert_eq!(l.provider, "claude");
+    assert_eq!(l.plan, "Claude Max");
+    assert!(!l.blocked);
+    assert_eq!(l.fetched_at, "2026-10-28T08:01:02Z");
+    assert_eq!(l.windows.len(), 2);
+    assert_eq!(l.windows[0].id, "five_hour");
+    assert_eq!(l.windows[0].label_ru, "5ч");
+    assert_eq!(l.windows[0].label_en, "5h");
+    assert_eq!(l.windows[0].used_pct, 34.0);
+    assert_eq!(l.windows[0].resets_at, "2026-10-28T10:20:00Z");
+    assert_eq!(l.windows[1].used_pct, 61.4);
+    assert!(l.received_ms > 0);
+
+    // Null, or no limits at all: nothing to show.
+    assert_eq!(limits::parse(&json!({"kind": "limits", "limits": null})).unwrap(), None);
+    assert_eq!(limits::parse(&json!({"kind": "limits"})).unwrap(), None);
+    // Not an object: refused.
+    assert!(limits::parse(&json!({"limits": "full"})).unwrap_err().starts_with("bad request"));
+    assert!(limits::parse(&json!({"limits": [1]})).is_err());
+}
+
+#[test]
+fn limits_parse_defensively() {
+    // Unknown fields ignored, missing strings empty, no windows fine.
+    let l = limits::parse(&json!({"limits": {"provider": "codex", "extra_usage": {"usd": 5}}})).unwrap().unwrap();
+    assert_eq!(l.provider, "codex");
+    assert_eq!(l.plan, "");
+    assert!(l.windows.is_empty());
+    assert!(!l.blocked);
+    assert_eq!(l.fetched_at, "");
+
+    // A window without a number is dropped; percents are clamped; text clipped.
+    let l = limits::parse(&json!({"limits": {
+        "provider": "claude",
+        "plan": "x".repeat(200),
+        "blocked": true,
+        "windows": [
+            {"id": "a", "used_pct": "34"},
+            {"id": "b"},
+            {"id": "c", "used_pct": 140, "label_en": "w\neek"},
+            {"id": "d", "used_pct": -3},
+            "garbage",
+        ]
+    }}))
+    .unwrap()
+    .unwrap();
+    assert!(l.blocked);
+    assert_eq!(l.plan.chars().count(), 41);
+    assert_eq!(l.windows.iter().map(|w| w.id.as_str()).collect::<Vec<_>>(), ["c", "d"]);
+    assert_eq!(l.windows[0].used_pct, 100.0);
+    assert_eq!(l.windows[0].label_en, "w eek");
+    assert_eq!(l.windows[1].used_pct, 0.0);
+    assert_eq!(l.windows[1].resets_at, "");
+
+    // Windows is not a list: none.
+    let l = limits::parse(&json!({"limits": {"windows": {"five_hour": 3}}})).unwrap().unwrap();
+    assert!(l.windows.is_empty());
+    // At most six windows.
+    let many: Vec<Value> = (0..20).map(|i| json!({"id": format!("w{i}"), "used_pct": i})).collect();
+    assert_eq!(limits::parse(&json!({"limits": {"windows": many}})).unwrap().unwrap().windows.len(), 6);
+}
+
+#[tokio::test]
+async fn limits_events_are_kept_per_synth_while_the_link_is_up() {
+    let (core, _q) = linked(&[("mia", WITH_LIMITS), ("maya", BOTH)]);
+    core.set_island(|i| i.enabled = true);
+    let mut events = core.subscribe();
+    while events.try_recv().is_ok() {}
+
+    // No message_id needed.
+    let ok = event_from(&core, "mia", json!({"kind": "limits", "limits": claude_limits()})).await.unwrap();
+    assert_eq!(ok, json!({"ok": true}));
+    assert!(matches!(events.try_recv(), Ok(CoreEvent::Limits { synth_id }) if synth_id == "mia"));
+    let l = core.island_limits("mia").unwrap();
+    assert_eq!(l.plan, "Claude Max");
+    assert_eq!(l.windows.len(), 2);
+
+    // The same numbers again: kept, no news for the island.
+    event_from(&core, "mia", json!({"kind": "limits", "limits": claude_limits()})).await.unwrap();
+    assert!(events.try_recv().is_err());
+
+    // Garbage: refused, the last snapshot stays.
+    assert!(event_from(&core, "mia", json!({"kind": "limits", "limits": 7})).await.is_err());
+    assert_eq!(core.island_limits("mia").unwrap().plan, "Claude Max");
+
+    // A synth that did not announce the feature: nothing shown.
+    event_from(&core, "maya", json!({"kind": "limits", "limits": claude_limits()})).await.unwrap();
+    assert_eq!(core.island_limits("maya"), None);
+    while events.try_recv().is_ok() {}
+
+    // Null: gone (the runtime moved to GLM).
+    event_from(&core, "mia", json!({"kind": "limits", "limits": null})).await.unwrap();
+    assert!(matches!(events.try_recv(), Ok(CoreEvent::Limits { synth_id }) if synth_id == "mia"));
+    assert_eq!(core.island_limits("mia"), None);
+
+    // Back, then the link drops: gone with it, and stays gone after the
+    // link is back until the synth sends them again.
+    event_from(&core, "mia", json!({"kind": "limits", "limits": claude_limits()})).await.unwrap();
+    assert!(core.island_limits("mia").is_some());
+    let shared = core.shared();
+    let slot = shared.slot("mia").unwrap();
+    shared.set_slot_state(&slot, LinkState::Reconnecting, "read: reset");
+    assert_eq!(core.island_limits("mia"), None);
+    shared.set_slot_state(&slot, LinkState::Linked, "linked");
+    assert_eq!(core.island_limits("mia"), None);
+
+    // The island off: refused like every kind but speech.
+    core.set_island(|i| i.enabled = false);
+    assert!(event_from(&core, "mia", json!({"kind": "limits", "limits": claude_limits()})).await.unwrap_err().starts_with("denied"));
+}

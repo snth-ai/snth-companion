@@ -100,6 +100,9 @@ pub enum CoreEvent {
     /// A synth's face changed in the cache (read from it, set by the owner,
     /// or changed by the synth itself).
     Face { synth_id: String },
+    /// A synth's subscription limits changed, came, or went (island.rs
+    /// `limits`): see `Core::island_limits`.
+    Limits { synth_id: String },
     /// What a synth offers of `observe` changed (its descriptors arrived),
     /// or the owner's observe choices did (`synth_id` empty).
     Observe { synth_id: String },
@@ -257,6 +260,9 @@ pub struct Shared {
     pub(crate) faces_read: Mutex<std::collections::HashSet<String>>,
     /// Who takes the synth's spoken answers (the shell: `set_speech_sink`).
     pub(crate) speech_sink: RwLock<Option<crate::island::SpeechSink>>,
+    /// Each linked synth's last subscription limits (island/limits.rs).
+    /// Memory only; dropped when its link goes down.
+    pub(crate) island_limits: Mutex<std::collections::HashMap<String, crate::island::Limits>>,
     /// Where the synth last put its own pointer on the screen (screen
     /// points, top-left origin, as the driver takes them) and when: the
     /// island's eyes follow it while the synth drives. Memory only.
@@ -345,6 +351,11 @@ impl Shared {
     pub(crate) fn set_slot_state(&self, slot: &LinkSlot, s: LinkState, detail: &str) {
         *slot.state.write().unwrap() = s;
         *slot.detail.lock().unwrap() = detail.to_string();
+        // The limits are the live link's: the synth sends them again after
+        // the next hello_ack (or not at all, on another runtime).
+        if s != LinkState::Linked {
+            crate::island::limits::store(self, &slot.synth_id, None);
+        }
         let _ = self.events.send(CoreEvent::Link {
             synth_id: slot.synth_id.clone(),
             state: s,
@@ -1381,6 +1392,7 @@ impl Core {
             shell: crate::shell::State::default(),
             faces_read: Mutex::new(std::collections::HashSet::new()),
             speech_sink: RwLock::new(None),
+            island_limits: Mutex::new(std::collections::HashMap::new()),
             agent_cursor: Mutex::new(None),
             observe: crate::observe::Hub::default(),
         });
@@ -1556,6 +1568,16 @@ impl Core {
             return Err("not_installed".into());
         }
         self.shared.cua_dir.desktop_picture(out, max_edge).await
+    }
+
+    /// A synth's last subscription limits, while its link is up and it
+    /// announces `island_limits` (None: nothing to show).
+    pub fn island_limits(&self, synth_id: &str) -> Option<crate::island::Limits> {
+        let slot = self.shared.slot(synth_id)?;
+        if slot.state() != LinkState::Linked || !crate::island::supports_limits(&slot) {
+            return None;
+        }
+        crate::island::limits::of(&self.shared, synth_id)
     }
 
     /// The cached face of a synth (None: the default preset of its id).

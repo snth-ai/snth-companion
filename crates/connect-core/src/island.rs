@@ -28,7 +28,10 @@
 //!    (`IslandSettings::voice_reply`, always / auto / off), sent as
 //!    owner.message `voice_reply` with a voice message to a synth that
 //!    announces `island_voice_reply`, and the spoken answer that comes
-//!    back as `island.event kind=speech` (the audio, played by the shell).
+//!    back as `island.event kind=speech` (the audio, played by the shell);
+//!  - the synth's subscription limits (`limits.rs`, tz-island-limits.md):
+//!    `island.event kind=limits` from a synth that announces
+//!    `island_limits`, kept per synth in memory while its link is up.
 //!
 //! Protocol additions are additive (no proto bump): an old synth does not
 //! announce the `island` feature and is sent nothing; an old app does not
@@ -44,6 +47,9 @@ use serde_json::{json, Value};
 
 use crate::core::{CoreEvent, LinkState, Shared};
 use crate::slot::LinkSlot;
+
+pub mod limits;
+pub use limits::{supports_limits, LimitWindow, Limits, FEATURE_LIMITS};
 
 /// The hello_ack feature of a synth that takes owner.message, face.get,
 /// face.set and calls island.event.
@@ -981,8 +987,8 @@ pub async fn set_face(shared: &Arc<Shared>, synth_id: &str, face: Value, patch: 
 
 // --- island.event ---
 
-/// One event of the synth about a message the owner sent from here, or a
-/// change of its face.
+/// One event of the synth about a message the owner sent from here (a
+/// change of its face, its spoken answer and its limits go their own way).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct IslandEvent {
     pub synth_id: String,
@@ -996,7 +1002,7 @@ pub struct IslandEvent {
     pub channel: String,
 }
 
-const KINDS: [&str; 6] = ["accepted", "working", "done", "error", "face", "speech"];
+const KINDS: [&str; 7] = ["accepted", "working", "done", "error", "face", "speech", "limits"];
 
 /// The audio of a spoken answer. Shared, never printed (a debug line says
 /// only its size).
@@ -1103,6 +1109,10 @@ pub(crate) async fn handle_event(shared: &Arc<Shared>, params: &Value) -> Result
         } else {
             return Err(format!("bad request: params.face must be a FaceConfig object of at most {MAX_FACE_BYTES} bytes"));
         }
+        return Ok(json!({"ok": true}));
+    }
+    if kind == "limits" {
+        limits::store(shared, &synth_id, limits::parse(params)?);
         return Ok(json!({"ok": true}));
     }
     if kind == "speech" {
