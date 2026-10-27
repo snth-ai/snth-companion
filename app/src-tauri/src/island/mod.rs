@@ -257,6 +257,10 @@ pub struct View {
     pub wake: wake::pause::Status,
     /// The synth's spoken answer plays now (`speak.rs`).
     pub speaking: Option<SpeakingView>,
+    /// The main synth's subscription limits (tz-island-limits.md): only
+    /// while its link is up and it announces `island_limits`; null =
+    /// nothing to show (another runtime, no data yet).
+    pub limits: Option<core_island::Limits>,
 }
 
 #[derive(Default)]
@@ -491,6 +495,7 @@ pub fn view(ctx: &Ctx) -> View {
         stt_card,
         wake: island.wake_word.status(),
         speaking: inner.speaking.as_ref().map(|(_, s)| s.clone()),
+        limits: main.as_ref().and_then(|m| ctx.core.island_limits(&m.synth_id)),
     };
     drop(inner);
     // The owner has seen the offer: a restart shows it again until it is
@@ -1597,7 +1602,7 @@ pub fn spawn(ctx: Arc<Ctx>) {
             match events.recv().await {
                 Ok(CoreEvent::Island(e)) => on_event(&ctx, e),
                 Ok(CoreEvent::IslandSpeech(s)) => on_speech(&ctx, s),
-                Ok(CoreEvent::Face { .. }) | Ok(CoreEvent::ComputerTask) => emit_view(&ctx),
+                Ok(CoreEvent::Face { .. } | CoreEvent::Limits { .. } | CoreEvent::ComputerTask) => emit_view(&ctx),
                 Ok(CoreEvent::Link { .. } | CoreEvent::Paused { .. } | CoreEvent::Paired { .. } | CoreEvent::Unpaired { .. } | CoreEvent::Settings { .. })
                 | Err(RecvError::Lagged(_)) => sync(&ctx),
                 Ok(_) => {}

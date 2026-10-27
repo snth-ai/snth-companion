@@ -62,6 +62,9 @@ const POSITIONS = [
   "bottom-right",
 ];
 
+/** The synth's subscription limits (`&limits=`, mockIsland.ts). */
+const LIMITS = ["none", "claude", "codex", "blocked", "stale"];
+
 function setParam(key: string, value: string | null) {
   const next = new URLSearchParams(window.location.search);
   if (value === null) next.delete(key);
@@ -232,6 +235,13 @@ export function IslandStage() {
         <button type="button" className="btn small" onClick={() => setParam("lang", params.get("lang") === "ru" ? "en" : "ru")}>
           EN / RU
         </button>
+      </div>
+      <div className="mock-bar">
+        {LIMITS.map((l) => (
+          <button key={l} type="button" className="btn small" aria-pressed={(params.get("limits") ?? "none") === l} onClick={() => setParam("limits", l === "none" ? null : l)}>
+            limits: {l}
+          </button>
+        ))}
       </div>
       <div className="mock-bar">
         {POSITIONS.map((pos) => (

@@ -30,6 +30,13 @@
 // says why). The name heard, the island opens as for a hold; a click on
 // it cancels the wake.
 //
+// The synth's subscription limits (`view.limits`, tz-island-limits.md):
+// hovering, a block above the buttons (the plan, a bar per window, the
+// percent used, when it resets); closed, a small solid dot beside the
+// right ear's glyph (left of the wake dot, bigger and in colour) only
+// when a window is at 80% or more (yellow) or 95% or more or refused
+// (red). A synth on another runtime sends nothing: nothing shows.
+//
 // Floating (Windows, `placement.floating`): no notch to merge with, so
 // the closed island is a small free-standing pill with the face, every
 // corner rounded, kept to the bottom edge above the taskbar
@@ -61,6 +68,8 @@ import type { IslandView, SttCard, WakeStatus } from "../backend/types";
 import { stringsFor } from "../i18n";
 import { shortcutText } from "../lib/format";
 import { Face, faceFor, faceWidth, type FaceState } from "./faceApi";
+import { LimitsBlock, LimitsDot } from "./LimitsBlock";
+import { limitsModel } from "./limitsView";
 import { aboutMb, sttLoadingVisible, tailOf, transcriptVisible } from "./sttView";
 
 /** How long the summary stays after the answer (TZ: 4-6 s). */
@@ -106,6 +115,10 @@ const FLOAT_ROW = 34;
 const FLOAT_WIDE_W = 300;
 const FLOAT_CARD_W = 360;
 const FLOAT_SLOT = 22;
+/** The slot's extra width when the limits dot sits beside a glyph. */
+const FLOAT_SLOT_LIMITS = 11;
+/** The limits' reset times and age move on their own: a look this often. */
+const LIMITS_TICK = 30_000;
 
 /** What the face shows, from what the island knows. */
 export function faceStateOf(v: IslandView, now: number): FaceState {
@@ -135,6 +148,16 @@ function useClock(active: boolean): number {
     return () => window.clearInterval(id);
   }, [active]);
   return active ? now : Date.now();
+}
+
+/** A render every `ms` while `active` (slow clocks: no busy island needed). */
+function useTick(active: boolean, ms: number) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!active) return;
+    const id = window.setInterval(() => setTick((n) => n + 1), ms);
+    return () => window.clearInterval(id);
+  }, [active, ms]);
 }
 
 /** Does the right ear (`Glyph`) show anything in this state? */
@@ -433,6 +456,7 @@ export function IslandApp() {
 
   const busy = Boolean(view && (view.hold || view.sending || view.message || view.notice || view.speaking));
   const now = useClock(busy);
+  useTick(Boolean(view?.limits), LIMITS_TICK);
 
   const lang = view?.lang ?? "en";
   const s = stringsFor(lang);
@@ -467,11 +491,15 @@ export function IslandApp() {
     align === "left" ? winW - (placed?.pill.x ?? 0) - 4 : align === "right" ? (placed?.pill.x ?? 0) + pillW - 4 : winW - 8;
   const wakeNow: WakeStatus = view?.wake ?? { state: "off" };
   const wakeDot = state === "idle" && !open && (wakeNow.state === "listening" || wakeNow.state === "paused");
-  const slot = floating && (glyphShows(state, Boolean(view?.sending)) || wakeDot);
+  const limits = view ? limitsModel(view.limits, lang, now) : null;
+  const limitsDot = Boolean(limits?.dot) && !open;
+  const glyphOrWake = glyphShows(state, Boolean(view?.sending)) || wakeDot;
+  const slot = floating && (glyphOrWake || limitsDot);
+  const slotW = FLOAT_SLOT + (limitsDot && glyphOrWake ? FLOAT_SLOT_LIMITS : 0);
   // Open: only the row (listening, the line of text) widens sideways; a
   // card (anything in the body) is wider.
   const openWTarget = floating ? Math.min(bodyH > 0 ? FLOAT_CARD_W : FLOAT_WIDE_W, room) : Math.min(OPEN_W, winW - 8);
-  const closedWTarget = pillW + (slot ? FLOAT_SLOT : 0);
+  const closedWTarget = pillW + (slot ? slotW : 0);
   const motion = useMotion(open, bodyH, openWTarget, closedWTarget, floating);
   const settled = !motion.moving;
 
@@ -629,6 +657,15 @@ export function IslandApp() {
     </div>
   ) : null;
   const cardNode = card && !approval ? <SttCardView card={card} t={t} /> : null;
+  // The limits only on a calm hover: not over a request, a hold, the line
+  // of text or the speech card (each fills the island by itself).
+  // Narrow (the middle of a side, a spot near the screen's edge): compact.
+  const limitsCompact = floating && (middle || Math.min(FLOAT_CARD_W, room) < FLOAT_CARD_W);
+  const limitsNode =
+    limits && view.hover && !view.text_open && !view.hold && !approval && !cardNode ? (
+      <LimitsBlock model={limits} t={t} compact={limitsCompact} />
+    ) : null;
+  const limitsDotNode = limitsDot && limits ? <LimitsDot model={limits} t={t} /> : null;
   const approvalNode =
     approval && quick ? (
       <div className="isl-approval">
@@ -746,13 +783,13 @@ export function IslandApp() {
       : rowTop + (rowH - fFaceSize) / 2;
     // The row beside the face, the slot at the other end.
     const besideFace = faceInset + fFaceW + 4;
-    const slotSide = slot ? FLOAT_SLOT + 4 : 12;
+    const slotSide = slot ? slotW + 4 : 12;
     const rowSides = mirror ? { left: slotSide, right: besideFace } : { left: besideFace, right: slotSide };
     const cardW = Math.min(FLOAT_CARD_W, room);
     const cardLeft = align === "left" ? 0 : align === "right" ? fWidth - cardW : (fWidth - cardW) / 2;
     // The middle's face column: the card keeps clear of it.
     const padSide = !middle ? undefined : mirror ? { paddingRight: fFaceW + 12 } : { paddingLeft: fFaceW + 12 };
-    const hasBody = open && [liveNode, wakeNoteNode, detail, noticeNode, cardNode, approvalNode, buttonsNode].some(Boolean);
+    const hasBody = open && [liveNode, wakeNoteNode, detail, noticeNode, cardNode, approvalNode, limitsNode, buttonsNode].some(Boolean);
     // Out of a full-screen app's way: off the window, past the edge it
     // keeps to (sideways in the middle of a side).
     const hideY = middle ? 0 : atBottom ? p.window.h - p.pill.y + 8 : -(p.pill.y + p.pill.h + 8);
@@ -786,6 +823,7 @@ export function IslandApp() {
                   {noticeNode}
                   {cardNode}
                   {approvalNode}
+                  {limitsNode}
                   {buttonsNode}
                 </div>
               ) : null}
@@ -814,7 +852,8 @@ export function IslandApp() {
           ) : null}
 
           {slot ? (
-            <div className={`isl-fslot${mirror ? " mirror" : ""}`} style={{ top: rowTop, height: rowH, width: FLOAT_SLOT }}>
+            <div className={`isl-fslot${mirror ? " mirror" : ""}`} style={{ top: rowTop, height: rowH, width: slotW }}>
+              {limitsDotNode}
               <Glyph state={state} sending={view.sending} />
               {wakeDotNode}
             </div>
@@ -842,6 +881,7 @@ export function IslandApp() {
           <div className="isl-ear left" style={{ width: (p.pill.w - p.notch.w) / 2 }} />
           <div className="isl-notch" style={{ width: p.notch.w }} />
           <div className="isl-ear right" style={{ width: (p.pill.w - p.notch.w) / 2 }}>
+            {limitsDotNode}
             <Glyph state={state} sending={view.sending} />
             {wakeDotNode}
           </div>
@@ -873,6 +913,8 @@ export function IslandApp() {
                 {cardNode}
 
                 {approvalNode}
+
+                {limitsNode}
 
                 {inputNode ? (
                   <div className="isl-input">

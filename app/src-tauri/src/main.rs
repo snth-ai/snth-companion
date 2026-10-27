@@ -341,7 +341,7 @@ fn spawn_event_forwarder(ctx: Arc<Ctx>) {
                         ui::emit(&ctx.app, UiEvent::State);
                     }
                     // The island follows its own events (island/mod.rs).
-                    Ok(CoreEvent::Island(_) | CoreEvent::IslandSpeech(_)) => {}
+                    Ok(CoreEvent::Island(_) | CoreEvent::IslandSpeech(_) | CoreEvent::Limits { .. }) => {}
                     Ok(_) | Err(RecvError::Lagged(_)) => {
                         tray::refresh(&ctx);
                         ui::emit(&ctx.app, UiEvent::State);

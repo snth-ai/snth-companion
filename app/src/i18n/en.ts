@@ -1399,6 +1399,11 @@ export const en = {
       } as Record<string, string>,
       speaking: "Speaking",
       speakingHint: "Click to stop",
+      limits: "Subscription limits",
+      limitsResets: (when: string) => `resets ${when}`,
+      limitsWasReset: "reset",
+      limitsBlocked: "limit reached",
+      limitsAge: (min: number) => (min < 90 ? `updated ${min} min ago` : `updated ${Math.round(min / 60)} h ago`),
       channel: {
         telegram: "Telegram",
         tguser: "Telegram",

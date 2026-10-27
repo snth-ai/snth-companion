@@ -1395,6 +1395,11 @@ export const ru: Strings = {
       } as Record<string, string>,
       speaking: "Говорю",
       speakingHint: "Нажмите, чтобы остановить",
+      limits: "Лимиты подписки",
+      limitsResets: (when: string) => `до ${when}`,
+      limitsWasReset: "сброшено",
+      limitsBlocked: "лимит исчерпан",
+      limitsAge: (min: number) => (min < 90 ? `обновлено ${min} мин назад` : `обновлено ${Math.round(min / 60)} ч назад`),
       channel: {
         telegram: "Telegram",
         tguser: "Telegram",

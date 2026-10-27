@@ -649,6 +649,38 @@ export interface IslandView {
   wake: WakeStatus;
   /** The synth's spoken answer plays now (missing from an older shell). */
   speaking?: IslandSpeaking | null;
+  /** The main synth's subscription limits (tz-island-limits.md): null or
+   * missing = nothing to show (another runtime, an older shell). */
+  limits?: IslandLimits | null;
+}
+
+/** One window of a subscription limit, as the synth sent it
+ * (`island.event kind=limits`). */
+export interface IslandLimitWindow {
+  /** "five_hour", "seven_day", "seven_day_opus"... */
+  id: string;
+  /** The synth's words for it ("5ч", "5h"); either may be empty. */
+  label_ru: string;
+  label_en: string;
+  /** 0..100, may be fractional. */
+  used_pct: number;
+  /** ISO 8601 ("" = unknown). */
+  resets_at: string;
+}
+
+/** The main synth's last snapshot of its subscription limits. */
+export interface IslandLimits {
+  /** "claude", "codex". */
+  provider: string;
+  /** "Claude Max", "ChatGPT Plus"... ("" = the provider's name). */
+  plan: string;
+  windows: IslandLimitWindow[];
+  /** The provider refuses the subscription right now. */
+  blocked: boolean;
+  /** When the synth read it, ISO 8601 ("" = unknown). */
+  fetched_at: string;
+  /** When this computer received it (unix ms). */
+  received_ms: number;
 }
 
 export type IslandSignal =
