@@ -2092,3 +2092,64 @@ details.more .more-body {
     transition: none;
   }
 }
+
+/* Island: the subscription limits' preview. A little of the screen's top
+   edge with the closed island (the face, the notch, the right ear with
+   the text or the dot) and, under it, the open island's limits. Black
+   and white like the island itself, whatever the theme. */
+.group > .island-lim-preview {
+  border-top: 0;
+}
+.island-lim-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin: 0 14px 14px;
+  padding: 0 14px 14px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--sunken);
+  color: #fff;
+  font: 13px/1.35 var(--font);
+}
+.island-lim-closed {
+  display: flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 12px 0 8px;
+  border-radius: 0 0 12px 12px;
+  background: #000;
+}
+.island-lim-face {
+  display: flex;
+  width: 64px;
+  line-height: 0;
+}
+/* The notch: the same black, as on a Mac. */
+.island-lim-notch {
+  width: 112px;
+}
+.island-lim-ear {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 52px;
+}
+.island-lim-open {
+  box-sizing: border-box;
+  width: 300px;
+  max-width: 100%;
+  padding: 0 14px 10px;
+  border-radius: 14px;
+  background: #000;
+}
+.island-lim-open > .island-lim-none {
+  display: block;
+  margin-top: 10px;
+  text-align: center;
+}
+.island-lim-none {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.4);
+}

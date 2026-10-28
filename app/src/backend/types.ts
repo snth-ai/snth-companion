@@ -434,6 +434,30 @@ export interface IslandSettings {
   /** The synth's voice reply; missing = "always" (the default, and an
    * older shell). */
   voice_reply?: VoiceReply;
+  /** How the island shows the synth's subscription limits; missing = the
+   * defaults (as is an older shell). */
+  limits?: Partial<LimitsDisplay>;
+}
+
+/** How the island shows the synth's subscription limits
+ * (tz-island-limits-display.md, connect-core `LimitsDisplay`). */
+export interface LimitsDisplay {
+  /** The closed island: a short text ("h:34% 2h", the default), the dot
+   * from 80% (as in 0.1.33), or nothing. */
+  closed: "text" | "dot" | "off";
+  /** The window the closed text shows: the fullest (the default; the
+   * 5-hour one on a tie), the 5-hour one, the week, or both. */
+  window: "auto" | "five_hour" | "week" | "both";
+  /** The percent used (the default) or left. The colours follow the use. */
+  percent: "used" | "left";
+  /** The closed text's time to the reset ("2h", the default), or none. */
+  closed_reset: "in" | "off";
+  /** The open island: a line per window (the default), the detailed
+   * block, or nothing. */
+  open: "compact" | "full" | "off";
+  /** The open island's reset: the time left ("in 2h", the default) or the
+   * clock ("18:20", "Mon 03:00"). */
+  open_reset: "in" | "clock";
 }
 
 /** Why wake by name does not listen at all yet. */
@@ -652,6 +676,9 @@ export interface IslandView {
   /** The main synth's subscription limits (tz-island-limits.md): null or
    * missing = nothing to show (another runtime, an older shell). */
   limits?: IslandLimits | null;
+  /** How the owner wants them shown; missing (an older shell) = the
+   * defaults. */
+  limits_display?: Partial<LimitsDisplay>;
 }
 
 /** One window of a subscription limit, as the synth sent it
@@ -1050,7 +1077,13 @@ export interface Backend {
   // --- the island: the Island screen ---
   /** `position`: the owner's spot, each axis "default" for this
    * system's own. Err: unsupported, unknown_synth, bad_position. */
-  islandSet(enabled: boolean | null, mainSynth: string | null, position?: IslandPositionChoice, voiceReply?: VoiceReply): Promise<UiState>;
+  islandSet(
+    enabled: boolean | null,
+    mainSynth: string | null,
+    position?: IslandPositionChoice,
+    voiceReply?: VoiceReply,
+    limits?: Partial<LimitsDisplay>,
+  ): Promise<UiState>;
   /** Err: bad_shortcut, conflict:<voice|screen_voice|text|stop>, shortcut_unavailable. */
   islandHotkeySet(which: HotkeyKind, accelerator: string): Promise<UiState>;
   islandHotkeyReset(which: HotkeyKind): Promise<UiState>;

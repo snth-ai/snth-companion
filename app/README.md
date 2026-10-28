@@ -150,7 +150,7 @@ URL parameters stage a screen or a state directly:
 | `account` | the platform account: `signed_out` (first run, nothing linked: "Sign in with SNTH" waits about 2 s in the "browser", then shows the consent screen for Mia and Maya), `consent` (signed in, the consent screen), `two` (signed in, Mia and Maya linked), `none` (signed in, no synths: the code field), `repair` (two linked, Maya refused her token). Without it: signed out, Mia linked with a code, as before |
 | `login` | with `account=signed_out`: the sign-in fails, `denied` (Cancel in the browser) or `expired` |
 | `connectfail` | with `account=consent`: linking Maya fails, `connect_unavailable`, `synth_outdated`, `synth_unreachable` |
-| `island` | the Island screen (with `screen=island`): `off` (default), `on`, `outdated` (the synth is older than the island), `taken` (another app holds the talk key), `micdenied`, `two` (with `account=two`: Maya listens to the keys), `nolink` (on, Mia offline: the keys are released). On `island.html` (the island window on a pretend desktop): `idle` (default), `hover`, `listening`, `screen`, `sending`, `accepted`, `thinking`, `working`, `driving`, `done`, `error`, `approval`, `text`, `offline`, `outdated`, `micdenied`, `asking`, `paused`, `two`, `shot`, and for speech on this computer `live` (the words of a hold), `livesent` (the text going), `offer` (the synth's offer), `offerdl`, `offerready`, `offerfail` (the model's download after "Turn on"), and for wake by name `wakeidle` (the dot), `wakepaused` (paused for a call), `woke` (a wake recording with its words), `wokename` (the name alone), and for the synth's voice reply `speaking` (Mia speaks her answer here: the face talks with the voice's level, a click stops it), `speakingwake` (the same with wake by name paused meanwhile); with `limits=claude` (Claude Max 34% / 61%), `limits=codex` (ChatGPT Plus 85%: the yellow dot), `limits=blocked` (refused: the red dot), `limits=stale` (40 minutes old, a third Opus row) or none (another runtime: nothing) added to any of them for the synth's subscription limits (the block on `hover`, the dot closed, e.g. `island=wakeidle&limits=codex`), and `hover=1` to open any scenario as if hovered (`island=done&hover=1&limits=stale`: the tallest); with `notch=0` (a Mac without a notch) and `os=windows` (the Windows desktop: the island floats above a taskbar at the bottom; add `taskbar=top` for a taskbar on the top edge); `pos=<vertical>-<horizontal>` (`top-left`, `top-center`, `top-right`, `middle-left`, `middle-right`, `bottom-left`, `bottom-center`, `bottom-right`) puts the island at the owner's spot on either system (a Dock is drawn on the Mac; `os=windows&pos=top-center` is the drawn notch flush with the top edge), and on the Island screen (`screen=island&island=on&pos=...`) the position picker shows it. The strip under the desktop plays a hold, a hold with its words, the offer, a wake by name (with a request, or the name alone), a call pausing it, a line of text, an answer, an answer aloud (a hold or a wake during it stops the voice), a request. Reply with voice on the Island screen: `voice=always|auto|off` (the owner's choice, default always), `island=voiceold` (Mia cannot answer with her voice yet: the note). Speech recognition on the Island screen: `stt` (on, the model here), `sttdl` (downloading), `sttspace` (the disk is too full), `sttold` (the synth does not take text yet), `sttintel` (not available), and with `os=windows` the same scenarios with Windows' single engine (Parakeet, no choice); wake by name: `wake` (on, listening), `wakedl` (its model downloading), `wakecall` (paused: the microphone is in use), `wakebt` (paused: the only microphone is in AirPods), `wakemic` (waiting for the microphone; with `os=windows` the Windows texts and sizes); `sttnospace=1` makes the mock download fail for lack of space |
+| `island` | the Island screen (with `screen=island`): `off` (default), `on`, `outdated` (the synth is older than the island), `taken` (another app holds the talk key), `micdenied`, `two` (with `account=two`: Maya listens to the keys), `nolink` (on, Mia offline: the keys are released). On `island.html` (the island window on a pretend desktop): `idle` (default), `hover`, `listening`, `screen`, `sending`, `accepted`, `thinking`, `working`, `driving`, `done`, `error`, `approval`, `text`, `offline`, `outdated`, `micdenied`, `asking`, `paused`, `two`, `shot`, and for speech on this computer `live` (the words of a hold), `livesent` (the text going), `offer` (the synth's offer), `offerdl`, `offerready`, `offerfail` (the model's download after "Turn on"), and for wake by name `wakeidle` (the dot), `wakepaused` (paused for a call), `woke` (a wake recording with its words), `wokename` (the name alone), and for the synth's voice reply `speaking` (Mia speaks her answer here: the face talks with the voice's level, a click stops it), `speakingwake` (the same with wake by name paused meanwhile); with `limits=claude` (Claude Max 34% / 61%), `limits=codex` (ChatGPT Plus 85%: the yellow dot), `limits=blocked` (refused: the red dot), `limits=stale` (40 minutes old, a third Opus row) or none (another runtime: nothing) added to any of them for the synth's subscription limits (the block on `hover`, the dot closed, e.g. `island=wakeidle&limits=codex`), and `hover=1` to open any scenario as if hovered (`island=done&hover=1&limits=stale`: the tallest); how they show: `lc=text|dot|off` (closed: text, the default; the dot; nothing), `lw=auto|5h|week|both` (the closed text's window), `lp=used|left`, `lr=in|off` (the closed countdown), `le=compact|full|off` (hovering), `ler=in|clock` (the open reset), also on the Island screen; with `notch=0` (a Mac without a notch) and `os=windows` (the Windows desktop: the island floats above a taskbar at the bottom; add `taskbar=top` for a taskbar on the top edge); `pos=<vertical>-<horizontal>` (`top-left`, `top-center`, `top-right`, `middle-left`, `middle-right`, `bottom-left`, `bottom-center`, `bottom-right`) puts the island at the owner's spot on either system (a Dock is drawn on the Mac; `os=windows&pos=top-center` is the drawn notch flush with the top edge), and on the Island screen (`screen=island&island=on&pos=...`) the position picker shows it. The strip under the desktop plays a hold, a hold with its words, the offer, a wake by name (with a request, or the name alone), a call pausing it, a line of text, an answer, an answer aloud (a hold or a wake during it stops the voice), a request. Reply with voice on the Island screen: `voice=always|auto|off` (the owner's choice, default always), `island=voiceold` (Mia cannot answer with her voice yet: the note). Speech recognition on the Island screen: `stt` (on, the model here), `sttdl` (downloading), `sttspace` (the disk is too full), `sttold` (the synth does not take text yet), `sttintel` (not available), and with `os=windows` the same scenarios with Windows' single engine (Parakeet, no choice); wake by name: `wake` (on, listening), `wakedl` (its model downloading), `wakecall` (paused: the microphone is in use), `wakebt` (paused: the only microphone is in AirPods), `wakemic` (waiting for the microphone; with `os=windows` the Windows texts and sizes); `sttnospace=1` makes the mock download fail for lack of space |
 | `faceset` | `invalid`: the synth refuses every face the editor saves |
 | `lang` | `en`, `ru` |
 | `theme` | `light`, `dark` |
@@ -579,7 +579,7 @@ talks to `<platform>/api/app/v1/*` only. There is no override in the UI.
     notch): top spots 8 pt under the bar / taskbar (12 pt off a bare
     edge), bottom spots 8 pt above the Dock / taskbar (12 pt off a bare
     edge), middle spots centred vertically; left / right spots 12 pt from
-    that side. The window (480 x 360) is flush with the pill's side, so
+    that side. The window (500 x 360) is flush with the pill's side, so
     the open island is anchored to the pill's side edge and grows inwards
     (the row mirrored at the right: the face at the right end), and in the
     middle of a side it is centred on the pill with the face kept at the
@@ -729,8 +729,61 @@ talks to `<platform>/api/app/v1/*` only. There is no override in the UI.
     pill in the glyph slot (the slot widens by 11 px when both show; at
     the right of the screen the dot stays on the inner side). The island's
     window is 360 tall (was 300) so the tallest hover (a summary and three
-    rows) fits. Stage: `&limits=claude|codex|blocked|stale|none` on
+    rows, detailed) fits. Stage: `&limits=claude|codex|blocked|stale|none` on
     `island.html`, `&hover=1` to open any scenario.
+  - How the limits show (TZ `docs/tz-island-limits-display.md`, the
+    owner's choice in the CodexBar manner): `IslandSettings::limits`
+    (connect-core `LimitsDisplay` in `island/limits.rs`: `closed`
+    text|dot|off, `window` auto|five_hour|week|both, `percent` used|left,
+    `closed_reset` in|off, `open` compact|full|off, `open_reset`
+    in|clock; the defaults are the first of each and write nothing; a
+    value a newer version wrote reads as the default, never as a broken
+    settings file). Set by `island_set`'s `limits` (a patch of some
+    fields, each a known value, else `bad_limits` and nothing changes);
+    the island's view carries it as `limits_display` and redraws at once.
+    Closed, the default is a short text in the right ear, left of the
+    glyph and the wake dot: the window's letter (`h` 5 hours, `w` the
+    week, `w` + the model's initial for a model's week, `wO`; else the
+    id's first two letters), the percent and the time to the reset
+    rounded up (`45m` under an hour, `2h` under a day, `3d`), the same
+    tokens in both languages: `h:34% 2h`, `w:61% 3d`, or both
+    (`h:34% 2h  w:61% 3d`). "auto" is the fullest window (the 5-hour one
+    on a tie; a model's week counts); a chosen window the snapshot lacks
+    falls back to it. A window past its reset: `h:0%`, no countdown.
+    Colour: quiet white below 80, yellow from 80, red from 95 or while
+    refused (all parts; refused with no window: "limit" / "лимит").
+    "left" shows 100 - used, the colours still by use. The tooltip is the
+    summary with every window, its reset and the snapshot's age. The
+    text replaces the dot; "dot" is the 0.1.33 dot; "off" nothing. Both
+    are away while the island is open. On the notch the ears widen evenly
+    (the shape stays centred on the notch) to the text's measured width,
+    up to the window less the flared corners (the window is 500 wide for
+    it, was 480); when a busy state's glyph leaves too little room the
+    text steps down (`closedFallbacks`: one window, then no countdown)
+    and at last gives way to the dot from 80%. In practice: both windows
+    fit idle and beside the wake dot; thinking / working / done show the
+    fullest window. The floating pill widens its slot to the text: the
+    text is beside the face on the inner side (right of the face at the
+    left and the centre, left of it at the right of the screen, the glyph
+    and the wake dot at the pill's outer end). Open: "compact" (the
+    default) is a line per window, 11 px, a 36 px bar of 3 px, the percent
+    and the reset, the plan (or "limit reached") at the first line's end
+    and the age at the second's (31 px for two windows against 74 px of
+    the detailed block); "full" is the 0.1.33 block; "off" nothing. The
+    open reset: "in" `in 2h` / `через 2ч` (the detailed block's wide card
+    `resets in 2h` / `сброс через 2ч`), "clock" `18:20`, `Mon 03:00`. The
+    window stays 360 tall: the tallest detailed hover is 302. The Island
+    screen's "Subscription limits" section (shown for every synth, a note
+    that only a subscription has limits) has the six choices and a live
+    preview on sample numbers (the synth's face, the closed text, the
+    open lines). Logic in `limitsView.ts` (`displayOf`, `closedParts`,
+    `closedFallbacks`, `compactLines`, `openReset`; tests in
+    `limits.test.mjs`), parts in `LimitsBlock.tsx` (`LimitsText`,
+    `LimitsRows`, `LimitsBlock`, `LimitsDot`), styles in `limits.css`
+    (shared with the Island screen). Stage: `&lc=text|dot|off`,
+    `&lw=auto|5h|week|both`, `&lp=used|left`, `&lr=in|off`,
+    `&le=compact|full|off`, `&ler=in|clock` on `island.html` and on the
+    Island screen (`index.html?screen=island&island=on&...`).
   - Island screen: on/off, who listens, the three keys (recorder,
     conflicts with each other and the stop shortcut, a system check,
     default), the microphone, speech recognition, the face editor and "Ask

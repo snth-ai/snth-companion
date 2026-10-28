@@ -11,8 +11,15 @@
 // The snapshot may be old: a window whose reset time has passed shows as
 // 0% "reset" (never the old percent), and a snapshot older than 30
 // minutes says how old it is.
+//
+// How they show is the owner's choice (`LimitsDisplay`,
+// tz-island-limits-display.md). Closed, by default a short text beside
+// the status: a window's letter, the percent and the time to its reset
+// ("h:34% 2h", "w:61% 3d"; `closedParts`), the same tokens in both
+// languages. Open, by default a line per window (`LimitsRows`); the
+// block above is "detailed".
 
-import type { IslandLimits, IslandLimitWindow } from "../backend/types";
+import type { IslandLimits, IslandLimitWindow, LimitsDisplay } from "../backend/types";
 
 /** At or above: yellow. */
 export const WARN_PCT = 80;
@@ -26,11 +33,15 @@ export type LimitLevel = "ok" | "warn" | "high";
 export interface LimitRow {
   id: string;
   label: string;
+  /** The closed text's token: "h", "w", "wO" (`windowLetter`). */
+  letter: string;
   /** Rounded, 0..100 (0 once the window has reset). */
   pct: number;
   level: LimitLevel;
   /** "18:20", "Mon 03:00", "" (unknown or reset). */
   reset: string;
+  /** When it resets (unix ms); null when unknown or already reset. */
+  resetAt: number | null;
   /** The reset time has passed since the snapshot. */
   wasReset: boolean;
 }
@@ -68,6 +79,40 @@ export function windowLabel(w: Pick<IslandLimitWindow, "id" | "label_ru" | "labe
   if (other) return other;
   const d = DEFAULT_LABELS[w.id];
   return d ? d[lang] : w.id;
+}
+
+/** The closed text's token for a window: "h" (5 hours), "w" (the week),
+ * "w" and the model's initial for a model's own week ("wO" for "week
+ * Opus"), else the id's first two letters. */
+export function windowLetter(w: Pick<IslandLimitWindow, "id" | "label_ru" | "label_en">): string {
+  if (w.id === "five_hour") return "h";
+  if (w.id === "seven_day") return "w";
+  if (w.id.startsWith("seven_day_")) {
+    const words = `${w.label_en ?? ""} ${w.label_ru ?? ""}`.split(/\s+/).filter((x) => x && !/^(week|weekly|7d|неделя|недели|7д)$/i.test(x));
+    const model = words[0] ?? w.id.slice("seven_day_".length);
+    return model ? `w${model[0]!.toUpperCase()}` : "w";
+  }
+  return w.id.slice(0, 2);
+}
+
+/** The time to a reset, short and rounded up: "45m" under an hour, "2h"
+ * under a day, "3d" from a day on (the closed text's units, the same in
+ * both languages). "" when it is not ahead. */
+export function untilShort(ms: number): string {
+  return untilIn(ms, { m: "m", h: "h", d: "d" });
+}
+
+/** The same in the island's language ("45м", "2ч", "3д" in Russian). */
+export function untilText(ms: number, lang: "en" | "ru"): string {
+  return untilIn(ms, lang === "ru" ? { m: "м", h: "ч", d: "д" } : { m: "m", h: "h", d: "d" });
+}
+
+function untilIn(ms: number, u: { m: string; h: string; d: string }): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "";
+  const min = Math.ceil(ms / 60_000);
+  if (min < 60) return `${min}${u.m}`;
+  if (ms < 24 * 3_600_000) return `${Math.ceil(ms / 3_600_000)}${u.h}`;
+  return `${Math.ceil(ms / 86_400_000)}${u.d}`;
 }
 
 export function levelOf(pct: number): LimitLevel {
@@ -114,9 +159,11 @@ export function limitsModel(l: IslandLimits | null | undefined, lang: "en" | "ru
     return {
       id: w.id,
       label: windowLabel(w, lang),
+      letter: windowLetter(w),
       pct,
       level: levelOf(pct),
       reset: wasReset ? "" : resetText(w.resets_at ?? "", now, lang, timeZone),
+      resetAt: wasReset || Number.isNaN(at) ? null : at,
       wasReset,
     };
   });
@@ -138,4 +185,157 @@ export function limitsModel(l: IslandLimits | null | undefined, lang: "en" | "ru
     dot,
     ageMin: age > STALE_MS ? Math.floor(age / 60_000) : null,
   };
+}
+
+// --- the owner's choice of what shows (tz-island-limits-display.md) ---
+
+export const DEFAULT_DISPLAY: LimitsDisplay = {
+  closed: "text",
+  window: "auto",
+  percent: "used",
+  closed_reset: "in",
+  open: "compact",
+  open_reset: "in",
+};
+
+const CHOICES: { [K in keyof LimitsDisplay]: readonly LimitsDisplay[K][] } = {
+  closed: ["text", "dot", "off"],
+  window: ["auto", "five_hour", "week", "both"],
+  percent: ["used", "left"],
+  closed_reset: ["in", "off"],
+  open: ["compact", "full", "off"],
+  open_reset: ["in", "clock"],
+};
+
+/** The settings as the shell sent them, every field known: a missing or
+ * unknown one is the default. */
+export function displayOf(d: Partial<LimitsDisplay> | null | undefined): LimitsDisplay {
+  const out = { ...DEFAULT_DISPLAY };
+  if (!d) return out;
+  for (const key of Object.keys(CHOICES) as (keyof LimitsDisplay)[]) {
+    const v = d[key];
+    if (v !== undefined && (CHOICES[key] as readonly string[]).includes(v)) (out as Record<string, string>)[key] = v;
+  }
+  return out;
+}
+
+/** The percent as the owner reads it: used, or left (100 - used). */
+export function shownPct(pct: number, d: Pick<LimitsDisplay, "percent">): number {
+  return d.percent === "left" ? 100 - pct : pct;
+}
+
+/** The window a choice names, or null. */
+function pick(m: LimitsModel, id: string): LimitRow | null {
+  return m.rows.find((r) => r.id === id) ?? null;
+}
+
+/** The fullest window; on a tie the 5-hour one, then the first. */
+export function fullest(m: LimitsModel): LimitRow | null {
+  let best: LimitRow | null = null;
+  for (const r of m.rows) {
+    if (!best || r.pct > best.pct || (r.pct === best.pct && r.id === "five_hour" && best.id !== "five_hour")) best = r;
+  }
+  return best;
+}
+
+/** The windows the closed text shows: the chosen one (or both), the
+ * fullest when the snapshot has no such window. */
+export function closedRows(m: LimitsModel, window: LimitsDisplay["window"]): LimitRow[] {
+  const auto = fullest(m);
+  const chosen =
+    window === "five_hour"
+      ? [pick(m, "five_hour")]
+      : window === "week"
+        ? [pick(m, "seven_day")]
+        : window === "both"
+          ? [pick(m, "five_hour"), pick(m, "seven_day")]
+          : [auto];
+  const rows = chosen.filter((r): r is LimitRow => r !== null);
+  return rows.length > 0 ? rows : auto ? [auto] : [];
+}
+
+export interface ClosedPart {
+  /** For React. */
+  key: string;
+  /** "h:34% 2h". */
+  text: string;
+  /** The colour: the window's level, red for all while refused. */
+  level: LimitLevel;
+}
+
+/** The closed island's text, a part per window: "h:34% 2h", "w:61% 3d";
+ * a window that reset "h:0%" (no countdown). Refused with no window at
+ * all: `blockedWord` in red. Empty: nothing to show. */
+export function closedParts(m: LimitsModel, d: LimitsDisplay, now: number, blockedWord: string): ClosedPart[] {
+  const rows = closedRows(m, d.window);
+  if (rows.length === 0) return m.blocked ? [{ key: "blocked", text: blockedWord, level: "high" }] : [];
+  return rows.map((r) => {
+    const until = d.closed_reset === "in" && r.resetAt !== null ? untilShort(r.resetAt - now) : "";
+    return {
+      key: r.id,
+      text: `${r.letter}:${shownPct(r.pct, d)}%${until ? ` ${until}` : ""}`,
+      level: m.blocked ? "high" : r.level,
+    };
+  });
+}
+
+/** What the closed text may fall back to when it does not fit (the notch
+ * has room for so much): the owner's choice first, then one window, then
+ * that window without its countdown. */
+export function closedFallbacks(d: LimitsDisplay): LimitsDisplay[] {
+  const out: LimitsDisplay[] = [d];
+  if (d.window === "both") out.push({ ...d, window: "auto" });
+  if (d.closed_reset === "in") out.push({ ...out[out.length - 1]!, closed_reset: "off" });
+  return out;
+}
+
+/** The words the open island's reset needs (the island's strings). */
+export interface ResetWords {
+  limitsWasReset: string;
+  limitsIn: (left: string) => string;
+  limitsResetsIn: (left: string) => string;
+  limitsResets: (when: string) => string;
+}
+
+/** A window's reset on the open island, as the owner chose: the time
+ * left ("in 2h", "через 2ч") or the clock ("18:20", "пн 03:00"); `long`
+ * says "resets" too (the detailed block's wide card). A window that
+ * reset: "reset". "" when unknown. */
+export function openReset(r: LimitRow, d: Pick<LimitsDisplay, "open_reset">, w: ResetWords, lang: "en" | "ru", now: number, long: boolean): string {
+  if (r.wasReset) return w.limitsWasReset;
+  if (d.open_reset === "in" && r.resetAt !== null) {
+    const left = untilText(r.resetAt - now, lang);
+    if (left) return long ? w.limitsResetsIn(left) : w.limitsIn(left);
+  }
+  if (!r.reset) return "";
+  return long ? w.limitsResets(r.reset) : r.reset;
+}
+
+export interface CompactLine {
+  id: string;
+  label: string;
+  /** As the owner reads it (used or left), and the bar's width. */
+  pct: number;
+  level: LimitLevel;
+  reset: string;
+  /** At the line's far end: the plan (or "limit reached") on the first
+   * line, the snapshot's age on the second (after the plan when there
+   * is one line). */
+  meta: { text: string; blocked: boolean }[];
+}
+
+/** The compact open view: a line per window. */
+export function compactLines(
+  m: LimitsModel,
+  d: LimitsDisplay,
+  w: ResetWords & { limitsBlocked: string; limitsAge: (min: number) => string },
+  lang: "en" | "ru",
+  now: number,
+): CompactLine[] {
+  const plan = m.blocked ? { text: w.limitsBlocked, blocked: true } : { text: m.title, blocked: false };
+  const age = m.ageMin !== null ? { text: w.limitsAge(m.ageMin), blocked: false } : null;
+  return m.rows.map((r, i) => {
+    const meta = i === 0 ? [plan, ...(m.rows.length === 1 && age ? [age] : [])] : i === 1 && age ? [age] : [];
+    return { id: r.id, label: r.label, pct: shownPct(r.pct, d), level: r.level, reset: openReset(r, d, w, lang, now, false), meta };
+  });
 }

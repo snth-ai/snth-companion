@@ -30,12 +30,19 @@
 // says why). The name heard, the island opens as for a hold; a click on
 // it cancels the wake.
 //
-// The synth's subscription limits (`view.limits`, tz-island-limits.md):
-// hovering, a block above the buttons (the plan, a bar per window, the
-// percent used, when it resets); closed, a small solid dot beside the
-// right ear's glyph (left of the wake dot, bigger and in colour) only
-// when a window is at 80% or more (yellow) or 95% or more or refused
-// (red). A synth on another runtime sends nothing: nothing shows.
+// The synth's subscription limits (`view.limits`, tz-island-limits.md),
+// as the owner chose to see them (`view.limits_display`,
+// tz-island-limits-display.md). Closed, by default a short text beside
+// the right ear's glyph ("h:34% 2h", yellow from 80%, red from 95% or
+// refused), or the old dot (only from 80%), or nothing; while the island
+// is open the text and the dot are away. The notch's ears widen evenly
+// for the text, up to what the window holds; when the glyph of a busy
+// state leaves too little room the text steps down (one window instead
+// of both, then without the countdown) and at last gives way to the dot.
+// The floating pill widens its slot for it. Hovering, by default a line
+// per window above the buttons, or the detailed block (the plan, a bar
+// per window), or nothing. A synth on another runtime sends nothing:
+// nothing shows.
 //
 // Floating (Windows, `placement.floating`): no notch to merge with, so
 // the closed island is a small free-standing pill with the face, every
@@ -68,8 +75,8 @@ import type { IslandView, SttCard, WakeStatus } from "../backend/types";
 import { stringsFor } from "../i18n";
 import { shortcutText } from "../lib/format";
 import { Face, faceFor, faceWidth, type FaceState } from "./faceApi";
-import { LimitsBlock, LimitsDot } from "./LimitsBlock";
-import { limitsModel } from "./limitsView";
+import { LimitsBlock, LimitsDot, LimitsRows, LimitsText, limitsSummary } from "./LimitsBlock";
+import { closedFallbacks, closedParts, displayOf, limitsModel } from "./limitsView";
 import { aboutMb, sttLoadingVisible, tailOf, transcriptVisible } from "./sttView";
 
 /** How long the summary stays after the answer (TZ: 4-6 s). */
@@ -117,6 +124,14 @@ const FLOAT_CARD_W = 360;
 const FLOAT_SLOT = 22;
 /** The slot's extra width when the limits dot sits beside a glyph. */
 const FLOAT_SLOT_LIMITS = 11;
+/** Between the parts in the right ear and the slot (CSS gap). */
+const EAR_GAP = 6;
+/** The right ear's padding at the screen's side (CSS), and the least
+ * room kept at the notch's side for the text. */
+const EAR_PAD_OUT = 12;
+const EAR_PAD_IN = 4;
+/** The notch's flared corners stick out this far on each side. */
+const FLARE = 8;
 /** The limits' reset times and age move on their own: a look this often. */
 const LIMITS_TICK = 30_000;
 
@@ -285,10 +300,10 @@ function reducedMotion(): boolean {
  * `moving` is false once everything has arrived.
  *
  * Floating only (`floating`): `openW` (the open width: the row alone or
- * the card) follows the body's rule, and `closedW` (the closed width:
- * the pill makes room for its glyph) slides once the pill was placed.
- * For the notch both are constants of the placement and are taken as
- * they come, the way they always were. */
+ * the card) follows the body's rule; for the notch it is a constant of
+ * the placement and is taken as it comes. `closedW` (the closed width:
+ * the pill makes room for its glyph, the notch's ears for the limits
+ * text) slides once the island was placed, on both. */
 function useMotion(
   open: boolean,
   bodyH: number,
@@ -329,7 +344,7 @@ function useMotion(
       changed = true;
     }
     if (c.closedW.to !== closedW) {
-      c.closedW = reduce || !floating || c.closedW.to <= 0 ? still(closedW) : { from: valueAt(c.closedW, t), to: closedW, start: t, ms: MOVE_MS };
+      c.closedW = reduce || c.closedW.to <= 0 ? still(closedW) : { from: valueAt(c.closedW, t), to: closedW, start: t, ms: MOVE_MS };
       changed = true;
     }
     if (changed) setNow(t);
@@ -426,6 +441,12 @@ export function IslandApp() {
   const inputRef = useRef<HTMLInputElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const [bodyH, setBodyH] = useState(0);
+  /** The closed limits texts the island might show, and the right ear's
+   * glyph and wake dot, as laid out (px). */
+  const measureRef = useRef<HTMLDivElement>(null);
+  const restRef = useRef<HTMLSpanElement>(null);
+  const [textWs, setTextWs] = useState<number[]>([]);
+  const [restW, setRestW] = useState(0);
 
   const refresh = useCallback(() => {
     void backend
@@ -484,7 +505,7 @@ export function IslandApp() {
   const atBottom = floating && placed?.edge === "bottom";
   const middle = floating && placed?.edge === "middle";
   const align = floating ? (placed?.align ?? "center") : "center";
-  const winW = placed?.window.w ?? 480;
+  const winW = placed?.window.w ?? 500;
   const pillW = placed?.pill.w ?? 0;
   // The width the open island may take from the pill's side inwards.
   const room =
@@ -492,14 +513,38 @@ export function IslandApp() {
   const wakeNow: WakeStatus = view?.wake ?? { state: "off" };
   const wakeDot = state === "idle" && !open && (wakeNow.state === "listening" || wakeNow.state === "paused");
   const limits = view ? limitsModel(view.limits, lang, now) : null;
-  const limitsDot = Boolean(limits?.dot) && !open;
+  const display = displayOf(view?.limits_display);
   const glyphOrWake = glyphShows(state, Boolean(view?.sending)) || wakeDot;
-  const slot = floating && (glyphOrWake || limitsDot);
-  const slotW = FLOAT_SLOT + (limitsDot && glyphOrWake ? FLOAT_SLOT_LIMITS : 0);
+  // The closed text: the owner's choice and what it may step down to, each
+  // measured (`textWs`); the first that fits is shown.
+  const textChoices = limits && !open && display.closed === "text" ? closedFallbacks(display).map((d) => closedParts(limits, d, now, t.limitsBlockedShort)) : [];
+  const p0 = view?.placement ?? null;
+  const notchW = p0?.notch.w ?? 0;
+  const earBase = p0 ? (p0.pill.w - notchW) / 2 : 0;
+  const restSide = restW > 0 ? EAR_GAP + restW : 0;
+  // The room for the text: the notch's ears up to the window less the
+  // flared corners; the floating slot up to the window beside the pill.
+  const textRoom = !p0
+    ? 0
+    : floating
+      ? p0.window.w - p0.pill.w - 16 - restSide
+      : Math.max(earBase, (p0.window.w - 2 * FLARE - notchW) / 2) - EAR_PAD_OUT - EAR_PAD_IN - restSide;
+  const textAt = textWs.length === textChoices.length ? textChoices.findIndex((c, i) => c.length > 0 && textWs[i]! <= textRoom) : -1;
+  const textParts = textAt >= 0 ? textChoices[textAt]! : [];
+  const textW = textAt >= 0 ? textWs[textAt]! : 0;
+  // The dot: chosen, or the text's last step when it does not fit.
+  const limitsDot = Boolean(limits?.dot) && !open && (display.closed === "dot" || (display.closed === "text" && textAt < 0));
+  const slot = floating && (glyphOrWake || limitsDot || textParts.length > 0);
+  const slotW =
+    textParts.length > 0
+      ? textW + restSide + 10
+      : FLOAT_SLOT + (limitsDot && glyphOrWake ? FLOAT_SLOT_LIMITS : 0);
+  // The notch's ears: as they were, or wider (both alike) for the text.
+  const earW = textParts.length > 0 ? Math.max(earBase, EAR_PAD_IN + textW + restSide + EAR_PAD_OUT) : earBase;
   // Open: only the row (listening, the line of text) widens sideways; a
   // card (anything in the body) is wider.
   const openWTarget = floating ? Math.min(bodyH > 0 ? FLOAT_CARD_W : FLOAT_WIDE_W, room) : Math.min(OPEN_W, winW - 8);
-  const closedWTarget = pillW + (slot ? slotW : 0);
+  const closedWTarget = floating ? pillW + (slot ? slotW : 0) : p0 ? notchW + 2 * earW : 0;
   const motion = useMotion(open, bodyH, openWTarget, closedWTarget, floating);
   const settled = !motion.moving;
 
@@ -521,6 +566,15 @@ export function IslandApp() {
     ro.observe(el);
     return () => ro.disconnect();
   }, [open]);
+
+  // The widths the closed text needs, after every render (a text or the
+  // glyph changed); a new state only when a width did.
+  useLayoutEffect(() => {
+    const ws = Array.from(measureRef.current?.children ?? []).map((el) => Math.ceil(el.getBoundingClientRect().width));
+    setTextWs((old) => (old.length === ws.length && old.every((w, i) => w === ws[i]) ? old : ws));
+    const rw = Math.ceil(restRef.current?.getBoundingClientRect().width ?? 0);
+    setRestW((old) => (old === rw ? old : rw));
+  });
 
   // Tell the shell where the shape and the face are once they have
   // arrived (after every render; the last frame of a move is one).
@@ -561,7 +615,9 @@ export function IslandApp() {
   // wide island as tall as its body.
   const k = motion.open;
   const openW = motion.openW;
-  const width = p.pill.w + (openW - p.pill.w) * k;
+  // Closed: the notch and its ears (wider for the limits text).
+  const closedW = motion.closedW > 0 ? motion.closedW : p.pill.w;
+  const width = closedW + (openW - closedW) * k;
   const height = p.pill.h + (notchH + motion.body - p.pill.h) * k;
   const closedR = Math.min(12, p.pill.h / 2);
   const radius = closedR + (24 - closedR) * Math.min(1, Math.max(0, k));
@@ -662,10 +718,31 @@ export function IslandApp() {
   // Narrow (the middle of a side, a spot near the screen's edge): compact.
   const limitsCompact = floating && (middle || Math.min(FLOAT_CARD_W, room) < FLOAT_CARD_W);
   const limitsNode =
-    limits && view.hover && !view.text_open && !view.hold && !approval && !cardNode ? (
-      <LimitsBlock model={limits} t={t} compact={limitsCompact} />
+    limits && display.open !== "off" && view.hover && !view.text_open && !view.hold && !approval && !cardNode ? (
+      display.open === "full" ? (
+        <LimitsBlock model={limits} t={t} display={display} lang={lang} now={now} compact={limitsCompact} />
+      ) : (
+        <LimitsRows model={limits} t={t} display={display} lang={lang} now={now} />
+      )
     ) : null;
   const limitsDotNode = limitsDot && limits ? <LimitsDot model={limits} t={t} /> : null;
+  const limitsTextNode = limits && textParts.length > 0 ? <LimitsText parts={textParts} label={limitsSummary(limits, t)} /> : null;
+  // The texts to measure (never seen), and the glyph with the wake dot in
+  // one measured span.
+  const measureNode =
+    textChoices.length > 0 ? (
+      <div ref={measureRef} className="isl-lt-measure" aria-hidden="true">
+        {textChoices.map((c, i) => (
+          <LimitsText key={i} parts={c} label="" />
+        ))}
+      </div>
+    ) : null;
+  const restNode = glyphOrWake ? (
+    <span ref={restRef} className="isl-ear-rest">
+      <Glyph state={state} sending={view.sending} />
+      {wakeDotNode}
+    </span>
+  ) : null;
   const approvalNode =
     approval && quick ? (
       <div className="isl-approval">
@@ -854,11 +931,12 @@ export function IslandApp() {
           {slot ? (
             <div className={`isl-fslot${mirror ? " mirror" : ""}`} style={{ top: rowTop, height: rowH, width: slotW }}>
               {limitsDotNode}
-              <Glyph state={state} sending={view.sending} />
-              {wakeDotNode}
+              {limitsTextNode}
+              {restNode}
             </div>
           ) : null}
         </div>
+        {measureNode}
       </div>
     );
   }
@@ -878,12 +956,12 @@ export function IslandApp() {
         title={speaking ? t.speakingHint : undefined}
       >
         <div className="isl-band" style={{ height: notchH }}>
-          <div className="isl-ear left" style={{ width: (p.pill.w - p.notch.w) / 2 }} />
+          <div className="isl-ear left" style={{ width: (closedW - p.notch.w) / 2 }} />
           <div className="isl-notch" style={{ width: p.notch.w }} />
-          <div className="isl-ear right" style={{ width: (p.pill.w - p.notch.w) / 2 }}>
+          <div className="isl-ear right" style={{ width: (closedW - p.notch.w) / 2 }}>
             {limitsDotNode}
-            <Glyph state={state} sending={view.sending} />
-            {wakeDotNode}
+            {limitsTextNode}
+            {restNode}
           </div>
         </div>
 
@@ -929,6 +1007,7 @@ export function IslandApp() {
           </div>
         </div>
       </div>
+      {measureNode}
     </div>
   );
 }

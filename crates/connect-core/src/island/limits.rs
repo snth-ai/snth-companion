@@ -21,8 +21,11 @@
 //! link goes down (the synth sends its last one again right after the
 //! next hello_ack). Times stay as the synth wrote them (ISO 8601): the
 //! island reads them in the computer's own time zone.
+//!
+//! How the island shows them is the owner's choice (`LimitsDisplay`, in
+//! the island's settings, tz-island-limits-display.md).
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::core::{CoreEvent, Shared};
@@ -158,4 +161,139 @@ pub(crate) fn store(shared: &Shared, synth_id: &str, limits: Option<Limits>) {
 /// The last snapshot of this synth (None: nothing to show).
 pub fn of(shared: &Shared, synth_id: &str) -> Option<Limits> {
     shared.island_limits.lock().unwrap().get(synth_id).cloned()
+}
+
+// --- how the island shows them (the owner's settings) ---
+//
+// tz-island-limits-display.md: what the closed island says (a short text
+// such as `h:34% 2h`, the old dot, or nothing), which window, the percent
+// used or left, the countdown to the reset; and how the open island shows
+// them (compact rows, the detailed block of 0.1.33, or nothing) with the
+// reset as a countdown or a clock time. Kept in `IslandSettings::limits`;
+// the defaults write nothing. A value this version does not know (written
+// by a newer one) reads as the default, never as a broken settings file.
+
+/// The closed island.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LimitsClosed {
+    /// `h:34% 2h` beside the status. The default.
+    #[default]
+    Text,
+    /// Only the dot, from 80% (as in 0.1.33).
+    Dot,
+    Off,
+}
+
+/// Which window the closed text shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LimitsWindowChoice {
+    /// The fullest window (the 5-hour one on a tie). The default.
+    #[default]
+    Auto,
+    #[serde(rename = "five_hour")]
+    FiveHour,
+    Week,
+    Both,
+}
+
+/// The percent: used (the default) or left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LimitsPercent {
+    #[default]
+    Used,
+    Left,
+}
+
+/// The reset on the closed island: the time left (`2h`, the default) or
+/// nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LimitsClosedReset {
+    #[default]
+    In,
+    Off,
+}
+
+/// The open island (hover).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LimitsOpen {
+    /// A line per window. The default.
+    #[default]
+    Compact,
+    /// The plan, a bar per window (the block of 0.1.33).
+    Full,
+    Off,
+}
+
+/// The reset on the open island: the time left (`in 2h`, the default) or
+/// the clock time (`18:20`, `Mon 03:00`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LimitsOpenReset {
+    #[default]
+    In,
+    Clock,
+}
+
+/// How the island shows the limits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct LimitsDisplay {
+    #[serde(default, deserialize_with = "lenient")]
+    pub closed: LimitsClosed,
+    #[serde(default, deserialize_with = "lenient")]
+    pub window: LimitsWindowChoice,
+    #[serde(default, deserialize_with = "lenient")]
+    pub percent: LimitsPercent,
+    #[serde(default, deserialize_with = "lenient")]
+    pub closed_reset: LimitsClosedReset,
+    #[serde(default, deserialize_with = "lenient")]
+    pub open: LimitsOpen,
+    #[serde(default, deserialize_with = "lenient")]
+    pub open_reset: LimitsOpenReset,
+}
+
+/// A value from the settings file, or the default when it is not one this
+/// version knows.
+pub(crate) fn lenient<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    let v = <Value as serde::Deserialize>::deserialize(d)?;
+    Ok(serde_json::from_value(v).unwrap_or_default())
+}
+
+impl LimitsDisplay {
+    pub fn is_default(&self) -> bool {
+        *self == LimitsDisplay::default()
+    }
+
+    /// The Island screen's change: some of the fields, each a known
+    /// value (`{"closed":"dot"}`). Err "bad_limits": not an object, a
+    /// field this version does not have, or a value it does not know;
+    /// nothing changes then.
+    pub fn patch(&mut self, p: &Value) -> Result<(), String> {
+        fn one<T: serde::de::DeserializeOwned>(v: &Value) -> Result<T, String> {
+            serde_json::from_value(v.clone()).map_err(|_| "bad_limits".to_string())
+        }
+        let obj = p.as_object().ok_or("bad_limits")?;
+        let mut next = *self;
+        for (k, v) in obj {
+            match k.as_str() {
+                "closed" => next.closed = one(v)?,
+                "window" => next.window = one(v)?,
+                "percent" => next.percent = one(v)?,
+                "closed_reset" => next.closed_reset = one(v)?,
+                "open" => next.open = one(v)?,
+                "open_reset" => next.open_reset = one(v)?,
+                _ => return Err("bad_limits".into()),
+            }
+        }
+        *self = next;
+        Ok(())
+    }
 }

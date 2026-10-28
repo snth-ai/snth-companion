@@ -69,6 +69,16 @@
 //         closed island (island=idle, or island=wakeidle beside the
 //         wake dot). &hover=1 opens any scenario as if the pointer were
 //         over it (island=done&hover=1&limits=claude: the tallest case).
+//        How they show (tz-island-limits-display.md), on the island and
+//         on the Island screen (screen=island&island=on): &lc=text|dot|off
+//         (closed: the text "h:34% 2h", the default; the dot from 80%;
+//         nothing), &lw=auto|5h|week|both (the closed text's window),
+//         &lp=used|left (the percent), &lr=in|off (the closed text's
+//         countdown), &le=compact|full|off (hovering: a line per window,
+//         the default; the detailed block; nothing), &ler=in|clock (the
+//         open reset: "in 2h" or "18:20"). E.g.
+//         island.html?limits=codex&lw=both,
+//         island.html?os=windows&pos=middle-right&island=working&limits=blocked.
 //
 // Nothing here touches the network or the computer.
 
@@ -96,7 +106,9 @@ import type {
   VoiceReply,
   IslandPosition,
   IslandPositionChoice,
+  LimitsDisplay,
 } from "./types";
+import { displayOf } from "../island/limitsView";
 
 /** The two model files, as the app pins them (stt/model.rs). */
 export const STT_SIZE = 574_041_195 + 885_098;
@@ -166,6 +178,23 @@ export function stagedLimits(now: number): IslandLimits | null {
     default:
       return null;
   }
+}
+
+/** The owner's choice of how the limits show, from the URL
+ * (tz-island-limits-display.md): `&lc=text|dot|off` (closed),
+ * `&lw=auto|5h|week|both` (its window), `&lp=used|left` (percent),
+ * `&lr=in|off` (its countdown), `&le=compact|full|off` (open),
+ * `&ler=in|clock` (open's reset). Absent: the defaults. */
+export function stagedDisplay(): LimitsDisplay {
+  const lw = params.get("lw");
+  return displayOf({
+    closed: (params.get("lc") ?? undefined) as LimitsDisplay["closed"],
+    window: (lw === "5h" ? "five_hour" : (lw ?? undefined)) as LimitsDisplay["window"],
+    percent: (params.get("lp") ?? undefined) as LimitsDisplay["percent"],
+    closed_reset: (params.get("lr") ?? undefined) as LimitsDisplay["closed_reset"],
+    open: (params.get("le") ?? undefined) as LimitsDisplay["open"],
+    open_reset: (params.get("ler") ?? undefined) as LimitsDisplay["open_reset"],
+  });
 }
 
 export function defaultHotkeys(os: string): Hotkeys {
@@ -281,6 +310,7 @@ export function stagedIslandState(os: string, links: LinkBrief[]): IslandState {
       wake_phrase: "",
       stt_tone: true,
       position: stagedPosition(),
+      limits: stagedDisplay(),
       ...(voiceChoice ? { voice_reply: voiceChoice } : {}),
     },
     main_synth: mainId,
@@ -323,9 +353,10 @@ export class MockIslandScreen {
     private changed: () => Promise<UiState>,
   ) {}
 
-  set(enabled: boolean | null, mainSynth: string | null, position?: IslandPositionChoice, voiceReply?: VoiceReply): Promise<UiState> {
+  set(enabled: boolean | null, mainSynth: string | null, position?: IslandPositionChoice, voiceReply?: VoiceReply, limits?: Partial<LimitsDisplay>): Promise<UiState> {
     const isl = this.state().island;
     if (voiceReply) isl.settings.voice_reply = voiceReply;
+    if (limits) isl.settings.limits = { ...displayOf(isl.settings.limits), ...limits };
     if (position) {
       const next: IslandPosition = { ...(isl.settings.position ?? {}) };
       if (position.vertical === "default") delete next.vertical;
@@ -559,7 +590,8 @@ export class MockIslandScreen {
 // --- the island window ---
 
 /** The stage's desktop (IslandStage), in points. */
-/** The island window's height (geometry.rs WINDOW_H). */
+/** The island window's size (geometry.rs WINDOW_W, WINDOW_H). */
+export const ISLAND_W = 500;
 export const WINDOW_H = 360;
 export const STAGE_W = 1512;
 export const STAGE_H = 520;
@@ -601,7 +633,7 @@ function spotPlacement(os: string): IslandPlacement | null {
     : { x: 0, y: bar, w: STAGE_W, h: STAGE_H - bar - STAGE_DOCK };
   const above = area.y;
   const below = STAGE_H - (area.y + area.h);
-  const w = 480;
+  const w = ISLAND_W;
   const h = WINDOW_H;
   const pw = 84;
   const ph = 28;
@@ -628,10 +660,10 @@ function placement(os: string): IslandPlacement {
   if (spot) return spot;
   if (os === "windows") {
     // As geometry.rs places it: a floating 84 x 28 pill 8 points above the
-    // taskbar (or under one on the top edge), in a 480 x 360 window kept
+    // taskbar (or under one on the top edge), in a 500 x 360 window kept
     // inside the work area.
     const top = params.get("taskbar") === "top";
-    const w = 480;
+    const w = ISLAND_W;
     const h = WINDOW_H;
     const pill = { x: w / 2 - 42, y: top ? 8 : h - 8 - 28, w: 84, h: 28 };
     return {
@@ -653,7 +685,7 @@ function notchPlacement(os: string, top: number): IslandPlacement {
   const real = os === "macos" && params.get("notch") !== "0";
   const notchW = real ? 185 : 184;
   const notchH = real ? 32 : os === "macos" ? 25 : 24;
-  const w = 480;
+  const w = ISLAND_W;
   const ear = 84;
   return {
     window: { x: 1512 / 2 - w / 2, y: top, w, h: WINDOW_H },
@@ -734,6 +766,7 @@ export class MockIslandWindow {
               : { state: "off" },
       speaking: null,
       limits: stagedLimits(now),
+      limits_display: stagedDisplay(),
     };
     const ru = lang === "ru";
     const spoken = ru

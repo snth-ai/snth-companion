@@ -61,8 +61,10 @@ use serde::{Deserialize, Serialize};
 /// The island's window, in logical points. Wide and tall enough for the
 /// expanded island (the face, a line of text, two buttons, a summary and,
 /// hovering, the subscription limits under it: 360, was 300 before the
-/// limits). Transparent and click-through but for the shape.
-pub const WINDOW_W: f64 = 480.0;
+/// limits), and for the notch's ears widened for the closed limits text
+/// of both windows beside the wake dot (500, was 480). Transparent and
+/// click-through but for the shape.
+pub const WINDOW_W: f64 = 500.0;
 pub const WINDOW_H: f64 = 360.0;
 
 /// Each ear beside the notch: room for the face (about 70 px wide at the

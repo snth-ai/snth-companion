@@ -74,13 +74,14 @@ export const tauriBackend: Backend = {
   observeRunningApps: () => invoke("observe_running_apps"),
   observeLocation: () => invoke("observe_location"),
 
-  islandSet: (enabled, mainSynth, position, voiceReply) =>
+  islandSet: (enabled, mainSynth, position, voiceReply, limits) =>
     invoke("island_set", {
       enabled,
       mainSynth,
       vertical: position?.vertical ?? null,
       horizontal: position?.horizontal ?? null,
       voiceReply: voiceReply ?? null,
+      limits: limits ?? null,
     }),
   islandHotkeySet: (which, accelerator) => invoke("island_hotkey_set", { which, accelerator }),
   islandHotkeyReset: (which) => invoke("island_hotkey_reset", { which }),

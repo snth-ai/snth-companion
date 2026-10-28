@@ -1118,8 +1118,10 @@ pub async fn observe_location(ctx: Cx<'_>) -> Result<UiState, String> {
 /// put it elsewhere on the screen (`vertical` "top" | "middle" |
 /// "bottom", `horizontal` "left" | "center" | "right", "default" or ""
 /// for this system's default on that axis; an axis left out stays as it
-/// is). Err: "unsupported", "unknown_synth", "bad_position" (an unknown
-/// word, or the middle of the screen).
+/// is). `limits`: how the island shows the synth's subscription limits,
+/// some of `LimitsDisplay`'s fields (`{"closed":"dot"}`), the island
+/// redrawn at once. Err: "unsupported", "unknown_synth", "bad_position"
+/// (an unknown word, or the middle of the screen), "bad_limits".
 #[tauri::command]
 pub async fn island_set(
     ctx: Cx<'_>,
@@ -1128,6 +1130,7 @@ pub async fn island_set(
     vertical: Option<String>,
     horizontal: Option<String>,
     voice_reply: Option<String>,
+    limits: Option<serde_json::Value>,
 ) -> Result<UiState, String> {
     if enabled == Some(true) && !crate::island::supported_os() {
         return Err("unsupported".into());
@@ -1153,6 +1156,10 @@ pub async fn island_set(
     if position.is_screen_middle() {
         return Err("bad_position".into());
     }
+    let mut shown = before.limits;
+    if let Some(p) = &limits {
+        shown.patch(p)?;
+    }
     let now = ctx.core.set_island(|i| {
         if let Some(on) = enabled {
             i.enabled = on;
@@ -1164,6 +1171,7 @@ pub async fn island_set(
         if let Some(v) = voice_reply {
             i.voice_reply = Some(v);
         }
+        i.limits = shown;
     });
     // Text only from now on: an answer that plays stops.
     if voice_reply == Some(connect_core::island::VoiceReply::Off) && voice_reply != before.voice_reply {
