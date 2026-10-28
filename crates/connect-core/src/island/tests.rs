@@ -700,6 +700,78 @@ fn the_voice_reply_is_always_by_default_and_in_an_old_file() {
     assert_eq!(VoiceReply::parse("loud"), None);
 }
 
+// --- how the island shows the limits (tz-island-limits-display.md) ---
+
+#[test]
+fn the_limits_display_is_the_default_in_an_old_file_and_writes_nothing() {
+    let d = LimitsDisplay::default();
+    assert_eq!(d.closed, LimitsClosed::Text);
+    assert_eq!(d.window, LimitsWindowChoice::Auto);
+    assert_eq!(d.percent, LimitsPercent::Used);
+    assert_eq!(d.closed_reset, LimitsClosedReset::In);
+    assert_eq!(d.open, LimitsOpen::Compact);
+    assert_eq!(d.open_reset, LimitsOpenReset::In);
+    let old: IslandSettings = serde_json::from_value(json!({"enabled": true, "stt": "device", "voice_reply": "auto"})).unwrap();
+    assert_eq!(old.limits, LimitsDisplay::default());
+    // The default writes nothing, so an older app reads the file as it was.
+    assert!(serde_json::to_value(&old).unwrap().get("limits").is_none());
+    assert!(serde_json::to_value(IslandSettings::default()).unwrap().get("limits").is_none());
+}
+
+#[test]
+fn the_limits_display_round_trips_and_reads_unknown_values_as_the_default() {
+    let all = json!({"closed": "dot", "window": "five_hour", "percent": "left", "closed_reset": "off", "open": "full", "open_reset": "clock"});
+    let s: IslandSettings = serde_json::from_value(json!({"limits": all})).unwrap();
+    assert_eq!(
+        s.limits,
+        LimitsDisplay {
+            closed: LimitsClosed::Dot,
+            window: LimitsWindowChoice::FiveHour,
+            percent: LimitsPercent::Left,
+            closed_reset: LimitsClosedReset::Off,
+            open: LimitsOpen::Full,
+            open_reset: LimitsOpenReset::Clock,
+        }
+    );
+    assert_eq!(serde_json::to_value(&s).unwrap()["limits"], all);
+    for (w, v) in [("auto", LimitsWindowChoice::Auto), ("five_hour", LimitsWindowChoice::FiveHour), ("week", LimitsWindowChoice::Week), ("both", LimitsWindowChoice::Both)] {
+        let s: IslandSettings = serde_json::from_value(json!({"limits": {"window": w}})).unwrap();
+        assert_eq!(s.limits.window, v);
+        let saved = serde_json::to_value(&s).unwrap();
+        if v == LimitsWindowChoice::Auto {
+            assert!(saved.get("limits").is_none(), "the default writes nothing");
+        } else {
+            assert_eq!(saved["limits"]["window"], w);
+        }
+    }
+    // Written by a newer version: an unknown value is the default, the
+    // rest of the file still reads.
+    let newer: IslandSettings = serde_json::from_value(json!({"enabled": true, "limits": {"closed": "meter", "open": "full", "window": 5, "extra": true}})).unwrap();
+    assert!(newer.enabled);
+    assert_eq!(newer.limits, LimitsDisplay { open: LimitsOpen::Full, ..LimitsDisplay::default() });
+    let odd: IslandSettings = serde_json::from_value(json!({"enabled": true, "limits": "compact"})).unwrap();
+    assert!(odd.enabled);
+    assert_eq!(odd.limits, LimitsDisplay::default());
+}
+
+#[test]
+fn the_limits_display_takes_a_patch_of_known_values_only() {
+    let mut d = LimitsDisplay::default();
+    d.patch(&json!({"closed": "off", "window": "both"})).unwrap();
+    assert_eq!(d, LimitsDisplay { closed: LimitsClosed::Off, window: LimitsWindowChoice::Both, ..LimitsDisplay::default() });
+    d.patch(&json!({"open_reset": "clock"})).unwrap();
+    assert_eq!(d.open_reset, LimitsOpenReset::Clock);
+    assert_eq!(d.window, LimitsWindowChoice::Both, "a field left out stays");
+    // A bad value or field changes nothing at all.
+    let before = d;
+    assert_eq!(d.patch(&json!({"closed": "text", "window": "month"})), Err("bad_limits".into()));
+    assert_eq!(d.patch(&json!({"closed": "text", "colour": "red"})), Err("bad_limits".into()));
+    assert_eq!(d.patch(&json!("compact")), Err("bad_limits".into()));
+    assert_eq!(d, before);
+    d.patch(&json!({})).unwrap();
+    assert_eq!(d, before);
+}
+
 #[test]
 fn the_voice_reply_rides_only_with_a_voice_message() {
     let with = |m: OwnerMessage, r: VoiceReply| OwnerMessage { voice_reply: Some(r), ..m };

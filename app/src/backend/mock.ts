@@ -87,6 +87,7 @@
 
 import type {
   IslandPositionChoice,
+  LimitsDisplay,
   VoiceReply,
   AccountState,
   AccountSynth,
@@ -2258,8 +2259,8 @@ class MockBackend implements Backend {
 
   // --- the island ---
 
-  islandSet(enabled: boolean | null, mainSynth: string | null, position?: IslandPositionChoice, voiceReply?: VoiceReply) {
-    return this.islandScreen.set(enabled, mainSynth, position, voiceReply);
+  islandSet(enabled: boolean | null, mainSynth: string | null, position?: IslandPositionChoice, voiceReply?: VoiceReply, limits?: Partial<LimitsDisplay>) {
+    return this.islandScreen.set(enabled, mainSynth, position, voiceReply, limits);
   }
 
   islandHotkeySet(which: HotkeyKind, accelerator: string) {

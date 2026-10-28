@@ -7,16 +7,21 @@
 // answers to, an extra phrase, what it does now, its own small model.
 // Reply with voice (tz-voice-reply.md): always (the default), the synth
 // decides, or text only; shown even when the synth cannot do it yet,
-// with a note saying so.
+// with a note saying so. Subscription limits (tz-island-limits-display.md):
+// what the closed and the open island show of them, with a live preview
+// on sample numbers; shown for every synth, with a note that only a synth
+// on a subscription has limits.
 
 import { useEffect, useRef, useState } from "react";
 import { backend } from "../backend";
-import type { FaceConfig, HotkeyKind, IslandAlign, IslandEdge, SttEngine, SttMode, UiState, VoiceReply } from "../backend/types";
-import { FaceEditor } from "../island/faceApi";
+import type { FaceConfig, HotkeyKind, IslandAlign, IslandEdge, IslandLimits, LimitsDisplay, SttEngine, SttMode, UiState, VoiceReply } from "../backend/types";
+import { Face, FaceEditor, faceFor } from "../island/faceApi";
+import { LimitsBlock, LimitsDot, LimitsRows, LimitsText, limitsSummary } from "../island/LimitsBlock";
+import { closedParts, displayOf, limitsModel } from "../island/limitsView";
 import { sttEngines } from "../island/sttView";
 import { acceleratorFromEvent, formatBytes, shortcutKeys } from "../lib/format";
 import { linkName, useStore } from "../lib/store";
-import { ChoiceList, Keys, Notice, Row, Section, SwitchRow } from "../ui/controls";
+import { ChoiceList, Keys, Notice, Row, Section, Segmented, SwitchRow } from "../ui/controls";
 import { IconX } from "../ui/icons";
 
 const KINDS: HotkeyKind[] = ["voice", "screen_voice", "text"];
@@ -122,6 +127,140 @@ function VoiceReplySection(props: { name: string; canSpeak: boolean }) {
         ]}
         onChange={(next) => void act(() => backend.islandSet(null, null, undefined, next))}
       />
+    </Section>
+  );
+}
+
+/** The preview's numbers: 34% of the 5 hours (the reset in 2 hours),
+ * 61% of the week (in 3 days). */
+function sampleLimits(now: number): IslandLimits {
+  const at = (ms: number) => new Date(now + ms).toISOString();
+  return {
+    provider: "claude",
+    plan: "Claude Max",
+    windows: [
+      { id: "five_hour", label_ru: "5ч", label_en: "5h", used_pct: 34, resets_at: at(100 * 60_000) },
+      { id: "seven_day", label_ru: "неделя", label_en: "week", used_pct: 61, resets_at: at(62 * 3_600_000) },
+    ],
+    blocked: false,
+    fetched_at: at(0),
+    received_ms: now,
+  };
+}
+
+/** How the island shows the synth's subscription limits (CodexBar's
+ * kind of choices): the closed island, its window, percent and reset;
+ * the open island and its reset. Every change goes to the island at once. */
+function LimitsSection(props: { synthId: string | null }) {
+  const { state, s, lang, act } = useStore();
+  const t = s.island;
+  const w = s.island.w;
+  const d = displayOf(state.island.settings.limits);
+  const set = (patch: Partial<LimitsDisplay>) => void act(() => backend.islandSet(null, null, undefined, undefined, patch));
+  const [now] = useState(() => Date.now());
+  const model = limitsModel(sampleLimits(now), lang, now)!;
+  const parts = closedParts(model, d, now, w.limitsBlockedShort);
+  const face = faceFor(props.synthId ?? "", props.synthId ? state.island.faces[props.synthId] : null);
+  const closedPreview =
+    d.closed === "text" ? (
+      <LimitsText parts={parts} label={limitsSummary(model, w)} />
+    ) : d.closed === "dot" ? (
+      // The sample is below 80%: the dot would not show; drawn as at 85%.
+      <LimitsDot model={{ ...model, dot: "warn" }} t={w} />
+    ) : (
+      <span className="island-lim-none">{t.limitsPreviewNothing}</span>
+    );
+  const openPreview =
+    d.open === "off" ? (
+      <span className="island-lim-none">{t.limitsPreviewNothing}</span>
+    ) : d.open === "full" ? (
+      <LimitsBlock model={model} t={w} display={d} lang={lang} now={now} />
+    ) : (
+      <LimitsRows model={model} t={w} display={d} lang={lang} now={now} />
+    );
+  const textOn = d.closed === "text";
+  return (
+    <Section title={t.limits} note={t.limitsNote}>
+      <div className="group">
+        <Row title={t.limitsPreview} desc={t.limitsPreviewDesc} />
+        <div className="island-lim-preview" aria-hidden="true">
+          <div className="island-lim-closed">
+            <span className="island-lim-face">
+              <Face config={face} size={26} still />
+            </span>
+            <span className="island-lim-notch" />
+            <span className="island-lim-ear">{closedPreview}</span>
+          </div>
+          <div className="island-lim-open">{openPreview}</div>
+        </div>
+      </div>
+      <div className="group">
+        <Row title={t.limitsClosed} desc={t.limitsClosedDesc[d.closed]}>
+          <select className="select" aria-label={t.limitsClosed} value={d.closed} onChange={(e) => set({ closed: e.target.value as LimitsDisplay["closed"] })}>
+            <option value="text">{t.limitsClosedText}</option>
+            <option value="dot">{t.limitsClosedDot}</option>
+            <option value="off">{t.limitsClosedOff}</option>
+          </select>
+        </Row>
+        {textOn ? (
+          <>
+            <Row title={t.limitsWindow} desc={t.limitsWindowDesc}>
+              <select className="select" aria-label={t.limitsWindow} value={d.window} onChange={(e) => set({ window: e.target.value as LimitsDisplay["window"] })}>
+                <option value="auto">{t.limitsWindowAuto}</option>
+                <option value="five_hour">{t.limitsWindowFive}</option>
+                <option value="week">{t.limitsWindowWeek}</option>
+                <option value="both">{t.limitsWindowBoth}</option>
+              </select>
+            </Row>
+            <Row title={t.limitsClosedReset}>
+              <Segmented<LimitsDisplay["closed_reset"]>
+                label={t.limitsClosedReset}
+                value={d.closed_reset}
+                onChange={(v) => set({ closed_reset: v })}
+                options={[
+                  { value: "in", title: t.limitsClosedResetIn },
+                  { value: "off", title: t.limitsClosedResetOff },
+                ]}
+              />
+            </Row>
+          </>
+        ) : null}
+        {textOn || d.open !== "off" ? (
+          <Row title={t.limitsPercent} desc={t.limitsPercentDesc}>
+            <Segmented<LimitsDisplay["percent"]>
+              label={t.limitsPercent}
+              value={d.percent}
+              onChange={(v) => set({ percent: v })}
+              options={[
+                { value: "used", title: t.limitsPercentUsed },
+                { value: "left", title: t.limitsPercentLeft },
+              ]}
+            />
+          </Row>
+        ) : null}
+      </div>
+      <div className="group">
+        <Row title={t.limitsOpen} desc={t.limitsOpenDesc[d.open]}>
+          <select className="select" aria-label={t.limitsOpen} value={d.open} onChange={(e) => set({ open: e.target.value as LimitsDisplay["open"] })}>
+            <option value="compact">{t.limitsOpenCompact}</option>
+            <option value="full">{t.limitsOpenFull}</option>
+            <option value="off">{t.limitsOpenOff}</option>
+          </select>
+        </Row>
+        {d.open !== "off" ? (
+          <Row title={t.limitsOpenReset} desc={t.limitsOpenResetDesc(w.limitsIn(lang === "ru" ? "2ч" : "2h"), lang === "ru" ? "18:20, пн 03:00" : "18:20, Mon 03:00")}>
+            <Segmented<LimitsDisplay["open_reset"]>
+              label={t.limitsOpenReset}
+              value={d.open_reset}
+              onChange={(v) => set({ open_reset: v })}
+              options={[
+                { value: "in", title: t.limitsOpenResetIn },
+                { value: "clock", title: t.limitsOpenResetClock },
+              ]}
+            />
+          </Row>
+        ) : null}
+      </div>
     </Section>
   );
 }
@@ -641,6 +780,8 @@ export function Island() {
               {main && !supported && links.length < 2 ? <Notice kind="warn">{t.outdated(name)}</Notice> : null}
 
               <PositionSection />
+
+              <LimitsSection synthId={mainId} />
 
               <Section title={t.keys} note={t.keysNote}>
                 {!isl.keys_active ? <Notice kind="info">{t.keysInactive(name)}</Notice> : null}

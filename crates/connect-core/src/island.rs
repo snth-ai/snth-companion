@@ -49,7 +49,10 @@ use crate::core::{CoreEvent, LinkState, Shared};
 use crate::slot::LinkSlot;
 
 pub mod limits;
-pub use limits::{supports_limits, LimitWindow, Limits, FEATURE_LIMITS};
+pub use limits::{
+    supports_limits, LimitWindow, Limits, LimitsClosed, LimitsClosedReset, LimitsDisplay, LimitsOpen, LimitsOpenReset, LimitsPercent, LimitsWindowChoice,
+    FEATURE_LIMITS,
+};
 
 /// The hello_ack feature of a synth that takes owner.message, face.get,
 /// face.set and calls island.event.
@@ -498,6 +501,11 @@ pub struct IslandSettings {
     /// choice existed; the default writes nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice_reply: Option<VoiceReply>,
+    /// How the island shows the synth's subscription limits
+    /// (`LimitsDisplay`, tz-island-limits-display.md). The defaults, and
+    /// a settings file written before the choice existed, write nothing.
+    #[serde(default, deserialize_with = "limits::lenient", skip_serializing_if = "LimitsDisplay::is_default")]
+    pub limits: LimitsDisplay,
 }
 
 fn yes() -> bool {
@@ -518,6 +526,7 @@ impl Default for IslandSettings {
             stt_tone: true,
             position: IslandPosition::default(),
             voice_reply: None,
+            limits: LimitsDisplay::default(),
         }
     }
 }

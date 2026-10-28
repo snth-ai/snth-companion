@@ -261,6 +261,8 @@ pub struct View {
     /// while its link is up and it announces `island_limits`; null =
     /// nothing to show (another runtime, no data yet).
     pub limits: Option<core_island::Limits>,
+    /// How the owner wants them shown (tz-island-limits-display.md).
+    pub limits_display: core_island::LimitsDisplay,
 }
 
 #[derive(Default)]
@@ -496,6 +498,7 @@ pub fn view(ctx: &Ctx) -> View {
         wake: island.wake_word.status(),
         speaking: inner.speaking.as_ref().map(|(_, s)| s.clone()),
         limits: main.as_ref().and_then(|m| ctx.core.island_limits(&m.synth_id)),
+        limits_display: settings.limits,
     };
     drop(inner);
     // The owner has seen the offer: a restart shows it again until it is
