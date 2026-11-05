@@ -86,7 +86,7 @@ impl MicProbe for Mic {
                 }
             }
         }
-        MicSample { recorders, device_running: false, own_capture: crate::island::audio::own_capture(), running }
+        MicSample { recorders, device_running: false, own_capture: crate::island::audio::own_capture(), running, players: None }
     }
 }
 

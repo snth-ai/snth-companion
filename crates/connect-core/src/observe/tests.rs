@@ -217,6 +217,73 @@ fn mic(recorders: Option<&[&str]>, device_running: bool, own_capture: bool, runn
         device_running,
         own_capture,
         running: running.iter().map(|s| s.to_string()).collect(),
+        players: None,
+    }
+}
+
+fn playing(mut s: MicSample, players: &[&str]) -> MicSample {
+    s.players = Some(players.iter().map(|p| p.to_string()).collect());
+    s
+}
+
+#[test]
+fn a_telegram_voice_message_is_not_a_call() {
+    // Board #397: recording a voice message in Telegram for macOS. The app
+    // records, plays nothing; a minute, two, ten: never a call.
+    let mut t = CallTracker::default();
+    let note = playing(mic(Some(&["ru.keepcoder.Telegram"]), true, false, &["ru.keepcoder.Telegram"]), &["com.apple.Music"]);
+    for now in [100, 130, 100 + MESSENGER_CALL_SECS, 700] {
+        assert_eq!(t.update(&note, None, now), json!({"in_call": false}), "{now}");
+    }
+}
+
+#[test]
+fn a_short_messenger_microphone_is_not_a_call_even_where_sound_is_not_told() {
+    // Windows and macOS before 14 do not say who plays: a voice message
+    // (under two minutes) is not a call, a microphone held longer is.
+    let mut t = CallTracker::default();
+    let tg = mic(Some(&["telegram.exe"]), false, false, &["telegram.exe"]);
+    assert_eq!(t.update(&tg, None, 100), json!({"in_call": false}));
+    assert_eq!(t.update(&tg, None, 100 + MESSENGER_CALL_SECS - 1), json!({"in_call": false}));
+    let v = t.update(&tg, None, 100 + MESSENGER_CALL_SECS);
+    assert_eq!(v, json!({"in_call": true, "since": rfc3339(100), "app": "telegram"}));
+    // A break starts over.
+    let idle = mic(Some(&[]), false, false, &["telegram.exe"]);
+    assert_eq!(t.update(&idle, None, 300), json!({"in_call": false}));
+    assert_eq!(t.update(&tg, None, 310), json!({"in_call": false}));
+}
+
+#[test]
+fn a_messenger_call_records_and_plays_and_lasts() {
+    let mut t = CallTracker::default();
+    // Slack's helper holds the microphone and plays the other side.
+    let huddle = playing(mic(Some(&["com.tinyspeck.slackmacgap.helper"]), true, false, &["com.tinyspeck.slackmacgap"]), &["com.tinyspeck.slackmacgap.helper"]);
+    assert_eq!(t.update(&huddle, None, 100)["in_call"], false);
+    assert_eq!(t.update(&huddle, None, 100 + MESSENGER_CALL_SECS), json!({"in_call": true, "since": rfc3339(100), "app": "slack"}));
+    // The other side's sound stops for a moment: no call this round, the
+    // same call (and since) when it plays again.
+    let quiet = playing(huddle.clone(), &[]);
+    assert_eq!(t.update(&quiet, None, 400)["in_call"], false);
+    assert_eq!(t.update(&huddle, None, 410)["since"], rfc3339(100));
+}
+
+#[test]
+fn zoom_facetime_teams_and_meet_stay_calls_at_once() {
+    let mut t = CallTracker::default();
+    let zoom = playing(mic(Some(&["us.zoom.xos"]), true, false, &["us.zoom.xos"]), &[]);
+    assert_eq!(t.update(&zoom, None, 100), json!({"in_call": true, "since": rfc3339(100), "app": "zoom"}));
+    let mut t = CallTracker::default();
+    let ft = mic(Some(&["com.apple.FaceTime"]), true, false, &["com.apple.FaceTime"]);
+    assert_eq!(t.update(&ft, None, 100)["app"], "facetime");
+}
+
+#[test]
+fn which_apps_record_voice_messages() {
+    for app in [CallApp::Telegram, CallApp::Whatsapp, CallApp::Slack, CallApp::Discord, CallApp::Other] {
+        assert!(records_voice_messages(app), "{app:?}");
+    }
+    for app in [CallApp::Zoom, CallApp::Meet, CallApp::Facetime, CallApp::Teams] {
+        assert!(!records_voice_messages(app), "{app:?}");
     }
 }
 

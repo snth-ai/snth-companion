@@ -27,6 +27,12 @@ pub const WIFI_EVERY: Duration = Duration::from_secs(10);
 /// A browser window with Google Meet in front this recently makes a
 /// browser's microphone a Meet call.
 pub const MEET_MEMORY_SECS: i64 = 600;
+
+/// How long a messenger (Telegram, WhatsApp, Slack, Discord, or an app
+/// not told) must hold the microphone before it counts as a call: those
+/// apps also record voice messages, and a voice message is not a call
+/// (board #397). The synth applies the same bar to what older apps send.
+pub const MESSENGER_CALL_SECS: i64 = 120;
 /// The apps the owner saw in front lately, for the exclusion picker.
 pub const RECENT_APPS: usize = 12;
 
@@ -668,6 +674,11 @@ pub struct MicSample {
     pub own_capture: bool,
     /// The call apps that run now, the one in front first.
     pub running: Vec<String>,
+    /// The processes other than this app whose sound output runs now
+    /// (CoreAudio `kAudioProcessPropertyIsRunningOutput`, macOS 14 and
+    /// later). None where the system does not say. A call plays the other
+    /// side; a voice message being recorded does not.
+    pub players: Option<Vec<String>>,
 }
 
 /// Reads the microphone. Never opens it, never records: only asks the
@@ -718,12 +729,37 @@ pub fn decide_call(s: &MicSample, meet: bool) -> Option<CallApp> {
     }
 }
 
+/// Does this app also record voice messages (so its microphone alone is
+/// not a call)? Zoom, FaceTime, Teams and Meet use the microphone only
+/// for calls; the messengers and an app not told do not.
+pub fn records_voice_messages(app: CallApp) -> bool {
+    matches!(app, CallApp::Telegram | CallApp::Whatsapp | CallApp::Slack | CallApp::Discord | CallApp::Other)
+}
+
+/// Does `app` play sound now? None: the system does not say. `Other`
+/// plays when any call app does.
+pub fn app_plays(s: &MicSample, app: CallApp) -> Option<bool> {
+    let players = s.players.as_ref()?;
+    Some(players.iter().any(|id| match (call_app_of(id), app) {
+        (Some(_), CallApp::Other) => true,
+        (Some(a), _) => a == app,
+        (None, _) => false,
+    }))
+}
+
 /// Turns microphone readings into `device.call` values, with `since` =
-/// when the call began.
+/// when the call began (for a messenger: when it took the microphone).
+///
+/// A messenger's microphone is a call only after `MESSENGER_CALL_SECS`
+/// without a break, and only while the app also plays sound where the
+/// system says so: a voice message records without playing (board #397).
 #[derive(Debug, Default)]
 pub struct CallTracker {
     call: Option<(CallApp, i64)>,
     meet_seen: Option<i64>,
+    /// The microphone now: the app deciding says, and since when (kept
+    /// across rounds while the app does not change).
+    mic: Option<(CallApp, i64)>,
 }
 
 impl CallTracker {
@@ -736,10 +772,25 @@ impl CallTracker {
         // A Meet call stays one for as long as it lasts, whatever is in
         // front now.
         let meet = self.meet_seen.is_some_and(|t| now - t <= MEET_MEMORY_SECS) || matches!(self.call, Some((CallApp::Meet, _)));
-        self.call = match (decide_call(s, meet), self.call) {
+        let app = decide_call(s, meet);
+        self.mic = match (app, self.mic) {
             (None, _) => None,
-            (Some(app), Some((_, since))) => Some((app, since)),
-            (Some(app), None) => Some((app, now)),
+            (Some(app), Some((was, since))) if was == app => Some((app, since)),
+            (Some(app), _) => Some((app, now)),
+        };
+        let confirmed = match self.mic {
+            None => None,
+            Some((app, since)) if records_voice_messages(app) => {
+                let long = now - since >= MESSENGER_CALL_SECS;
+                let plays = app_plays(s, app) != Some(false);
+                (long && plays).then_some((app, since))
+            }
+            Some(found) => Some(found),
+        };
+        self.call = match (confirmed, self.call) {
+            (None, _) => None,
+            (Some((app, _)), Some((_, since))) => Some((app, since)),
+            (Some(found), None) => Some(found),
         };
         call_value(self.call)
     }

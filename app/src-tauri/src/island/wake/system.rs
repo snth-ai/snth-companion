@@ -86,6 +86,7 @@ mod mac {
     const PROCESS_OBJECT_LIST: u32 = fourcc(b"prs#");
     const PROCESS_PID: u32 = fourcc(b"ppid");
     const PROCESS_RUNNING_INPUT: u32 = fourcc(b"piri");
+    const PROCESS_RUNNING_OUTPUT: u32 = fourcc(b"piro");
     const PROCESS_BUNDLE_ID: u32 = fourcc(b"pbid");
     /// kAudioDevicePropertyDeviceIsRunningSomewhere.
     const DEVICE_RUNNING_SOMEWHERE: u32 = fourcc(b"gone");
@@ -202,6 +203,45 @@ mod mac {
         let mut out = Vec::new();
         for id in ids {
             if get::<u32>(id, PROCESS_RUNNING_INPUT).unwrap_or(0) == 0 || process_inputs(id) == 0 {
+                continue;
+            }
+            let pid = get::<i32>(id, PROCESS_PID).unwrap_or(-1);
+            if pid == me {
+                continue;
+            }
+            let bundle = get::<CFTypeRef>(id, PROCESS_BUNDLE_ID)
+                .map(|s| {
+                    let b = cf_string(s);
+                    if !s.is_null() {
+                        unsafe { CFRelease(s) };
+                    }
+                    b
+                })
+                .unwrap_or_default();
+            out.push((pid, bundle));
+        }
+        Some(out)
+    }
+
+    /// The processes other than this one whose sound output runs now,
+    /// with their bundle ids (empty when a process has none): CoreAudio's
+    /// process objects, macOS 14 and later. None before.
+    pub fn playing_elsewhere() -> Option<Vec<(i32, String)>> {
+        let addr = Address { selector: PROCESS_OBJECT_LIST, scope: SCOPE_GLOBAL, element: ELEMENT_MAIN };
+        let mut size = 0u32;
+        if unsafe { AudioObjectGetPropertyDataSize(SYSTEM_OBJECT, &addr, 0, std::ptr::null(), &mut size) } != 0 {
+            return None;
+        }
+        let mut ids = vec![0u32; size as usize / 4];
+        let mut got = (ids.len() * 4) as u32;
+        if unsafe { AudioObjectGetPropertyData(SYSTEM_OBJECT, &addr, 0, std::ptr::null(), &mut got, ids.as_mut_ptr().cast()) } != 0 {
+            return None;
+        }
+        ids.truncate(got as usize / 4);
+        let me = std::process::id() as i32;
+        let mut out = Vec::new();
+        for id in ids {
+            if get::<u32>(id, PROCESS_RUNNING_OUTPUT).unwrap_or(0) == 0 {
                 continue;
             }
             let pid = get::<i32>(id, PROCESS_PID).unwrap_or(-1);
@@ -672,6 +712,21 @@ pub fn recorders() -> Option<Vec<String>> {
         Some(consent::recording(&entries, &me, running.as_deref()))
     }
     #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        None
+    }
+}
+
+/// The processes other than this app whose sound output runs now, by id
+/// (a bundle id, else the process file name), on macOS 14 and later. None
+/// elsewhere. Observe's call source: a call plays, a voice message being
+/// recorded does not (board #397).
+pub fn players() -> Option<Vec<String>> {
+    #[cfg(target_os = "macos")]
+    {
+        mac::playing_elsewhere().map(|list| list.into_iter().map(|(pid, b)| if b.is_empty() { process_file(pid) } else { b }).collect())
+    }
+    #[cfg(not(target_os = "macos"))]
     {
         None
     }
