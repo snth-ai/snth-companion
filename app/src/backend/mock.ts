@@ -106,6 +106,7 @@ import type {
   VaultView,
   AppPermission,
   AppsStatus,
+  PhoneDevice,
   PhonePreview,
   PhoneView,
   AppView,
@@ -136,6 +137,13 @@ import type {
 import { MockIslandScreen, MockIslandWindow, stagedIslandState } from "./mockIsland";
 
 const params = new URLSearchParams(window.location.search);
+
+/** The phones the mock Mac sees: a test phone over Wi-Fi and the owner's
+ * own phone (listed, never chosen by itself). */
+const MOCK_PHONES: PhoneDevice[] = [
+  { udid: "00008020-0003650E0192002E", name: "Test iPhone", model: "iPhone XR", state: "connected", reachable: true },
+  { udid: "00008140-000C685E0EE0801C", name: "My iPhone", model: "iPhone 16 Pro", state: "available", reachable: true },
+];
 const HOME = "/Users/alex";
 
 /** The helper's own look: what every preset has. */
@@ -429,7 +437,8 @@ function seedJournal(): Entry[] {
     cmd(1600, "ffmpeg -y -ss 00:00:05 -i trip.mp4 -t 30 -c copy trip-short.mp4", "ok", 0, 2400, 18_200),
     cmd(1500, "ffmpeg -i missing.mp4 out.mp4", "exit 1", 1, 180, 900),
     cmd(1400, "Remove-Item -Recurse old-photos", "denied: owner", undefined, 0, 0),
-    // The phone on the cable: the point or the keys, never the text.
+    // The phone: the point, the keys or the app, never the text.
+    { ...e(1305, "phone_control", "phone_control.act", "launch ph.telegra.Telegraph", "ok"), duration_ms: 1400 },
     { ...e(1300, "phone_control", "phone_control.act", "key cmd+space", "ok"), duration_ms: 420 },
     { ...e(1290, "phone_control", "phone_control.act", "type (10 characters)", "ok"), duration_ms: 610 },
     { ...e(1280, "phone_control", "phone_control.act", "tap 414,560", "ok: re-pressed"), duration_ms: 2100 },
@@ -1694,10 +1703,12 @@ class MockBackend implements Backend {
     // The command line is off in every preset; its mode stays.
     const { look, experiment, locked_use, keep_awake } = this.state.core.settings.computer;
     const shellMode = this.state.core.settings.shell.mode;
-    // So is the phone; its calibration stays.
+    // So is the phone; its calibration and the chosen phone stay.
     const phoneTuning = this.state.core.settings.phone_control.tuning;
+    const phoneUdid = this.state.core.settings.phone_control.device_udid;
     this.state.core.settings = presetSettings(preset, this.state.core.settings.files.roots);
     if (phoneTuning) this.state.core.settings.phone_control.tuning = phoneTuning;
+    if (phoneUdid) this.state.core.settings.phone_control.device_udid = phoneUdid;
     this.state.core.settings.computer.look = look;
     this.state.core.settings.computer.experiment = experiment;
     this.state.core.settings.computer.locked_use = locked_use;
@@ -1727,7 +1738,11 @@ class MockBackend implements Backend {
       probe.computer.locked_use = next.computer.locked_use;
       probe.computer.keep_awake = next.computer.keep_awake;
       probe.shell.mode = next.shell.mode;
-      probe.phone_control = { ...probe.phone_control, ...(next.phone_control.tuning ? { tuning: next.phone_control.tuning } : {}) };
+      probe.phone_control = {
+        ...probe.phone_control,
+        ...(next.phone_control.tuning ? { tuning: next.phone_control.tuning } : {}),
+        ...(next.phone_control.device_udid !== undefined ? { device_udid: next.phone_control.device_udid } : {}),
+      };
       if (JSON.stringify(probe) === JSON.stringify({ ...next, preset: p })) next.preset = p;
     }
     this.state.core.settings = next;
@@ -2029,13 +2044,31 @@ class MockBackend implements Backend {
 
   phoneCheck(): Promise<PhoneView> {
     const on = this.state.core.settings.phone_control.enabled;
+    const udid = this.state.core.settings.phone_control.device_udid ?? "";
     const off = { error: "phone control is off" };
+    // Over Wi-Fi: the chosen phone from the list below, or not found.
+    const chosen = MOCK_PHONES.find((p) => p.udid === udid);
+    const screen = !udid
+      ? { ok: true, device: "iPhone", width: 828, height: 1792, last_frame_ms: Date.now(), source: "cable" as const }
+      : chosen && chosen.reachable
+        ? { ok: true, device: chosen.name, width: 828, height: 1792, last_frame_ms: Date.now(), source: "network" as const }
+        : {
+            ok: false,
+            device: chosen?.name ?? "",
+            width: 828,
+            height: 1792,
+            last_frame_ms: 0,
+            source: "network" as const,
+            error: `the chosen phone (${udid}) is not visible to this Mac: pair it once by cable with Developer Mode on, then keep it awake on the same Wi-Fi`,
+          };
+    const net = !!udid && screen.ok;
     return this.reply(
       on
         ? {
             supported: true,
             enabled: true,
-            screen: { ok: true, device: "iPhone", width: 828, height: 1792, last_frame_ms: Date.now() },
+            screen,
+            abilities: { launch: net, paste: net },
             // ?phone=nobt: the board is there, the phone is not on its Bluetooth.
             hands:
               params.get("phone") === "nobt"
@@ -2049,9 +2082,16 @@ class MockBackend implements Backend {
             screen: { ok: false, device: "", width: 0, height: 0, last_frame_ms: 0, ...off },
             hands: { ok: false, port: "", ble_connected: false, firmware: "", ...off },
             holder: null,
+            abilities: { launch: false, paste: false },
           },
       120,
     );
+  }
+
+  /** ?phone=noxcode: no Xcode on this Mac. */
+  phoneDevices(): Promise<PhoneDevice[]> {
+    if (params.get("phone") === "noxcode") return Promise.reject("Xcode is not installed on this Mac (the phone over Wi-Fi needs it)");
+    return this.reply(structuredClone(MOCK_PHONES), 400);
   }
 
   phonePreview(): Promise<PhonePreview> {

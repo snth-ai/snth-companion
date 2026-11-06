@@ -213,19 +213,24 @@ export interface Settings {
   /** The command line. Off in every preset; its switch shows only in
    * developer mode. */
   shell: { enabled: boolean; mode: ShellMode };
-  /** The iPhone on the cable (macOS only). Off in every preset. `tuning`
-   * is the pointer calibration: not on any screen, kept by the core. */
-  phone_control: { enabled: boolean; tuning?: Record<string, number | string> };
+  /** The test iPhone (macOS only). Off in every preset. `tuning` is the
+   * pointer calibration: not on any screen, kept by the core.
+   * `device_udid`: the phone over Wi-Fi the owner picked; empty = the
+   * cable. Never set by anything but the owner's pick. */
+  phone_control: { enabled: boolean; tuning?: Record<string, number | string>; device_udid?: string };
   preset: Preset;
 }
 
-/** The phone's screen over the cable, as the capture helper sees it. */
+/** The phone's screen, over the cable (the capture helper) or over Wi-Fi
+ * (Xcode's devicectl). */
 export interface PhoneScreen {
   ok: boolean;
   device: string;
   width: number;
   height: number;
   last_frame_ms: number;
+  /** Where the frames come from. */
+  source?: "cable" | "network";
   /** Why there is no screen (the core's words). */
   error?: string;
 }
@@ -249,6 +254,19 @@ export interface PhoneView {
   hands: PhoneHands;
   /** The synth that controls the phone right now. */
   holder: string | null;
+  /** What the phone can do beyond the board (over Wi-Fi only). */
+  abilities?: { launch: boolean; paste: boolean };
+}
+
+/** A physical iOS device this Mac sees (the Phone page's picker). */
+export interface PhoneDevice {
+  udid: string;
+  name: string;
+  /** "iPhone XR". */
+  model: string;
+  /** "connected", "available", "unpaired", or devicectl's own word. */
+  state: string;
+  reachable: boolean;
 }
 
 /** The phone's screen now, for the owner's own look. */
@@ -1080,6 +1098,9 @@ export interface Backend {
   phoneCheck(): Promise<PhoneView>;
   /** The phone's screen now (rejects when there is none). */
   phonePreview(): Promise<PhonePreview>;
+  /** The phones this Mac sees over Wi-Fi (rejects without Xcode). A list
+   * only: nothing is chosen by it. */
+  phoneDevices(): Promise<PhoneDevice[]>;
 
   /** Ask the synth which sites its vault holds a login for. */
   loginsRefresh(synthId: string | null): Promise<UiState>;

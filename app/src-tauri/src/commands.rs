@@ -726,6 +726,14 @@ pub async fn phone_check(ctx: Cx<'_>) -> Result<connect_core::phone::PhoneView, 
     Ok(ctx.core.phone_view().await)
 }
 
+/// The phone over Wi-Fi: the physical iOS devices this Mac sees, for the
+/// owner's picker. A list only; the phone used is the one the owner picks
+/// (the settings' `phone_control.device_udid`).
+#[tauri::command]
+pub async fn phone_devices(ctx: Cx<'_>) -> Result<Vec<connect_core::phone::net::PhoneDevice>, String> {
+    ctx.core.phone_devices().await
+}
+
 /// The phone's screen now, for the owner's preview: a JPEG as a data URL,
 /// the long edge 480 px. Only the owner's own window asks; the synth never
 /// sees this.

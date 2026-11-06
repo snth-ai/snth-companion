@@ -455,6 +455,7 @@ fn main() {
             commands::apps_check,
             commands::apps_request_permission,
             commands::phone_check,
+            commands::phone_devices,
             commands::phone_preview,
             commands::logins_refresh,
             commands::safari_check,

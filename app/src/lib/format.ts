@@ -386,8 +386,9 @@ export function describeEntry(entry: Entry, s: Strings, lang: Lang): Omit<Line, 
       return { ...base, kind: "shell", text, note: facts.join(", ") };
     }
     case "phone_control": {
-      // "tap 400,800", "key cmd+space, enter", "type (8 characters)": the
-      // point or the keys, never what was typed.
+      // "tap 400,800", "key cmd+space, enter", "type (8 characters)",
+      // "launch ph.telegra.Telegraph": the point, the keys or the app,
+      // never what was typed.
       const space = entry.target.indexOf(" ");
       const verb = space < 0 ? entry.target : entry.target.slice(0, space);
       const arg = space < 0 ? "" : entry.target.slice(space + 1);
@@ -412,7 +413,9 @@ export function describeEntry(entry: Entry, s: Strings, lang: Lang): Omit<Line, 
                         ? p.home
                         : verb === "release_all"
                           ? p.releaseAll
-                          : p.use;
+                          : verb === "launch"
+                            ? p.launch(arg)
+                            : p.use;
       const o = entry.outcome;
       if (refused) return { ...base, kind: "phone", text: p.refused(what), note: why };
       const took = entry.duration_ms !== undefined ? j.shellTook((entry.duration_ms / 1000).toFixed(1)) : "";

@@ -46,9 +46,10 @@ const COMMANDS: &[&str] = &[
     // the owner's own apps
     "apps_check",
     "apps_request_permission",
-    // the phone on the cable: its state and a look at its screen
+    // the phone: its state, a look at its screen, the phones over Wi-Fi
     "phone_check",
     "phone_preview",
+    "phone_devices",
     // logins: the vault list and the browsers
     "logins_refresh",
     "safari_check",

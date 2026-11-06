@@ -1,17 +1,20 @@
-// The iPhone on the cable (macOS only): one switch, where the screen and
-// the keyboard board stand, a look at the phone's screen, the one-time
-// setup of the phone, and the synths the owner allowed for good.
+// The test iPhone (macOS only): one switch, which phone over Wi-Fi (or the
+// cable), where the screen and the keyboard board stand, a look at the
+// phone's screen, the one-time setup of the phone, and the synths the
+// owner allowed for good.
 //
 // The synth sees the phone's screen over the USB cable (the capture
-// helper inside the app) and taps and types through the SNTH Phone Bridge
-// board (a Bluetooth keyboard and mouse for the phone). Each synth asks
-// the owner first; a permission for one synth is not one for another.
+// helper inside the app) or over Wi-Fi (Xcode's devicectl, for the one
+// phone the owner picks here; nothing is ever picked by itself), and taps
+// and types through the SNTH Phone Bridge board (a Bluetooth keyboard and
+// mouse for the phone). Each synth asks the owner first; a permission for
+// one synth is not one for another.
 
 import { useCallback, useEffect, useState } from "react";
 import { backend } from "../backend";
-import type { PhonePreview, PhoneView } from "../backend/types";
+import type { PhoneDevice, PhonePreview, PhoneView } from "../backend/types";
 import { useStore } from "../lib/store";
-import { Notice, Section, SwitchRow } from "../ui/controls";
+import { ChoiceList, Notice, Section, SwitchRow } from "../ui/controls";
 import { IconCheck, IconWarning } from "../ui/icons";
 import { Remembered } from "./Remembered";
 
@@ -45,6 +48,64 @@ function usePhone(on: boolean) {
   }, [check, on]);
 
   return { view, checking, check };
+}
+
+/** The phones this Mac sees over Wi-Fi: asked when the page opens and on
+ * "Find phones". A list only; the owner picks. */
+function usePhones() {
+  const [phones, setPhones] = useState<PhoneDevice[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [finding, setFinding] = useState(false);
+  const find = useCallback(async () => {
+    setFinding(true);
+    try {
+      setPhones(await backend.phoneDevices());
+      setError(null);
+    } catch (e) {
+      setError(typeof e === "string" ? e : "");
+    } finally {
+      setFinding(false);
+    }
+  }, []);
+  useEffect(() => {
+    void find();
+  }, [find]);
+  return { phones, error, finding, find };
+}
+
+/** Cable, or one phone over Wi-Fi. The chosen phone stays listed when it
+ * is not seen right now. */
+function WifiPicker() {
+  const { state, s, edit } = useStore();
+  const t = s.phone;
+  const chosen = state.core.settings.phone_control.device_udid ?? "";
+  const { phones, error, finding, find } = usePhones();
+  const list = phones ?? [];
+  const options = [
+    { value: "", title: t.wifiCable, desc: t.wifiCableDesc },
+    ...list.map((p) => ({ value: p.udid, title: p.name || p.model, desc: `${t.wifiDevice(p.model, t.wifiState(p.state))} \u00b7 ${p.udid}` })),
+  ];
+  if (chosen && phones !== null && !list.some((p) => p.udid === chosen)) {
+    options.push({ value: chosen, title: t.wifiMissing(chosen), desc: t.wifiMissingDesc });
+  }
+  return (
+    <Section title={t.wifiTitle} note={t.wifiNote}>
+      <ChoiceList<string>
+        label={t.wifiTitle}
+        value={chosen}
+        options={options}
+        onChange={(v) => edit((d) => void (d.phone_control.device_udid = v))}
+      />
+      {finding && phones === null ? <p className="row-desc">{t.wifiFinding}</p> : null}
+      {phones !== null && list.length === 0 && error === null ? <p className="row-desc">{t.wifiNone}</p> : null}
+      {error !== null ? <p className="error-text">{error || t.wifiError}</p> : null}
+      <div className="onb-actions">
+        <button type="button" className="btn small" disabled={finding} onClick={() => void find()}>
+          {t.wifiFind}
+        </button>
+      </div>
+    </Section>
+  );
 }
 
 function StateLine(props: { ok: boolean; text: string; why?: string }) {
@@ -103,6 +164,8 @@ export function Phone() {
         </div>
       </Section>
 
+      <WifiPicker />
+
       {on ? (
         <Section title={t.nowTitle}>
           <div className="group">
@@ -111,7 +174,10 @@ export function Phone() {
                 <div className="row-title">{t.screenTitle}</div>
                 {screen ? (
                   screen.ok ? (
-                    <StateLine ok text={t.screenOk(screen.device || t.thePhone, screen.width, screen.height)} />
+                    <StateLine
+                      ok
+                      text={(screen.source === "network" ? t.screenOkNet : t.screenOk)(screen.device || t.thePhone, screen.width, screen.height)}
+                    />
                   ) : (
                     <StateLine ok={false} text={t.screenNo} why={screen.error} />
                   )

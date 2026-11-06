@@ -396,7 +396,7 @@ export const en = {
 
   phone: {
     lead: (n: string) =>
-      `${n} can work on an iPhone plugged into this Mac: it sees the phone's screen over the cable and taps and types through the SNTH Phone Bridge board, a Bluetooth keyboard and mouse for the phone.`,
+      `${n} can work on a test iPhone next to this Mac: it sees the phone's screen over the cable or over Wi-Fi and taps and types through the SNTH Phone Bridge board, a Bluetooth keyboard and mouse for the phone.`,
     enable: "Let synths use the phone",
     warning:
       "A synth you allow sees everything on the phone's screen and can do there what you can. Use a test phone, not your own. Each synth asks you first; a permission for one synth is not one for another.",
@@ -406,6 +406,7 @@ export const en = {
     thePhone: "The phone",
     checking: "Checking...",
     screenOk: (device: string, w: number, h: number) => `${device} is visible over the cable (${w} x ${h})`,
+    screenOkNet: (device: string, w: number, h: number) => `${device} is visible over Wi-Fi (${w} x ${h})`,
     screenNo: "The phone's screen is not visible.",
     boardOk: (port: string, firmware: string) =>
       `The board is on ${port}${firmware ? ` (firmware ${firmware})` : ""}, the phone is connected to it over Bluetooth`,
@@ -427,6 +428,20 @@ export const en = {
       "This Mac: on power, the lid open or an external display, so it does not sleep.",
     ],
     rememberedTitle: "Synths allowed for good",
+    wifiTitle: "Phone over Wi-Fi",
+    wifiNote:
+      "Without a cable the synth sees the phone through Xcode on this Mac, and can open apps by name and paste any text. Pair the phone with this Mac once by cable with Developer Mode on; after that it works over the same Wi-Fi. Keep it awake (Auto-Lock Never) and on a charger (a wireless pad works).",
+    wifiCable: "Cable (this Mac's capture)",
+    wifiCableDesc: "The phone on the USB cable, as before.",
+    wifiDevice: (model: string, state: string) => `${model}, ${state}`,
+    wifiState: (state: string) =>
+      state === "connected" ? "connected" : state === "available" ? "available" : state === "unpaired" ? "not paired" : state,
+    wifiMissing: (udid: string) => `The chosen phone (${udid}) is not seen right now`,
+    wifiMissingDesc: "It may be asleep or on another Wi-Fi. It stays chosen; no other phone is used instead.",
+    wifiFind: "Find phones",
+    wifiFinding: "Looking for phones...",
+    wifiNone: "This Mac sees no iPhone. Pair the phone once by cable first.",
+    wifiError: "Could not list the phones.",
   },
 
   cookies: {
@@ -659,6 +674,7 @@ export const en = {
       type: (count: number) => `Typed ${plural(count, "character", "characters")} on the phone`,
       home: "Went to the phone's home screen",
       releaseAll: "Let go of every key on the phone",
+      launch: (app: string) => `Opened ${app} on the phone`,
       use: "Used the phone",
       refused: (what: string) => `Refused: ${what.charAt(0).toLowerCase()}${what.slice(1)}`,
       failed: (what: string) => `Did not work: ${what.charAt(0).toLowerCase()}${what.slice(1)}`,

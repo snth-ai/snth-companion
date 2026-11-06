@@ -51,6 +51,7 @@ export const tauriBackend: Backend = {
 
   phoneCheck: () => invoke("phone_check"),
   phonePreview: () => invoke("phone_preview"),
+  phoneDevices: () => invoke("phone_devices"),
 
   loginsRefresh: (synthId) => invoke("logins_refresh", { synthId }),
   safariCheck: () => invoke("safari_check"),

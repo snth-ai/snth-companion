@@ -41,6 +41,7 @@
     "allow-apps-request-permission",
     "allow-phone-check",
     "allow-phone-preview",
+    "allow-phone-devices",
     "allow-logins-refresh",
     "allow-safari-check",
     "allow-vault-forget",
