@@ -6,6 +6,9 @@
 //!    (`kAudioDevicePropertyDeviceIsRunningSomewhere`) next to whether
 //!    this app holds it (`audio::own_capture`). Nothing is opened or
 //!    recorded. The call apps that run: `NSWorkspace.runningApplications`.
+//!    While the microphone is busy, the processes whose sound output runs
+//!    (`wake::system::players`, macOS 14 and later): a messenger is on a
+//!    call only while it also plays (board #397).
 //!  - The app in front (`Front`): `NSWorkspace.frontmostApplication`
 //!    (name, bundle id, pid) and its focused window's title through
 //!    Accessibility (`AXFocusedWindow`, `AXTitle`), only while the app
@@ -206,7 +209,9 @@ impl MicProbe for Mic {
                 running.insert(0, f);
             }
         }
-        MicSample { recorders, device_running, own_capture: crate::island::audio::own_capture(), running }
+        // Who plays sound matters only while a call app may be recording.
+        let players = if busy { system::players() } else { None };
+        MicSample { recorders, device_running, own_capture: crate::island::audio::own_capture(), running, players }
     }
 }
 
