@@ -342,7 +342,6 @@ async fn admit(shared: &Arc<Shared>, params: &Value, action: &str, act: Option<&
     }
     let reason = params.get("reason").and_then(Value::as_str).unwrap_or("");
     let ask = ApprovalRequest::new(CAP, SCOPE, reason, "control your phone (see its screen, tap and type on it)")
-        .with_details(vec![("first".to_string(), action.to_string())])
         .with_remember(Remember::Any);
     let answer = shared.ask_scoped(CAP, SCOPE, ask).await;
     if !answer.allow {

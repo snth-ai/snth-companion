@@ -8,7 +8,7 @@ import { grantTime, shortPath } from "../lib/format";
 import { grantSynth, useStore } from "../lib/store";
 import { Section } from "../ui/controls";
 
-export function Remembered(props: { capability: "computer" | "files" | "shell"; title?: string }) {
+export function Remembered(props: { capability: "computer" | "files" | "shell" | "phone_control"; title?: string }) {
   const { state, s, lang, act } = useStore();
   const grants = state.grants.filter((g) => g.capability === props.capability);
   if (grants.length === 0) return null;
@@ -16,6 +16,7 @@ export function Remembered(props: { capability: "computer" | "files" | "shell"; 
   const label = (g: Grant): string => {
     if (props.capability === "files") return shortPath(g.scope);
     if (props.capability === "shell") return g.scope;
+    if (props.capability === "phone_control") return s.remembered.phone;
     if (g.scope === "task") return s.remembered.task;
     if (g.scope.startsWith("foreground:")) {
       const tool = g.scope.slice("foreground:".length);

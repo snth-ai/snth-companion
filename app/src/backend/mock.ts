@@ -106,6 +106,8 @@ import type {
   VaultView,
   AppPermission,
   AppsStatus,
+  PhonePreview,
+  PhoneView,
   AppView,
   ApprovalRequest,
   Backend,
@@ -308,6 +310,7 @@ function presetSettings(preset: Exclude<Preset, "custom">, roots: Settings["file
     apps: { enabled: true, mode: "ask", apps: {} },
     // Off in every preset.
     shell: { enabled: false, mode: "ask" },
+    phone_control: { enabled: false },
     preset,
   };
   if (preset === "balanced") {
@@ -363,6 +366,7 @@ function offSettings(): Settings {
     files: { enabled: false, roots: [], ask_on_write: false },
     apps: { enabled: false, mode: "ask", apps: {} },
     shell: { enabled: false, mode: "ask" },
+    phone_control: { enabled: false },
     preset: "custom",
   };
 }
@@ -425,6 +429,11 @@ function seedJournal(): Entry[] {
     cmd(1600, "ffmpeg -y -ss 00:00:05 -i trip.mp4 -t 30 -c copy trip-short.mp4", "ok", 0, 2400, 18_200),
     cmd(1500, "ffmpeg -i missing.mp4 out.mp4", "exit 1", 1, 180, 900),
     cmd(1400, "Remove-Item -Recurse old-photos", "denied: owner", undefined, 0, 0),
+    // The phone on the cable: the point or the keys, never the text.
+    { ...e(1300, "phone_control", "phone_control.act", "key cmd+space", "ok"), duration_ms: 420 },
+    { ...e(1290, "phone_control", "phone_control.act", "type (10 characters)", "ok"), duration_ms: 610 },
+    { ...e(1280, "phone_control", "phone_control.act", "tap 414,560", "ok: re-pressed"), duration_ms: 2100 },
+    e(1270, "phone_control", "phone_control.act", "home", "busy: Maya is controlling the phone right now; try again in a minute"),
     e(900, "apps", "notify.show", "", "ok"),
     e(640, "files", "files.read", `${HOME}/Downloads/boarding-pass.pdf`, "ok"),
     e(600, "net", "dial", "www.aviasales.ru:443", "ok", 3_400_000),
@@ -579,6 +588,14 @@ const APPROVAL_KINDS: Record<string, ApprovalKind> = {
     summary: "link Microsoft Edge to the synth's login vault",
     reason: "",
     remember: "never",
+  },
+  // The iPhone on the cable: one permission per synth.
+  phone_control: {
+    capability: "phone_control",
+    scope: "control",
+    summary: "control your phone (see its screen, tap and type on it)",
+    reason: "You asked me to set a 3 minute timer on the test phone.",
+    remember: "any",
   },
   // A command on the command line: the whole command and its folder.
   shell: {
@@ -1677,7 +1694,10 @@ class MockBackend implements Backend {
     // The command line is off in every preset; its mode stays.
     const { look, experiment, locked_use, keep_awake } = this.state.core.settings.computer;
     const shellMode = this.state.core.settings.shell.mode;
+    // So is the phone; its calibration stays.
+    const phoneTuning = this.state.core.settings.phone_control.tuning;
     this.state.core.settings = presetSettings(preset, this.state.core.settings.files.roots);
+    if (phoneTuning) this.state.core.settings.phone_control.tuning = phoneTuning;
     this.state.core.settings.computer.look = look;
     this.state.core.settings.computer.experiment = experiment;
     this.state.core.settings.computer.locked_use = locked_use;
@@ -1707,6 +1727,7 @@ class MockBackend implements Backend {
       probe.computer.locked_use = next.computer.locked_use;
       probe.computer.keep_awake = next.computer.keep_awake;
       probe.shell.mode = next.shell.mode;
+      probe.phone_control = { ...probe.phone_control, ...(next.phone_control.tuning ? { tuning: next.phone_control.tuning } : {}) };
       if (JSON.stringify(probe) === JSON.stringify({ ...next, preset: p })) next.preset = p;
     }
     this.state.core.settings = next;
@@ -1909,6 +1930,8 @@ class MockBackend implements Backend {
       const named = action === "shortcuts.run" || action === "open.url" || action === "open.app";
       const target = action === "open.file" ? (req.details.find((d) => d.key === "path")?.value ?? "") : named ? rest.join(":") : "";
       this.record("apps", action!, target, allow ? "ok" : "denied: owner");
+    } else if (req.capability === "phone_control") {
+      this.record("phone_control", "phone_control.act", allow ? "tap 414,900" : "", allow ? "ok" : "denied: owner");
     } else if (req.capability === "shell") {
       // The command, its folder, how it ended. Never its output.
       const cwd = req.details.find((d) => d.key === "cwd")?.value;
@@ -2002,6 +2025,43 @@ class MockBackend implements Backend {
       this.permissions.screen_recording = true;
     }, 5000);
     return this.reply(undefined);
+  }
+
+  phoneCheck(): Promise<PhoneView> {
+    const on = this.state.core.settings.phone_control.enabled;
+    const off = { error: "phone control is off" };
+    return this.reply(
+      on
+        ? {
+            supported: true,
+            enabled: true,
+            screen: { ok: true, device: "iPhone", width: 828, height: 1792, last_frame_ms: Date.now() },
+            // ?phone=nobt: the board is there, the phone is not on its Bluetooth.
+            hands:
+              params.get("phone") === "nobt"
+                ? { ok: true, port: "/dev/cu.usbmodem3101", ble_connected: false, firmware: "0.1.0" }
+                : { ok: true, port: "/dev/cu.usbmodem3101", ble_connected: true, firmware: "0.1.0" },
+            holder: params.get("phone") === "busy" ? "Mia" : null,
+          }
+        : {
+            supported: true,
+            enabled: false,
+            screen: { ok: false, device: "", width: 0, height: 0, last_frame_ms: 0, ...off },
+            hands: { ok: false, port: "", ble_connected: false, firmware: "", ...off },
+            holder: null,
+          },
+      120,
+    );
+  }
+
+  phonePreview(): Promise<PhonePreview> {
+    // A drawn stand-in for the phone's screen.
+    const svg =
+      `<svg xmlns="http://www.w3.org/2000/svg" width="222" height="480" viewBox="0 0 222 480">` +
+      `<rect width="222" height="480" fill="#1c1c1e"/><text x="111" y="40" fill="#fff" font-family="-apple-system" font-size="16" text-anchor="middle">9:41</text>` +
+      Array.from({ length: 16 }, (_, i) => `<rect x="${22 + (i % 4) * 48}" y="${90 + Math.floor(i / 4) * 64}" width="38" height="38" rx="9" fill="hsl(${i * 23} 60% 55%)"/>`).join("") +
+      `</svg>`;
+    return this.reply({ data_url: `data:image/svg+xml;base64,${btoa(svg)}`, width: 222, height: 480, native_width: 828, native_height: 1792, frame_ms: Date.now() }, 150);
   }
 
   appsCheck(): Promise<AppsStatus> {
