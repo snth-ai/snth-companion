@@ -177,6 +177,9 @@ pub fn approval_body(lang: Lang, capability: &str, scope: &str) -> String {
         // A command: never the command itself on a lock screen.
         (Lang::En, "shell") => "Run a command on this computer".into(),
         (Lang::Ru, "shell") => "Выполнить команду на этом компьютере".into(),
+        // The iPhone on the cable.
+        (Lang::En, "phone_control") => "Control your phone (see its screen, tap and type)".into(),
+        (Lang::Ru, "phone_control") => "Управлять вашим телефоном (видеть экран, нажимать и печатать)".into(),
         // The SNTH Vault extension in a browser on this computer.
         (Lang::En, "vault") => "Share site passwords with your synth from this browser".into(),
         (Lang::Ru, "vault") => "Передавать синту пароли сайтов из этого браузера".into(),

@@ -351,6 +351,8 @@ pub async fn update_settings(ctx: Cx<'_>, settings: Settings) -> Result<UiState,
     ctx.core.mutate_settings(move |s| {
         next.files.roots = s.files.roots.clone();
         next.computer.tool_denylist = s.computer.tool_denylist.clone();
+        // The phone's pointer calibration is not on any screen.
+        next.phone_control.tuning = s.phone_control.tuning.clone();
         next.preset = s.preset;
         next.preset = matching_preset(&next);
         *s = next;
@@ -709,6 +711,43 @@ pub async fn apps_request_permission(ctx: Cx<'_>, app: String) -> Result<(), Str
     .map_err(|e| format!("helper_failed: {e}"))
 }
 
+// --- the phone (connect-core phone/mod.rs) ---
+
+/// The Phone section: the cable, the board, who holds the phone. Starts
+/// the helper and the board link when the phone is on (and they are not
+/// running yet).
+#[tauri::command]
+pub async fn phone_check(ctx: Cx<'_>) -> Result<connect_core::phone::PhoneView, String> {
+    Ok(ctx.core.phone_view().await)
+}
+
+/// The phone's screen now, for the owner's preview: a JPEG as a data URL,
+/// the long edge 480 px. Only the owner's own window asks; the synth never
+/// sees this.
+#[tauri::command]
+pub async fn phone_preview(ctx: Cx<'_>) -> Result<PhonePreviewDto, String> {
+    use base64::Engine;
+    let j = ctx.core.phone_preview(480).await?;
+    Ok(PhonePreviewDto {
+        data_url: format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(&j.data)),
+        width: j.width,
+        height: j.height,
+        native_width: j.native_width,
+        native_height: j.native_height,
+        frame_ms: j.frame_ms,
+    })
+}
+
+#[derive(Serialize)]
+pub struct PhonePreviewDto {
+    data_url: String,
+    width: u32,
+    height: u32,
+    native_width: u32,
+    native_height: u32,
+    frame_ms: i64,
+}
+
 // --- logins: the synth's vault and the browsers ---
 
 /// Ask the synth which sites its vault holds a login for (names and
@@ -944,6 +983,7 @@ pub async fn diagnostics(ctx: Cx<'_>) -> Result<String, String> {
         // On or off and the mode, never a command.
         format!("command line: {} (mode {:?}, {}, developer mode {})", on(s.shell.enabled), s.shell.mode,
             st.app.os_shell, on(st.prefs.developer)),
+        format!("phone: {}", on(s.phone_control.enabled)),
         format!("remembered permissions: {}", st.grants.len()),
         String::new(),
         format!("Cua Driver: {} (status {}, expected {})",
@@ -1503,6 +1543,15 @@ mod tests {
         s.computer.experiment = connect_core::settings::Experiment::Off;
         assert!(matches!(matching_preset(&s), Preset::Careful));
         s.computer.foreground = connect_core::settings::Foreground::Always;
+        assert!(matches!(matching_preset(&s), Preset::Custom));
+    }
+
+    #[test]
+    fn the_phone_makes_the_settings_custom_and_its_calibration_does_not() {
+        let mut s = Settings::from_preset(Preset::Balanced, vec![]);
+        s.phone_control.tuning.gain_milli = 1500;
+        assert!(matches!(matching_preset(&s), Preset::Balanced), "the hidden calibration is no change");
+        s.phone_control.enabled = true;
         assert!(matches!(matching_preset(&s), Preset::Custom));
     }
 

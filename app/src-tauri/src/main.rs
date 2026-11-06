@@ -454,6 +454,8 @@ fn main() {
             commands::cua_health_check,
             commands::apps_check,
             commands::apps_request_permission,
+            commands::phone_check,
+            commands::phone_preview,
             commands::logins_refresh,
             commands::safari_check,
             commands::vault_forget,

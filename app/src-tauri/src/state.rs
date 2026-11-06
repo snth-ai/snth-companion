@@ -412,6 +412,8 @@ pub fn matching_preset(s: &Settings) -> Preset {
         // The command line is off in every preset: on, the settings are
         // custom; its mode alone (while off) does not count.
         probe.shell.mode = s.shell.mode;
+        // So is the phone; its calibration (hidden) does not count.
+        probe.phone_control.tuning = s.phone_control.tuning.clone();
         if &probe == s {
             return p;
         }

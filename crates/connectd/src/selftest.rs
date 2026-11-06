@@ -108,6 +108,16 @@ pub async fn run(args: &[String]) -> i32 {
                 1
             }
         },
+        Some("phone") => match crate::selftest_phone::phone(&args[1..]).await {
+            Ok(()) => {
+                println!("SELFTEST OK");
+                0
+            }
+            Err(why) => {
+                eprintln!("SELFTEST FAILED: {why}");
+                1
+            }
+        },
         Some("host") => match crate::selftest_host::host(&args[1..]).await {
             Ok(()) => {
                 println!("SELFTEST OK");
@@ -141,7 +151,7 @@ pub async fn run(args: &[String]) -> i32 {
             0
         }
         _ => {
-            eprintln!("usage: connectd selftest cua [--root <dir>] [--keep] [--preview-window]\n       connectd selftest apps [--touch]\n       connectd selftest host [--helper <path>] [--system]\n       connectd selftest safari --relay <path> [--group <id>] (macOS)");
+            eprintln!("usage: connectd selftest cua [--root <dir>] [--keep] [--preview-window]\n       connectd selftest apps [--touch]\n       connectd selftest host [--helper <path>] [--system]\n       connectd selftest phone [--phonecap <path>] [--fake-screen] [--touch] (macOS)\n       connectd selftest safari --relay <path> [--group <id>] (macOS)");
             2
         }
     }
