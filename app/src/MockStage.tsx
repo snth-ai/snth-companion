@@ -50,6 +50,7 @@ export function MockStage(props: { approvalOnly?: boolean }) {
     ["shortcutinput", "shortcut"],
     ["openurl", "link"],
     ["shell", "command"],
+    ["phone_control", "phone"],
     ["other", "unknown"],
   ];
 

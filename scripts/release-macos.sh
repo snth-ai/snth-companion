@@ -10,7 +10,9 @@
 #   1a. builds the Safari extension (scripts/build-safari-appex.sh: the native
 #      handler with Xcode, the web extension from its own repository), puts it
 #      into the app (Contents/PlugIns/SNTH Vault.appex) and signs inside out:
-#      the extension sandboxed and in the app group, then the app around it
+#      the extension sandboxed and in the app group, the phone's screen helper
+#      (Contents/MacOS/snth-phonecap) with the camera entitlement, then the
+#      app around them
 #   2. notarizes it with the keychain profile, staples the ticket, and checks
 #      it with codesign and Gatekeeper (spctl)
 #   3. makes the first-install download (a signed, notarized, stapled DMG)
@@ -60,6 +62,11 @@ APPEX_REL="Contents/PlugIns/SNTH Vault.appex"
 APPEX_ID="ai.snth.connect.safari"
 APP_ENTITLEMENTS="app/src-tauri/Entitlements.plist"
 APPEX_ENTITLEMENTS="app/safari/Extension/Extension.entitlements"
+# The phone's screen helper (app/macos/phonecap, built by app/src-tauri/build.rs,
+# shipped by tauri.macos.conf.json as an external binary) and its entitlements:
+# the camera, nothing else.
+PHONECAP_REL="Contents/MacOS/snth-phonecap"
+PHONECAP_ENTITLEMENTS="app/macos/phonecap/phonecap.entitlements"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
 
 VERSION=""
@@ -167,6 +174,7 @@ xcodebuild -version >/dev/null 2>&1 ||
 TEAM="$(printf '%s' "$IDENTITY" | sed -n 's/.*(\([A-Z0-9]\{10\}\))$/\1/p')"
 [ -n "$TEAM" ] || die "cannot read the team id from the signing identity: $IDENTITY"
 GROUP="$TEAM.$APP_ID"
+[ -f "$ROOT/$PHONECAP_ENTITLEMENTS" ] || die "$PHONECAP_ENTITLEMENTS is missing"
 for file in "$APP_ENTITLEMENTS" "$APPEX_ENTITLEMENTS"; do
     grep -F "<string>$GROUP</string>" "$ROOT/$file" >/dev/null ||
         die "$file does not name the app group $GROUP"
@@ -248,11 +256,16 @@ rm -rf "$APP/Contents/PlugIns"
 mkdir -p "$APP/Contents/PlugIns"
 ditto "$WORK/appex/$(basename "$APPEX_REL")" "$APPEX"
 # The extension first, with its own entitlements (sandboxed, the app group,
-# nothing else). Then the app again: adding a folder broke its seal, and its
-# signature has to cover the extension. The helper next to the app's own
-# program keeps the signature Tauri gave it.
+# nothing else). Then the phone's screen helper with its own (the camera:
+# under the hardened runtime the capture is refused without it; whatever
+# Tauri signed it with is replaced). Then the app again: adding a folder
+# broke its seal, and its signature has to cover both. The browser helper
+# next to the app's own program keeps the signature Tauri gave it.
 codesign --force --options runtime --timestamp --sign "$IDENTITY" \
     --entitlements "$ROOT/$APPEX_ENTITLEMENTS" "$APPEX" || die "could not sign the Safari extension"
+[ -x "$APP/$PHONECAP_REL" ] || die "the phone's screen helper is missing from the app (expected $APP/$PHONECAP_REL; app/src-tauri/tauri.macos.conf.json)"
+codesign --force --options runtime --timestamp --sign "$IDENTITY" \
+    --entitlements "$ROOT/$PHONECAP_ENTITLEMENTS" "$APP/$PHONECAP_REL" || die "could not sign the phone's screen helper"
 codesign --force --options runtime --timestamp --sign "$IDENTITY" \
     --entitlements "$ROOT/$APP_ENTITLEMENTS" "$APP" || die "could not sign the app around the Safari extension"
 entitlements_of "$APP" "$WORK/app-after.entitlements"
@@ -267,6 +280,21 @@ HOST_HELPER="$APP/Contents/MacOS/snth-connect-host"
 [ -x "$HOST_HELPER" ] || die "the browser helper is missing from the app (expected $HOST_HELPER)"
 codesign --verify --strict "$HOST_HELPER" || die "the browser helper inside the app is not signed"
 note "the browser helper is in the app and signed"
+# The phone's screen helper: in the app, signed by the identity with the
+# hardened runtime, entitled to the camera (and to nothing else).
+PHONECAP="$APP/$PHONECAP_REL"
+[ -x "$PHONECAP" ] || die "the phone's screen helper is missing from the app (expected $PHONECAP)"
+codesign --verify --strict "$PHONECAP" || die "the phone's screen helper inside the app is not signed"
+PHONECAP_INFO="$(codesign -dvv "$PHONECAP" 2>&1)"
+printf '%s\n' "$PHONECAP_INFO" | grep -F "Authority=$IDENTITY" >/dev/null ||
+    die "the phone's screen helper is not signed by: $IDENTITY"
+printf '%s\n' "$PHONECAP_INFO" | grep -E '^CodeDirectory .*flags=.*runtime' >/dev/null ||
+    die "the phone's screen helper is signed without the hardened runtime"
+entitlements_of "$PHONECAP" "$WORK/phonecap.entitlements"
+[ "$(entitlement_keys "$WORK/phonecap.entitlements" | tr '\n' ' ')" = "com.apple.security.device.camera " ] ||
+    die "the phone's screen helper must be entitled to the camera and nothing else (has: $(entitlement_keys "$WORK/phonecap.entitlements" | tr '\n' ' '))"
+lipo -archs "$PHONECAP" | grep -w "$(uname -m)" >/dev/null || die "the phone's screen helper has no $(uname -m) code"
+note "the phone's screen helper is in the app, signed, entitled to the camera"
 SIGN_INFO="$(codesign -dvv "$APP" 2>&1)"
 printf '%s\n' "$SIGN_INFO" | grep -F "Authority=$IDENTITY" >/dev/null ||
     die "the app is not signed by: $IDENTITY"
@@ -291,6 +319,13 @@ codesign -d --entitlements - --xml "$APP" 2>/dev/null | grep -F "com.apple.secur
     die "the signed app lacks the com.apple.security.device.audio-input entitlement (app/src-tauri/Entitlements.plist)"
 /usr/libexec/PlistBuddy -c 'Print :NSMicrophoneUsageDescription' "$APP/Contents/Info.plist" >/dev/null 2>&1 ||
     die "the built app has no NSMicrophoneUsageDescription (app/src-tauri/Info.plist)"
+# The phone: the iPhone's screen over the cable is a camera device. The
+# helper asks as the app's child, so the sentence and the entitlement are
+# the app's too.
+codesign -d --entitlements - --xml "$APP" 2>/dev/null | grep -F "com.apple.security.device.camera" >/dev/null ||
+    die "the signed app lacks the com.apple.security.device.camera entitlement (app/src-tauri/Entitlements.plist)"
+/usr/libexec/PlistBuddy -c 'Print :NSCameraUsageDescription' "$APP/Contents/Info.plist" >/dev/null 2>&1 ||
+    die "the built app has no NSCameraUsageDescription (app/src-tauri/Info.plist)"
 note "entitled to ask for control of other apps (Automation), with its usage sentence"
 
 # The Safari extension: present, signed like the app, sandboxed (Safari loads
@@ -409,6 +444,8 @@ UNPACKED="$WORK/unpacked"
 mkdir -p "$UNPACKED"
 tar -xzf "$TARBALL" -C "$UNPACKED"
 codesign --verify --deep --strict "$UNPACKED/$APP_NAME" || die "the app inside the updater bundle fails codesign --verify"
+# An update must bring the phone's screen helper with it, still signed.
+codesign --verify --strict "$UNPACKED/$APP_NAME/$PHONECAP_REL" || die "the phone's screen helper inside the updater bundle fails codesign --verify"
 # An update must bring the Safari extension with it, still signed and sandboxed.
 [ -d "$UNPACKED/$APP_NAME/$APPEX_REL" ] || die "the updater bundle carries no Safari extension"
 codesign --verify --strict "$UNPACKED/$APP_NAME/$APPEX_REL" || die "the Safari extension inside the updater bundle fails codesign --verify"

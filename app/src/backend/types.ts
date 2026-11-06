@@ -73,7 +73,7 @@ export type Foreground = "never" | "idle" | "ask" | "always";
 /** The owner's choice of the new way to drive the computer. "default" = as the synth decides. */
 export type Experiment = "default" | "on" | "off";
 export type Preset = "careful" | "balanced" | "full" | "custom";
-export type Capability = "net" | "cookies" | "computer" | "files" | "apps" | "shell";
+export type Capability = "net" | "cookies" | "computer" | "files" | "apps" | "shell" | "phone_control";
 /** The command line: every command asks, or none does. */
 export type ShellMode = "ask" | "auto";
 /** When the app asks before a change in the owner's apps: every time,
@@ -213,7 +213,70 @@ export interface Settings {
   /** The command line. Off in every preset; its switch shows only in
    * developer mode. */
   shell: { enabled: boolean; mode: ShellMode };
+  /** The test iPhone (macOS only). Off in every preset. `tuning` is the
+   * pointer calibration: not on any screen, kept by the core.
+   * `device_udid`: the phone over Wi-Fi the owner picked; empty = the
+   * cable. Never set by anything but the owner's pick. */
+  phone_control: { enabled: boolean; tuning?: Record<string, number | string>; device_udid?: string };
   preset: Preset;
+}
+
+/** The phone's screen, over the cable (the capture helper) or over Wi-Fi
+ * (Xcode's devicectl). */
+export interface PhoneScreen {
+  ok: boolean;
+  device: string;
+  width: number;
+  height: number;
+  last_frame_ms: number;
+  /** Where the frames come from. */
+  source?: "cable" | "network";
+  /** Why there is no screen (the core's words). */
+  error?: string;
+}
+
+/** The SNTH Phone Bridge board (the phone's keyboard and mouse). */
+export interface PhoneHands {
+  /** The board answers. */
+  ok: boolean;
+  port: string;
+  /** The phone is connected to the board over Bluetooth. */
+  ble_connected: boolean;
+  firmware: string;
+  error?: string;
+}
+
+/** The Phone page: the cable, the board, who holds the phone. */
+export interface PhoneView {
+  supported: boolean;
+  enabled: boolean;
+  screen: PhoneScreen;
+  hands: PhoneHands;
+  /** The synth that controls the phone right now. */
+  holder: string | null;
+  /** What the phone can do beyond the board (over Wi-Fi only). */
+  abilities?: { launch: boolean; paste: boolean };
+}
+
+/** A physical iOS device this Mac sees (the Phone page's picker). */
+export interface PhoneDevice {
+  udid: string;
+  name: string;
+  /** "iPhone XR". */
+  model: string;
+  /** "connected", "available", "unpaired", or devicectl's own word. */
+  state: string;
+  reachable: boolean;
+}
+
+/** The phone's screen now, for the owner's own look. */
+export interface PhonePreview {
+  data_url: string;
+  width: number;
+  height: number;
+  native_width: number;
+  native_height: number;
+  frame_ms: number;
 }
 
 /** One app this computer has, with the owner's switch. */
@@ -1030,6 +1093,14 @@ export interface Backend {
   appsCheck(): Promise<AppsStatus>;
   /** macOS asks whether SNTH Connect may control this app. */
   appsRequestPermission(app: string): Promise<void>;
+
+  /** The phone on the cable: screen, board, who holds it. */
+  phoneCheck(): Promise<PhoneView>;
+  /** The phone's screen now (rejects when there is none). */
+  phonePreview(): Promise<PhonePreview>;
+  /** The phones this Mac sees over Wi-Fi (rejects without Xcode). A list
+   * only: nothing is chosen by it. */
+  phoneDevices(): Promise<PhoneDevice[]>;
 
   /** Ask the synth which sites its vault holds a login for. */
   loginsRefresh(synthId: string | null): Promise<UiState>;

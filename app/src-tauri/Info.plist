@@ -20,6 +20,8 @@
 	<string>SNTH Connect reads the name of your Wi-Fi network only to tell which of the places you named you are at. The network's name and your location stay on this computer.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>SNTH Connect reads the name of your Wi-Fi network only to tell which of the places you named you are at. The network's name and your location stay on this computer.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>SNTH Connect sees the screen of the iPhone plugged into this Mac only if you switched Phone on, so your synth can work on that phone. Nothing is recorded.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Your synth reaches devices on your home network only if you turned that on in SNTH Connect.</string>
 </dict>

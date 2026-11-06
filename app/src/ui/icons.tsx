@@ -155,6 +155,14 @@ export const IconTerminal = () => (
   </Svg>
 );
 
+/** The phone on the cable. */
+export const IconPhone = () => (
+  <Svg>
+    <rect x="4.5" y="1.5" width="7" height="13" rx="1.6" />
+    <path d="M7 12.2h2" />
+  </Svg>
+);
+
 export const IconBlock = () => (
   <Svg>
     <circle cx="8" cy="8" r="6" />

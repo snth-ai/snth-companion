@@ -652,7 +652,9 @@ dependencies = [
  "directories",
  "futures",
  "hmac",
+ "image",
  "keyring",
+ "libc",
  "pbkdf2",
  "psl",
  "rand 0.8.8",
@@ -682,6 +684,7 @@ dependencies = [
 name = "connectd"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "connect-core",
  "connect-host",
  "libc",

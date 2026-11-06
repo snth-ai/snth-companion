@@ -1,9 +1,9 @@
 import { useMemo, useState } from "react";
 import { buildLines, dayLabel, formatClock, type LineKind } from "../lib/format";
 import { useStore } from "../lib/store";
-import { IconApps, IconCookie, IconFolder, IconGlobe, IconLink, IconPointer, IconTerminal, IconUpdate } from "../ui/icons";
+import { IconApps, IconCookie, IconFolder, IconGlobe, IconLink, IconPhone, IconPointer, IconTerminal, IconUpdate } from "../ui/icons";
 
-type Filter = "all" | "net" | "cookies" | "computer" | "files" | "apps" | "shell";
+type Filter = "all" | "net" | "cookies" | "computer" | "files" | "apps" | "shell" | "phone_control";
 
 const ICONS: Record<LineKind, () => React.JSX.Element> = {
   net: IconGlobe,
@@ -12,6 +12,7 @@ const ICONS: Record<LineKind, () => React.JSX.Element> = {
   files: IconFolder,
   apps: IconApps,
   shell: IconTerminal,
+  phone: IconPhone,
   link: IconLink,
   app: IconUpdate,
 };
@@ -46,6 +47,10 @@ export function Activity() {
     { value: "apps", title: t.apps },
     // Only where the command line is or was in use.
     ...(state.prefs.developer || journal.some((e) => e.capability === "shell") ? [{ value: "shell" as const, title: t.shell }] : []),
+    // Only where the phone is or was in use.
+    ...(state.core.settings.phone_control.enabled || journal.some((e) => e.capability === "phone_control")
+      ? [{ value: "phone_control" as const, title: t.phone }]
+      : []),
   ];
 
   return (

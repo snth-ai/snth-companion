@@ -127,7 +127,8 @@ URL parameters stage a screen or a state directly:
 | `link` | what "Link this browser" does: `ok` (default), `synth_offline`, `synth_outdated`, `other_synth`, `busy`, `failed` |
 | `step` (with `screen=onboarding`) | `1` welcome, `2` code, `3` confirmation, `4` preset, `5` folders, `6` computer control, `7` done |
 | `state` | `paused`, `working`, `connecting`, `offline`, `repair`, `empty`, `off`, `appsoff` (only Apps off), `metered` |
-| `approval` | `net`, `cookies`, `cookiesext` (a sign-in a linked browser will ask about too: "Step 1 of 2"), `vault` (a browser asks to be linked: not the synth asking), `computer`, `foreground`, `files`, `other`, `queue` (shows the approval window alone); for the owner's apps: `message` (a message as the owner, with "always for this person"), `messageask` (the same when nothing may be remembered, with a hostile reason), `event`, `reminder`, `note`, `shortcut`, `shortcutinput`, `clipboard`, `openurl`, `openfile`, `openapp`; for the command line: `shell` (the whole command, its folder and the shell, with "always this exact command") |
+| `approval` | `net`, `cookies`, `cookiesext` (a sign-in a linked browser will ask about too: "Step 1 of 2"), `vault` (a browser asks to be linked: not the synth asking), `computer`, `foreground`, `files`, `other`, `queue` (shows the approval window alone); for the owner's apps: `message` (a message as the owner, with "always for this person"), `messageask` (the same when nothing may be remembered, with a hostile reason), `event`, `reminder`, `note`, `shortcut`, `shortcutinput`, `clipboard`, `openurl`, `openfile`, `openapp`; for the command line: `shell` (the whole command, its folder and the shell, with "always this exact command"); for the phone: `phone_control` |
+| `phone` | the Phone page (`screen=phone&os=macos`): `nobt` (the board is there, the phone is not on its Bluetooth), `busy` (Mia holds the phone), `noxcode` (the Wi-Fi picker without Xcode); the picker lists a test phone and the owner's own phone, picking the test phone shows the screen "over Wi-Fi" |
 | `developer` | `1`: developer mode on, so General shows the Command line section (the switch asks once more with the warning; off by default, off in every preset) |
 | `apps` | the macOS permissions of the apps: `granted` (default), `noperm` (macOS has not asked yet), `denied`, `nodisk` (Messages may be controlled, its history cannot be read) |
 | `messages` | `on`: the Messages switch, which is off by default |
@@ -213,6 +214,15 @@ every push). The workspace builds with Rust 1.85
 prefer dependency versions that support it, which is why `Cargo.lock` holds
 Tauri 2.11 and `package.json` pins the matching `@tauri-apps/*` 2.11 packages.
 Raise all three together.
+
+The phone's screen helper (`app/macos/phonecap/main.swift`) is Swift: on a
+Mac `build.rs` compiles it with `xcrun swiftc` (arm64 and x86_64, lipo) into
+`app/src-tauri/binaries/snth-phonecap-<triple>` (ignored by git) before
+tauri-build, and `tauri.macos.conf.json` ships it as an external binary
+(`Contents/MacOS/snth-phonecap`; `target/<profile>/snth-phonecap` in a dev
+build). So a Mac build needs the Xcode command line tools.
+`scripts/release-macos.sh` signs it again with
+`app/macos/phonecap/phonecap.entitlements` (the camera only) before the app.
 
 A debug build keeps the pairing token in a 0600 file in the config dir; a
 release build uses the OS keychain. Do not judge keychain behaviour from a
@@ -1279,6 +1289,16 @@ The probes on a real Mac print with
 `cargo test -p snth-connect observe_probes_now -- --ignored --nocapture`.
 
 ## Not verified
+
+- The phone (`phone_control`), live: the camera prompt being the app's
+  (one prompt for SNTH Connect, from the helper it starts), capture while
+  the Mac is locked, the board's port held for hours without a reset, the
+  pointer calibration through the app, the re-press on real frames, and the
+  acceptance set of tz-phone-control.md P1. Tested: the gate, the lease,
+  the pointer math, the re-press on synthetic frames, the board protocol
+  and the DTR/RTS order on a fake port, the helper framing (unit tests);
+  the real helper on its made-up screen through the whole gate
+  (`connectd selftest phone --fake-screen`).
 
 - Observe, live: the switches against a real synth with UC on, the
   Location Services prompt in a signed build (the prompt, the answer, the

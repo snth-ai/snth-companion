@@ -46,6 +46,10 @@ const COMMANDS: &[&str] = &[
     // the owner's own apps
     "apps_check",
     "apps_request_permission",
+    // the phone: its state, a look at its screen, the phones over Wi-Fi
+    "phone_check",
+    "phone_preview",
+    "phone_devices",
     // logins: the vault list and the browsers
     "logins_refresh",
     "safari_check",
@@ -110,6 +114,9 @@ const COMMANDS: &[&str] = &[
 fn main() {
     stt_cfgs();
     link_compiler_rt();
+    // Before tauri-build: it copies the helper next to the app's program
+    // (tauri.macos.conf.json, bundle.externalBin) and fails if it is missing.
+    phonecap();
     tauri_build::try_build(
         tauri_build::Attributes::new()
             .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS)),
@@ -173,5 +180,60 @@ fn link_compiler_rt() {
             println!("cargo:rustc-link-lib=static=clang_rt.osx");
         }
         None => println!("cargo:warning=libclang_rt.osx.a not found: {}", path.display()),
+    }
+}
+
+/// The phone's screen helper (`snth-phonecap`, app/macos/phonecap,
+/// connect-core phone/eyes.rs): Swift, built with swiftc into
+/// `binaries/snth-phonecap-<target triple>`, where tauri-build and the
+/// bundler take it from (`bundle.externalBin` in tauri.macos.conf.json).
+/// The bundler puts it in Contents/MacOS and signs it with the app;
+/// scripts/release-macos.sh signs it again with its own entitlements
+/// (app/macos/phonecap/phonecap.entitlements: the camera, nothing else).
+///
+/// One universal binary (Apple silicon and Intel), written under every
+/// name the bundler may look for, so a universal build finds it too.
+/// Built again only when the source is newer than the binary.
+fn phonecap() {
+    if std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() != "macos" {
+        return;
+    }
+    let src = std::path::Path::new("../macos/phonecap/main.swift");
+    println!("cargo:rerun-if-changed={}", src.display());
+    let dir = std::path::Path::new("binaries");
+    let names = ["aarch64-apple-darwin", "x86_64-apple-darwin", "universal-apple-darwin"]
+        .map(|t| dir.join(format!("snth-phonecap-{t}")));
+    let src_time = std::fs::metadata(src).and_then(|m| m.modified()).expect("app/macos/phonecap/main.swift is missing");
+    let fresh = names
+        .iter()
+        .all(|n| std::fs::metadata(n).and_then(|m| m.modified()).is_ok_and(|t| t >= src_time));
+    if fresh {
+        return;
+    }
+    std::fs::create_dir_all(dir).expect("cannot create app/src-tauri/binaries");
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+    let mut slices = Vec::new();
+    for arch in ["arm64", "x86_64"] {
+        let slice = out.join(format!("snth-phonecap-{arch}"));
+        let status = std::process::Command::new("xcrun")
+            .args(["swiftc", "-O", "-target", &format!("{arch}-apple-macos12"), "-o"])
+            .arg(&slice)
+            .arg(src)
+            .status()
+            .expect("xcrun swiftc not found: the phone's screen helper needs the Xcode command line tools");
+        assert!(status.success(), "swiftc failed to build the phone's screen helper ({arch})");
+        slices.push(slice);
+    }
+    let universal = out.join("snth-phonecap");
+    let status = std::process::Command::new("xcrun")
+        .args(["lipo", "-create", "-output"])
+        .arg(&universal)
+        .args(&slices)
+        .status()
+        .expect("xcrun lipo not found");
+    assert!(status.success(), "lipo failed for the phone's screen helper");
+    for n in &names {
+        let _ = std::fs::remove_file(n);
+        std::fs::copy(&universal, n).expect("cannot write the phone's screen helper into app/src-tauri/binaries");
     }
 }

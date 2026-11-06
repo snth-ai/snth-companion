@@ -11,13 +11,14 @@ import { Internet } from "./screens/Internet";
 import { Island } from "./screens/Island";
 import { Logins } from "./screens/Logins";
 import { Observe } from "./screens/Observe";
+import { Phone } from "./screens/Phone";
 import { Onboarding, type Step } from "./screens/Onboarding";
 import { PairSheet } from "./screens/Pairing";
 import { Status } from "./screens/Status";
-import { IconApps, IconCookie, IconEye, IconIsland, IconFolder, IconGlobe, IconList, IconPause, IconPlay, IconPointer, IconSliders, IconStatus } from "./ui/icons";
+import { IconApps, IconCookie, IconEye, IconIsland, IconFolder, IconGlobe, IconList, IconPause, IconPhone, IconPlay, IconPointer, IconSliders, IconStatus } from "./ui/icons";
 
-export type Screen = "status" | "internet" | "computer" | "files" | "apps" | "island" | "observe" | "cookies" | "activity" | "general";
-const SCREENS: Screen[] = ["status", "internet", "cookies", "computer", "files", "apps", "island", "observe", "activity", "general"];
+export type Screen = "status" | "internet" | "computer" | "files" | "apps" | "phone" | "island" | "observe" | "cookies" | "activity" | "general";
+const SCREENS: Screen[] = ["status", "internet", "cookies", "computer", "files", "apps", "phone", "island", "observe", "activity", "general"];
 
 function Sidebar(props: { screen: Screen; go: (screen: Screen) => void }) {
   const { state, s, act } = useStore();
@@ -50,6 +51,8 @@ function Sidebar(props: { screen: Screen; go: (screen: Screen) => void }) {
     { screen: "computer", icon: <IconPointer />, title: s.nav.computer, off: !settings.computer.enabled },
     { screen: "files", icon: <IconFolder />, title: s.nav.files, off: !settings.files.enabled },
     { screen: "apps", icon: <IconApps />, title: s.nav.apps, off: !settings.apps.enabled },
+    // The iPhone on the cable: a Mac only.
+    ...(state.app.os === "macos" ? [{ screen: "phone" as Screen, icon: <IconPhone />, title: s.nav.phone, off: !settings.phone_control.enabled }] : []),
     { screen: "island", icon: <IconIsland />, title: s.nav.island, off: !state.island.settings.enabled },
     {
       screen: "observe",
@@ -188,6 +191,7 @@ export function App(props: { initialScreen?: string | null; initialStep?: Step }
         {screen === "computer" ? <Computer /> : null}
         {screen === "files" ? <Files /> : null}
         {screen === "apps" ? <Apps /> : null}
+        {screen === "phone" ? <Phone /> : null}
         {screen === "island" ? <Island /> : null}
         {screen === "observe" ? <Observe /> : null}
         {screen === "activity" ? <Activity /> : null}

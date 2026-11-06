@@ -37,6 +37,7 @@ export const en = {
     computer: "Computer control",
     files: "Files",
     apps: "Apps",
+    phone: "Phone",
     cookies: "Logins",
     activity: "Activity",
     general: "General",
@@ -98,6 +99,7 @@ export const en = {
       off: "Off",
       shellAsk: "Asks you before every command",
       shellAuto: "Runs commands without asking",
+      phoneOn: "Each synth asks you first",
       netAll: "Any site, without asking",
       netAsk: "Asks you about each new site",
       netList: (count: number) => `Only the ${plural(count, "site", "sites")} on your list`,
@@ -392,6 +394,56 @@ export const en = {
     rememberedUnused: "You are asked every time now, so these earlier answers are not used.",
   },
 
+  phone: {
+    lead: (n: string) =>
+      `${n} can work on a test iPhone next to this Mac: it sees the phone's screen over the cable or over Wi-Fi and taps and types through the SNTH Phone Bridge board, a Bluetooth keyboard and mouse for the phone.`,
+    enable: "Let synths use the phone",
+    warning:
+      "A synth you allow sees everything on the phone's screen and can do there what you can. Use a test phone, not your own. Each synth asks you first; a permission for one synth is not one for another.",
+    nowTitle: "Right now",
+    screenTitle: "Screen",
+    handsTitle: "Keyboard and mouse",
+    thePhone: "The phone",
+    checking: "Checking...",
+    screenOk: (device: string, w: number, h: number) => `${device} is visible over the cable (${w} x ${h})`,
+    screenOkNet: (device: string, w: number, h: number) => `${device} is visible over Wi-Fi (${w} x ${h})`,
+    screenNo: "The phone's screen is not visible.",
+    boardOk: (port: string, firmware: string) =>
+      `The board is on ${port}${firmware ? ` (firmware ${firmware})` : ""}, the phone is connected to it over Bluetooth`,
+    boardNo: "The board is not found.",
+    bluetoothNo: (port: string) => `The board is on ${port}, but the phone is not connected to it over Bluetooth`,
+    holder: (n: string) => `${n} is using the phone right now. Other synths wait until it is done.`,
+    checkAgain: "Check again",
+    showScreen: "Show the screen",
+    noShot: "Could not get the phone's screen.",
+    shotAlt: "The phone's screen now",
+    shotNote: (w: number, h: number) => `The phone's screen as the synth sees it (${w} x ${h}).`,
+    setupTitle: "Set up the phone once",
+    setupNote: "These stay on the phone and the board: moving them to another Mac needs only the last two steps.",
+    setup: [
+      "Bluetooth: pair the phone with \"SNTH Phone Bridge\" (Settings, Bluetooth).",
+      "Accessibility: turn on AssistiveTouch (the pointer) and Full Keyboard Access.",
+      "Display & Brightness: set Auto-Lock to Never, and keep the phone on the cable (it charges).",
+      "Plug the phone into this Mac, unlock it and tap Trust this computer.",
+      "This Mac: on power, the lid open or an external display, so it does not sleep.",
+    ],
+    rememberedTitle: "Synths allowed for good",
+    wifiTitle: "Phone over Wi-Fi",
+    wifiNote:
+      "Without a cable the synth sees the phone through Xcode on this Mac, and can open apps by name and paste any text. Pair the phone with this Mac once by cable with Developer Mode on; after that it works over the same Wi-Fi. Keep it awake (Auto-Lock Never) and on a charger (a wireless pad works).",
+    wifiCable: "Cable (this Mac's capture)",
+    wifiCableDesc: "The phone on the USB cable, as before.",
+    wifiDevice: (model: string, state: string) => `${model}, ${state}`,
+    wifiState: (state: string) =>
+      state === "connected" ? "connected" : state === "available" ? "available" : state === "unpaired" ? "not paired" : state,
+    wifiMissing: (udid: string) => `The chosen phone (${udid}) is not seen right now`,
+    wifiMissingDesc: "It may be asleep or on another Wi-Fi. It stays chosen; no other phone is used instead.",
+    wifiFind: "Find phones",
+    wifiFinding: "Looking for phones...",
+    wifiNone: "This Mac sees no iPhone. Pair the phone once by cable first.",
+    wifiError: "Could not list the phones.",
+  },
+
   cookies: {
     lead: (n: string) =>
       `A cookie is what keeps you signed in on a site. With a site's cookies ${n} is signed in there as you.`,
@@ -527,6 +579,7 @@ export const en = {
     title: "Answers you asked to remember",
     task: "Start a task without asking",
     screen: (what: string) => `Take over the screen without asking: ${what}`,
+    phone: "Control the phone",
   },
 
   activity: {
@@ -540,6 +593,7 @@ export const en = {
     files: "Files",
     apps: "Apps",
     shell: "Commands",
+    phone: "Phone",
     empty: "Nothing here yet.",
     emptyFiltered: "Nothing of this kind yet.",
     today: "Today",
@@ -609,6 +663,27 @@ export const en = {
     shellExit: (code: number) => `exit code ${code}`,
     shellIn: (folder: string) => `in ${folder}`,
     shellTook: (seconds: string) => `${seconds} s`,
+    // The phone on the cable: the point or the keys, never typed text.
+    phone: {
+      tap: (at: string) => `Tapped the phone at ${at}`,
+      doubleTap: (at: string) => `Double-tapped the phone at ${at}`,
+      longPress: (at: string) => `Pressed and held on the phone at ${at}`,
+      swipe: "Swiped on the phone",
+      scroll: "Scrolled on the phone",
+      key: (keys: string) => `Pressed ${keys} on the phone`,
+      type: (count: number) => `Typed ${plural(count, "character", "characters")} on the phone`,
+      home: "Went to the phone's home screen",
+      releaseAll: "Let go of every key on the phone",
+      launch: (app: string) => `Opened ${app} on the phone`,
+      use: "Used the phone",
+      refused: (what: string) => `Refused: ${what.charAt(0).toLowerCase()}${what.slice(1)}`,
+      failed: (what: string) => `Did not work: ${what.charAt(0).toLowerCase()}${what.slice(1)}`,
+      repressed: "pressed twice",
+      noChange: "the screen did not change",
+      busy: "another synth had the phone",
+      noHands: "no keyboard board, or the phone is not on its Bluetooth",
+      noScreen: "the phone's screen is not visible",
+    },
     linkUp: "Link is up",
     appUpdate: (version: string) => `SNTH Connect updated itself to version ${version}`,
     askNoAnswer: (t: string) => `A request about ${t} got no answer and was refused`,
@@ -1058,6 +1133,11 @@ export const en = {
       } as Record<string, string>,
       service: { imessage: "iMessage", sms: "SMS" } as Record<string, string>,
     },
+    // The iPhone on the cable.
+    phoneTitle: (n: string) => `Let ${n} control your phone?`,
+    phoneBody: (n: string) =>
+      `${n} will see the screen of the iPhone on this Mac's cable and tap and type on it. This is for ${n} only: another synth asks you itself.`,
+    phoneAlways: (n: string) => `Always for ${n}`,
     otherTitle: "Allow this request?",
     otherBody: (capability: string, scope: string) =>
       `Request: ${capability} / ${scope}. SNTH Connect does not know this kind of request. If you are not sure, do not allow it.`,

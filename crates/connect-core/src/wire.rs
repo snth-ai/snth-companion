@@ -69,6 +69,10 @@ pub fn capabilities_value(
         "apps": crate::apps::wire_value(apps, &s.apps),
         // The command line: added after the first release, like apps.
         "shell": crate::shell::wire_value(&s.shell),
+        // The iPhone on a cable (phone/mod.rs): added after the first
+        // release, like apps. Only the switch; the cable and the board are
+        // phone_control.status.
+        "phone_control": crate::phone::wire_value(&s.phone_control),
     })
 }
 

@@ -158,13 +158,15 @@ export function acceleratorFromEvent(e: KeyboardEvent, os: string): string | nul
 // --- one-line summaries of what is allowed ---
 
 export function summarize(
-  capability: "net" | "cookies" | "computer" | "files" | "apps" | "shell",
+  capability: "net" | "cookies" | "computer" | "files" | "apps" | "shell" | "phone_control",
   settings: Settings,
   s: Strings,
   apps: AppView[] = [],
 ): string {
   const sum = s.status.sum;
   switch (capability) {
+    case "phone_control":
+      return settings.phone_control.enabled ? sum.phoneOn : sum.off;
     case "shell":
       if (!settings.shell.enabled) return sum.off;
       return settings.shell.mode === "auto" ? sum.shellAuto : sum.shellAsk;
@@ -218,7 +220,7 @@ export function grantTime(grant: Grant, s: Strings, lang: Lang): string {
 
 // --- the activity journal in plain words ---
 
-export type LineKind = "net" | "cookies" | "computer" | "files" | "apps" | "shell" | "link" | "app";
+export type LineKind = "net" | "cookies" | "computer" | "files" | "apps" | "shell" | "phone" | "link" | "app";
 
 /** The browser a sign-in came from, as the core names it: a browser's
  * own name ("Chrome"), or "chrome-extension" when it came through the
@@ -382,6 +384,47 @@ export function describeEntry(entry: Entry, s: Strings, lang: Lang): Omit<Line, 
               ? j.shellFailed(cmd)
               : j.shellRan(cmd);
       return { ...base, kind: "shell", text, note: facts.join(", ") };
+    }
+    case "phone_control": {
+      // "tap 400,800", "key cmd+space, enter", "type (8 characters)",
+      // "launch ph.telegra.Telegraph": the point, the keys or the app,
+      // never what was typed.
+      const space = entry.target.indexOf(" ");
+      const verb = space < 0 ? entry.target : entry.target.slice(0, space);
+      const arg = space < 0 ? "" : entry.target.slice(space + 1);
+      const typed = /^\((\d+) /.exec(arg);
+      const p = j.phone;
+      const what =
+        verb === "tap"
+          ? p.tap(arg)
+          : verb === "double_tap"
+            ? p.doubleTap(arg)
+            : verb === "long_press"
+              ? p.longPress(arg)
+              : verb === "swipe"
+                ? p.swipe
+                : verb === "scroll"
+                  ? p.scroll
+                  : verb === "key"
+                    ? p.key(arg)
+                    : verb === "type"
+                      ? p.type(typed ? Number(typed[1]) : 0)
+                      : verb === "home"
+                        ? p.home
+                        : verb === "release_all"
+                          ? p.releaseAll
+                          : verb === "launch"
+                            ? p.launch(arg)
+                            : p.use;
+      const o = entry.outcome;
+      if (refused) return { ...base, kind: "phone", text: p.refused(what), note: why };
+      const took = entry.duration_ms !== undefined ? j.shellTook((entry.duration_ms / 1000).toFixed(1)) : "";
+      if (o === "ok" || o.startsWith("ok:")) {
+        const facts = [o.includes("re-pressed") ? p.repressed : "", o.includes("no change") ? p.noChange : "", took].filter(Boolean);
+        return { ...base, kind: "phone", text: what, note: facts.join(", ") };
+      }
+      const reason = o.startsWith("busy") ? p.busy : o.startsWith("no_hands") ? p.noHands : o.startsWith("no_screen") ? p.noScreen : "";
+      return { ...base, kind: "phone", text: p.failed(what), note: reason };
     }
     case "link":
       return { ...base, kind: "link", text: j.linkUp, note: "" };

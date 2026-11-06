@@ -3,7 +3,7 @@ import { backend } from "../backend";
 import { describeEntry, formatAgo, formatBytes, summarize, todayCounters } from "../lib/format";
 import { linkName, synthsNames, useActiveEntry, useNow, useStore } from "../lib/store";
 import { Notice, Section } from "../ui/controls";
-import { IconApps, IconChevron, IconCookie, IconFolder, IconGlobe, IconPause, IconPlay, IconPointer, IconBlock, IconTerminal } from "../ui/icons";
+import { IconApps, IconChevron, IconCookie, IconFolder, IconGlobe, IconPause, IconPhone, IconPlay, IconPointer, IconBlock, IconTerminal } from "../ui/icons";
 import type { Screen } from "../App";
 import { UpdateBlockedNotice } from "./General";
 
@@ -28,12 +28,16 @@ export function Status(props: { go: (screen: Screen) => void }) {
         ? s.status.connecting(name)
         : s.status.reconnecting(name);
 
-  const rows: { screen: Screen; icon: ReactNode; title: string; on: boolean; cap: "net" | "cookies" | "computer" | "files" | "apps" | "shell" }[] = [
+  const rows: { screen: Screen; icon: ReactNode; title: string; on: boolean; cap: "net" | "cookies" | "computer" | "files" | "apps" | "shell" | "phone_control" }[] = [
     { screen: "internet", icon: <IconGlobe />, title: s.nav.internet, on: settings.net.enabled, cap: "net" },
     { screen: "cookies", icon: <IconCookie />, title: s.nav.cookies, on: settings.cookies.enabled, cap: "cookies" },
     { screen: "computer", icon: <IconPointer />, title: s.nav.computer, on: settings.computer.enabled, cap: "computer" },
     { screen: "files", icon: <IconFolder />, title: s.nav.files, on: settings.files.enabled, cap: "files" },
     { screen: "apps", icon: <IconApps />, title: s.nav.apps, on: settings.apps.enabled, cap: "apps" },
+    // The phone on the cable: a Mac only.
+    ...(state.app.os === "macos"
+      ? [{ screen: "phone" as Screen, icon: <IconPhone />, title: s.nav.phone, on: settings.phone_control.enabled, cap: "phone_control" as const }]
+      : []),
     // The command line shows here only while it is on: full access is
     // never out of sight. Its switch is on General (developer mode).
     ...(settings.shell.enabled

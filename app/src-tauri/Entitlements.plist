@@ -15,6 +15,15 @@
 	     (NSMicrophoneUsageDescription in Info.plist). -->
 	<key>com.apple.security.device.audio-input</key>
 	<true/>
+	<!-- Phone: the screen of the iPhone on the USB cable is a capture
+	     device of the camera stack. The helper that reads it
+	     (Contents/MacOS/snth-phonecap) is the app's child and signed with
+	     its own copy of this entitlement
+	     (app/macos/phonecap/phonecap.entitlements); macOS asks the owner
+	     once, for SNTH Connect (NSCameraUsageDescription in Info.plist),
+	     and only when the owner switches Phone on. -->
+	<key>com.apple.security.device.camera</key>
+	<true/>
 	<!-- What your synth sees > Place: since macOS 14 the name of the
 	     Wi-Fi network (CoreWLAN) is given only to an app that may use
 	     Location Services. Under the hardened runtime that is refused

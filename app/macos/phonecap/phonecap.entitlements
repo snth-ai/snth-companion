@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- snth-phonecap reads the screen of the iPhone on the cable through
+	     the camera stack (the iOS screen is a capture device). Under the
+	     hardened runtime that is refused outright unless this is set. The
+	     permission itself is asked once and belongs to SNTH Connect (the
+	     helper is the app's child, inside its bundle; the sentence is
+	     NSCameraUsageDescription in the app's Info.plist). Nothing else:
+	     the helper needs no other entitlement. -->
+	<key>com.apple.security.device.camera</key>
+	<true/>
+</dict>
+</plist>

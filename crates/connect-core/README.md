@@ -289,6 +289,13 @@ developer mode (a shell preference, not a setting), and the shell refuses
 to switch it on while developer mode is off; turning developer mode off
 turns the command line off. With it on, the settings are `custom`.
 
+The phone (`phone_control`) is off in EVERY preset and on a fresh install; a
+preset turns it off and keeps its hidden pointer calibration
+(`phone_control.tuning`) and the chosen phone over Wi-Fi
+(`phone_control.device_udid`, empty = the cable; neither makes the settings
+custom). A settings file from before it existed loads with
+it off. It works on macOS only (the hello says `enabled: false` elsewhere).
+
 `Settings` covers net (enabled, mode all/ask/list, domains, local-network
 toggle, monthly cap, skip-on-metered), cookies (enabled, mode), computer
 (enabled, mode ask/auto/away, foreground never/idle/ask/always, away-idle
@@ -296,7 +303,8 @@ minutes, `apps`: which apps the synth may use, see "Which apps", tool
 denylist, `look`: how it looks on the screen, see "How it looks", and
 `experiment`, see "Experiment"), files (enabled, roots with a write
 flag, ask-on-write), apps (enabled, mode ask/ask_new/auto, per-app switches
-that differ from the default), shell (enabled, mode ask/auto). `settings_rev` grows by one on every change;
+that differ from the default), shell (enabled, mode ask/auto), phone_control
+(enabled, tuning, device_udid). `settings_rev` grows by one on every change;
 writes are atomic.
 
 ## What the core enforces (so the UI need not)
@@ -336,6 +344,8 @@ writes are atomic.
   apps".
 - **shell**: one function (`shell::exec`, the only way `shell.exec` runs
   anything). See "The command line".
+- **phone_control**: one function (`phone::handle`, the only way a
+  `phone_control.*` call reaches the phone). See "The phone".
 
 The synth has no message that changes settings or grants.
 
@@ -911,6 +921,162 @@ paused, ask with the exact-command "always", auto, a bad request asks
 nobody, pause and switching off stop a running command, a preset turns it
 off, `permission.request`). `rpc::tests::shell_exec_runs_while_the_stream_is_open_and_stops_when_it_closes`
 covers the cancel over a stream.
+
+## The phone (`src/phone/`)
+
+The synth works on a test iPhone next to this Mac (tz-phone-control.md and
+tz-phone-wireless.md in the synth repo, section 2). Eyes: the phone's screen
+over the USB cable, from the capture helper `snth-phonecap` (app/macos/phonecap,
+Contents/MacOS in the bundle), or over Wi-Fi from Xcode's `devicectl` for the
+ONE phone the owner picked (see "Over Wi-Fi" below). Hands: the SNTH Phone Bridge board (ESP32-S3, a Bluetooth
+keyboard and mouse for the phone) on its USB serial port. Both behind
+traits (`eyes::Eyes`, `hands::Hands`), made by a `phone::Factory`
+(`SystemFactory` in the product, fakes in tests, `Core::set_phone_factory`).
+
+RPC, all through `phone::handle` (pause, the switch, macOS, then this
+synth's grant `phone_control`/`control`, asked with `Remember::Any`: once,
+for a time, the session, always; a grant is per synth like every other):
+
+| method | params | result |
+|---|---|---|
+| `phone_control.status` | `{}` | `{screen:{ok,device,width,height,last_frame_ms,source:"cable"\|"network",error?}, hands:{ok,port,ble_connected,firmware,error?}, lease:{holder}, abilities:{launch,paste}}` |
+| `phone_control.frame` | `{after_ms?, stable_ms? (0..2500: that long without a change, at most 2.5 s), max_edge? (0 = native), quality? (0.85)}` | `{data_b64, mime:"image/jpeg", width, height, native_width, native_height, frame_ms, stable}` (`stable` true when not asked to wait) |
+| `phone_control.act` | `{action: tap\|double_tap\|long_press\|swipe\|scroll\|key\|type\|home\|release_all\|launch, x, y, x2, y2, hold_ms, keys, text, amount, app, verify}` | `{ok, changed, repressed, verified, pointer:{x,y}\|null, bundle_id?}` (`bundle_id` for `launch`) |
+
+Coordinates are pixels of the frame at its native size. `verify` defaults
+to true for the tap family and false otherwise; unverified acts answer
+`changed: true, verified: false` (`verified` is an addition to the
+contract). `scroll.amount > 0` = see content further down (the wheel turns
+down). `type` takes at most 1000 characters; over the cable only printable
+ASCII, newline and tab (anything else is `unsupported: non_ascii text, paste
+is not configured`, refused before the owner is asked), over Wi-Fi any text.
+`launch` (over Wi-Fi only; over the cable `unsupported: launch needs the
+phone over Wi-Fi ...`, refused before the owner is asked) takes `app`, a
+display name or a bundle id (at most 200 characters).
+
+Error classes: `denied:` (paused, off, the owner said no), `unavailable:`
+(not a Mac), `bad request:`, `no_screen:`, `no_hands:` (no board, its port
+busy, or the phone not on the board's Bluetooth), `busy: <holder> is
+controlling the phone right now`, `unsupported:`, `failed: the board: ...`.
+
+Lease: `frame` and `act` take the phone for the calling synth (status does
+not); another synth gets `busy` until the holder has been quiet for
+`LEASE_QUIET` (60 s); unlinking releases it. The pointer is the phone's
+(one `tokio::sync::Mutex`, which also runs acts one at a time).
+
+The pointer (`pointer.rs`, the prototype's `point_to`): relative moves only,
+pixels = 24 + 1.79 * units at 20 units per report every 8 ms, one axis at a
+time; homed in the nearest corner (`corner`, 15 reports) on the first move,
+every 15 moves, after 5 minutes, and after a tap that did not land; 250 ms
+of settle before a click. All of it in `PhoneTuning` (hidden settings).
+
+The re-press (`diff.rs`, the prototype's `changed()`): a verified tap takes
+a 207x448 gray frame after the pointer settled, presses, waits for the
+screen to be still (200 ms quiet, 1.2 s max) and counts the pixels that
+moved by more than 25 levels outside a circle of 14 px around the click;
+fewer than 12 = nothing happened: the pointer is homed again, the same
+point pressed once more (`repressed: true`), and if that changes nothing
+too the pointer is forgotten (`changed: false`).
+
+The helper protocol (`eyes.rs`): JSON requests on its stdin (`status`,
+`jpeg {after_ms,max_edge,quality}`, `gray {max_edge}`), a JSON header line
+plus exactly `len` payload bytes on its stdout; one owner task, one request
+at a time, a dead helper restarted after 1 s; it exits when its stdin
+closes. Never a network port. `SNTH_PHONECAP_FAKE=1` gives it a made-up
+screen (the self-test).
+
+The board (`hands.rs`): found by USB 303a:1001 in `ioreg` (or the port in
+`tuning.port`), opened once (`TIOCEXCL`, raw 115200) and held by one
+thread with a queue for as long as the phone is on. DTR and RTS go up
+right after open and on close RTS drops BEFORE DTR (`Held`): any other
+order resets the S3 and the phone loses its Bluetooth link. JSON lines with
+an `id`; log lines skipped. `not_connected` from the firmware = `no_hands`.
+
+Lifecycle: the switch on starts the rig (`State::sync` from
+`mutate_settings`, and from `run_link`/`run_slot` at start), off drops it
+(the helper is killed, the port closed in order). The owner's own look,
+without the gate: `Core::phone_view`, `Core::phone_preview`.
+
+### Over Wi-Fi (`net.rs`, tz-phone-wireless.md)
+
+`PhoneSettings::device_udid` = the UDID the owner picked on the Phone page
+(the picker lists `devicectl list devices`: physical iOS devices only, state
+`connected` / `available` / `unpaired`; `Core::phone_devices`, Tauri
+`phone_devices`). IRON RULE: that UDID is the only one ever passed to a
+`devicectl device ...` command; no "first" or "only" phone, no fallback to the
+cable or to another device (the owner's own phone is in the same list). An
+id that is not UDID-shaped (`PhoneSettings::udid_ok`) is refused by the app's
+settings save and gives no eyes. Changing it restarts the rig (the helper
+stops, the board's port is closed in order and opened again).
+
+`NetPhone` (the eyes, `Pace::Shots`) runs `/usr/bin/xcrun devicectl ...
+--timeout N --json-output -` (the JSON on stdout is devicectl's stable
+interface), only after `xcode-select -p` shows `usr/bin/devicectl` (no
+"install the developer tools" dialog; else `no_screen: Xcode is not installed
+on this Mac (the phone over Wi-Fi needs it)`). In its own process group: the
+Xcode wrapper script may start `xcodebuild -runFirstLaunch`, which ignores
+`--timeout` and can hang; a timeout kills the group. Timeouts: screenshot 5 s,
+paste 5 s, list/apps/launch 8 s.
+
+- Frames: `device capture screenshot --destination` a 0600 file in a 0700
+  folder under the temp dir, read and deleted; PNG decoded with the `image`
+  crate (pure Rust), JPEG for `frame`, the 207x448 gray for the change check
+  from the same screenshot. One devicectl at a time per phone. `jpeg` reuses
+  a screenshot younger than 150 ms when nothing was done since (the frame
+  after a stable wait); `gray` is always new. `frame_ms` = unix ms when the
+  screenshot began.
+- Status: `list devices` cached 5 s; `ok` when the chosen UDID is listed
+  `connected` or `available` and no screenshot failed in the last 10 s;
+  `device` its name, `width/height` from the last screenshot (828x1792
+  before one), `source: "network"`. Abilities `{launch, paste}` are true only
+  then (the cable: both false; an old app sends none).
+- Waits with slow eyes (`mod.rs`): stable = two consecutive screenshots
+  alike, whatever their spacing, starting from the last look (`Eyes::seed`)
+  when nothing was done since (`Eyes::touched` is called after every board
+  command and launch); the same longest wait. After a press
+  (`settle_after`): the first screenshot that differs from the look before
+  ends the wait; two alike that both match it = nothing happened (re-press).
+  The look before a key/type/home/launch is the seed when there is one. The
+  cable keeps its waits exactly; acts that do not point no longer take a
+  look only for the screen's size.
+- `launch`: `device info apps --include-all-apps` (cached 10 min, read again
+  on a miss), the exact bundle id (then any case), else the display name in
+  any case, else the one app whose name starts with it; not found:
+  `bad request: no app named "x" on the phone` (several fit: `... (it could
+  be A, B; name one)`), which the synth treats as a replan, not a failure.
+  Then `device process launch --device <udid> <bundle id>`, the screen
+  settles (two alike, at most 2.5 s), `changed` against the look before
+  (verify defaults to true for launch). Failure: `failed: launch <bundle>:
+  <devicectl's reason>`. Journal target `launch <bundle id>`.
+- `type` over Wi-Fi: non-ASCII or longer than 40 characters goes `device
+  pasteboard copy --device <udid>` (the text on stdin, UTF-8), then the board
+  presses `cmd+v`; shorter ASCII is typed by the board. Never logged; a
+  devicectl error that would quote the text is cut; the journal keeps the
+  length.
+- Errors: devicectl's `error.userInfo.NSLocalizedDescription` (plus the
+  underlying error's), else its `ERROR:` stderr line, at most 240 characters.
+
+Journal: one line per `act` (`phone_control.act`, target `tap 400,800`,
+`key cmd+space, enter`, `type (8 characters)`, `launch ph.telegra.Telegraph`:
+never the text; outcome
+`ok`, `ok: re-pressed`, `ok: no change after a re-press`, or the error;
+`duration_ms`), and the owner's refusals.
+
+Tests: `src/phone/tests.rs` (the gate, per-synth grants, once/session, the
+lease, the re-press on synthetic frames, keys/text/swipe, errors, the wire
+shapes; over Wi-Fi on a fake devicectl with 0.5 s screenshots: status and
+abilities, the picker picks nothing, launch by name and its timing, a launch
+miss, launch and non-ASCII over the cable refused unasked, paste vs typing,
+never the text in the journal, slow-eyes stability and the after-tap
+re-press, every command sent to the chosen UDID only), `net.rs` (the
+devicectl JSON shapes of Xcode 27.2 for list devices, info apps, errors;
+which app is meant; scaling; the owner's phone in the list never used),
+`pointer.rs`, `diff.rs`, `hands.rs` (the line order on a fake port, the
+protocol, an unplugged board, ioreg), `eyes.rs` (the framing, a dying
+helper). On a Mac: `connectd selftest phone [--phonecap <path>]
+[--fake-screen] [--touch] [--udid <UDID>] [--list]` (skips cleanly without an
+iPhone or a board; `--udid` = the screen over Wi-Fi and the app list,
+read-only).
 
 ## Observe: User Context reports (`observe.rs`)
 

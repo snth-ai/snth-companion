@@ -86,6 +86,9 @@ function wording(req: ApprovalRequest, s: Strings, name: string, cookiesAskEvery
       return { title: t.fileTitle(fileName(req.scope)), body: t.fileBody(parentFolder(req.scope)), spans: ["once", "session", "always"] };
     case "apps":
       return appsWording(req, s);
+    // The iPhone on the cable. The grant is this synth's alone.
+    case "phone_control":
+      return { title: t.phoneTitle(name), body: t.phoneBody(name), spans: ["once", "hour", "session", "always"], labels: { always: t.phoneAlways(name) } };
     case "shell": {
       // A command: the whole of it, the folder and the shell, from the
       // core. Only "always for this exact command" can be remembered, and

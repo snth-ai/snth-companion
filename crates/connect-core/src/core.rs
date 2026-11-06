@@ -256,6 +256,9 @@ pub struct Shared {
     pub(crate) transfers: crate::rpc::Transfers,
     /// Stops every running command of the command line (shell.rs).
     pub(crate) shell: crate::shell::State,
+    /// The iPhone on a cable: its eyes and hands, the lease, the pointer
+    /// (phone/mod.rs).
+    pub phone: crate::phone::State,
     /// The synths whose face was read (or set) in this run (island.rs).
     pub(crate) faces_read: Mutex<std::collections::HashSet<String>>,
     /// Who takes the synth's spoken answers (the shell: `set_speech_sink`).
@@ -1038,6 +1041,7 @@ impl Shared {
             }
         }
         self.lease_release(&id);
+        self.phone.release(&id);
         *slot.synth.write().unwrap() = None;
         self.set_slot_state(slot, LinkState::Unpaired, "unpaired");
         if removed {
@@ -1390,6 +1394,7 @@ impl Core {
             cookies_extension_first: AtomicBool::new(cfg!(windows)),
             transfers: crate::rpc::Transfers::default(),
             shell: crate::shell::State::default(),
+            phone: crate::phone::State::default(),
             faces_read: Mutex::new(std::collections::HashSet::new()),
             speech_sink: RwLock::new(None),
             island_limits: Mutex::new(std::collections::HashMap::new()),
@@ -1449,6 +1454,8 @@ impl Core {
         if !self.shared.settings().shell.enabled {
             self.shared.shell.stop_all();
         }
+        // The phone: its helper and the board's port run while it is on.
+        self.shared.phone.sync(&self.shared.settings().phone_control);
         let _ = self.shared.events.send(CoreEvent::Settings { rev });
         rev
     }
@@ -1462,7 +1469,8 @@ impl Core {
     /// the synth drives the computer, not when it may.
     ///
     /// The command line is off in every preset, so a preset turns it off
-    /// (the mode the owner chose for it stays for the next time).
+    /// (the mode the owner chose for it stays for the next time). So is
+    /// the phone (its pointer calibration and the chosen phone stay).
     pub fn apply_preset(&self, preset: Preset) -> u64 {
         self.mutate_settings(|s| {
             let roots = s.files.roots.clone();
@@ -1472,6 +1480,8 @@ impl Core {
             let locked_use = s.computer.locked_use;
             let keep_awake = s.computer.keep_awake;
             let shell_mode = s.shell.mode;
+            let phone_tuning = s.phone_control.tuning.clone();
+            let phone_udid = s.phone_control.device_udid.clone();
             *s = Settings::from_preset(preset, roots);
             s.computer.look = look;
             s.computer.apps = apps;
@@ -1479,7 +1489,44 @@ impl Core {
             s.computer.locked_use = locked_use;
             s.computer.keep_awake = keep_awake;
             s.shell.mode = shell_mode;
+            s.phone_control.tuning = phone_tuning;
+            s.phone_control.device_udid = phone_udid;
         })
+    }
+
+    // --- the phone (phone/mod.rs) ---
+
+    /// Start the phone's helper and board link when the phone is switched
+    /// on (stop them when it is off). Needs a tokio runtime; the links
+    /// call it, and so may the shell at start.
+    pub fn phone_sync(&self) {
+        self.shared.phone.sync(&self.shared.settings().phone_control);
+    }
+
+    /// What the Phone section shows: the screen, the board, who holds it.
+    pub async fn phone_view(&self) -> crate::phone::PhoneView {
+        crate::phone::view(&self.shared).await
+    }
+
+    /// The phone's screen now, for the owner's preview (JPEG).
+    pub async fn phone_preview(&self, max_edge: u32) -> Result<crate::phone::eyes::Jpeg, String> {
+        crate::phone::preview(&self.shared, max_edge).await
+    }
+
+    /// The physical iOS devices this Mac sees, for the Phone page's
+    /// picker. Only a list: the phone used is the one the owner picks.
+    pub async fn phone_devices(&self) -> Result<Vec<crate::phone::net::PhoneDevice>, String> {
+        crate::phone::devices(&self.shared).await
+    }
+
+    /// The chosen phone's apps over Wi-Fi (the self-test; read-only).
+    pub async fn phone_apps(&self) -> Result<Vec<crate::phone::net::PhoneApp>, String> {
+        crate::phone::apps(&self.shared).await
+    }
+
+    /// Other eyes and hands for the phone (the self-test, tests).
+    pub fn set_phone_factory(&self, f: Arc<dyn crate::phone::Factory>) {
+        self.shared.phone.set_factory(f);
     }
 
     // --- the island (island.rs) ---
@@ -2055,6 +2102,7 @@ impl Core {
     /// shuts down or the link is unpaired. A host with several links runs
     /// `run_slot` per link instead.
     pub async fn run_link(&self, ws_url: Option<String>, mut shutdown: watch::Receiver<bool>) {
+        self.phone_sync();
         loop {
             if *shutdown.borrow() {
                 return;
@@ -2080,6 +2128,7 @@ impl Core {
     /// the link is unpaired. The shell calls it for every link it has
     /// (and again after a new pairing: a second call is harmless).
     pub async fn run_slot(&self, synth_id: &str, shutdown: watch::Receiver<bool>) {
+        self.phone_sync();
         let Some(slot) = self.shared.slot(synth_id) else {
             return;
         };

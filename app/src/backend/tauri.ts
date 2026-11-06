@@ -49,6 +49,10 @@ export const tauriBackend: Backend = {
   appsCheck: () => invoke("apps_check"),
   appsRequestPermission: (app) => invoke("apps_request_permission", { app }),
 
+  phoneCheck: () => invoke("phone_check"),
+  phonePreview: () => invoke("phone_preview"),
+  phoneDevices: () => invoke("phone_devices"),
+
   loginsRefresh: (synthId) => invoke("logins_refresh", { synthId }),
   safariCheck: () => invoke("safari_check"),
   vaultForget: (site, synthId) => invoke("vault_forget", { site, synthId }),
