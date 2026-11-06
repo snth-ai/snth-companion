@@ -353,6 +353,11 @@ pub async fn update_settings(ctx: Cx<'_>, settings: Settings) -> Result<UiState,
         next.computer.tool_denylist = s.computer.tool_denylist.clone();
         // The phone's pointer calibration is not on any screen.
         next.phone_control.tuning = s.phone_control.tuning.clone();
+        // The phone over Wi-Fi: a UDID or nothing (the cable).
+        next.phone_control.device_udid = next.phone_control.device_udid.trim().to_string();
+        if !connect_core::settings::PhoneSettings::udid_ok(&next.phone_control.device_udid) {
+            next.phone_control.device_udid = s.phone_control.device_udid.clone();
+        }
         next.preset = s.preset;
         next.preset = matching_preset(&next);
         *s = next;
@@ -1551,6 +1556,8 @@ mod tests {
         let mut s = Settings::from_preset(Preset::Balanced, vec![]);
         s.phone_control.tuning.gain_milli = 1500;
         assert!(matches!(matching_preset(&s), Preset::Balanced), "the hidden calibration is no change");
+        s.phone_control.device_udid = "00008020-0003650E0192002E".into();
+        assert!(matches!(matching_preset(&s), Preset::Balanced), "which phone is no change either");
         s.phone_control.enabled = true;
         assert!(matches!(matching_preset(&s), Preset::Custom));
     }

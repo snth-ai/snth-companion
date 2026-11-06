@@ -1470,7 +1470,7 @@ impl Core {
     ///
     /// The command line is off in every preset, so a preset turns it off
     /// (the mode the owner chose for it stays for the next time). So is
-    /// the phone (its pointer calibration stays).
+    /// the phone (its pointer calibration and the chosen phone stay).
     pub fn apply_preset(&self, preset: Preset) -> u64 {
         self.mutate_settings(|s| {
             let roots = s.files.roots.clone();
@@ -1481,6 +1481,7 @@ impl Core {
             let keep_awake = s.computer.keep_awake;
             let shell_mode = s.shell.mode;
             let phone_tuning = s.phone_control.tuning.clone();
+            let phone_udid = s.phone_control.device_udid.clone();
             *s = Settings::from_preset(preset, roots);
             s.computer.look = look;
             s.computer.apps = apps;
@@ -1489,6 +1490,7 @@ impl Core {
             s.computer.keep_awake = keep_awake;
             s.shell.mode = shell_mode;
             s.phone_control.tuning = phone_tuning;
+            s.phone_control.device_udid = phone_udid;
         })
     }
 

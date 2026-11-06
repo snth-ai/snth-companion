@@ -473,10 +473,11 @@ pub struct ShellSettings {
     pub mode: ShellMode,
 }
 
-/// The iPhone plugged into this Mac (`phone_control`, phone/mod.rs):
-/// the synth sees its screen over the cable and works it through the
-/// SNTH Phone Bridge board (a Bluetooth keyboard and mouse). Off on a
-/// fresh install and in every preset; shown on macOS only.
+/// The test iPhone (`phone_control`, phone/mod.rs): the synth sees its
+/// screen (over the cable, or over Wi-Fi through Xcode's `devicectl`) and
+/// works it through the SNTH Phone Bridge board (a Bluetooth keyboard and
+/// mouse). Off on a fresh install and in every preset; shown on macOS
+/// only.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct PhoneSettings {
     #[serde(default)]
@@ -485,6 +486,22 @@ pub struct PhoneSettings {
     /// defaults are the ones measured on the test iPhone XR.
     #[serde(default)]
     pub tuning: PhoneTuning,
+    /// The phone over Wi-Fi: the UDID the owner picked on the Phone page.
+    /// Empty = the cable capture. Only this device is ever used: never
+    /// the first or the only iPhone this Mac sees.
+    #[serde(default)]
+    pub device_udid: String,
+}
+
+impl PhoneSettings {
+    /// A UDID as Apple writes them (hex and dashes), or empty. Anything
+    /// else is not passed to `devicectl`.
+    pub fn udid_ok(udid: &str) -> bool {
+        udid.is_empty()
+            || ((8..=64).contains(&udid.len())
+                && !udid.starts_with('-')
+                && udid.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
+    }
 }
 
 /// The pointer's calibration and the board's port (phone/pointer.rs).
@@ -1070,6 +1087,18 @@ mod tests {
         assert!(partial.enabled);
         assert_eq!(partial.tuning.gain_milli, 1500);
         assert_eq!(partial.tuning.corner_px, 24);
+        assert_eq!(partial.device_udid, "", "no phone over Wi-Fi in an old file: the cable");
+    }
+
+    #[test]
+    fn only_a_udid_shaped_id_is_a_phone() {
+        assert!(PhoneSettings::udid_ok(""));
+        assert!(PhoneSettings::udid_ok("00008020-0003650E0192002E"));
+        assert!(PhoneSettings::udid_ok("5E933679-6013-4A46-B7AA-6E65B7E4D860"));
+        assert!(!PhoneSettings::udid_ok("--device"));
+        assert!(!PhoneSettings::udid_ok("Aleksandr iPhone"));
+        assert!(!PhoneSettings::udid_ok("0000"));
+        assert!(!PhoneSettings::udid_ok("00008020-0003650E0192002E; rm"));
     }
 
     #[test]
