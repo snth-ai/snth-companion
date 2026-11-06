@@ -653,6 +653,7 @@ dependencies = [
  "futures",
  "hmac",
  "keyring",
+ "libc",
  "pbkdf2",
  "psl",
  "rand 0.8.8",

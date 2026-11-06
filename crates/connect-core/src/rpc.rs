@@ -3,7 +3,8 @@
 //! Methods: files.list / files.stat / files.read / files.write,
 //! cookies.get, permission.request, device.info, apps.<app>.<action>
 //! (every one of those goes through the one gate in apps/mod.rs),
-//! shell.exec (the one gate in shell.rs), and island.event (island.rs). One stream serves any
+//! shell.exec (the one gate in shell.rs), phone_control.status / .frame /
+//! .act (the one gate in phone/mod.rs), and island.event (island.rs). One stream serves any
 //! number of sequential requests; the synth opens one per call and the
 //! app also serves many on one.
 
@@ -172,6 +173,9 @@ async fn dispatch(shared: &Arc<Shared>, req: &Request) -> Result<Value, String> 
         }
         "cookies.get" => cookies_get(shared, req).await,
         m if m.starts_with("apps.") => crate::apps::handle(shared, m, &req.params).await,
+        // The iPhone on a cable: every call through the one gate in
+        // phone/mod.rs.
+        m if m.starts_with("phone_control.") => crate::phone::handle(shared, m, &req.params).await,
         "shell.exec" => crate::shell::exec(shared, &req.params, std::future::pending::<()>()).await,
         "permission.request" => permission_request(shared, req).await,
         // The life of a message the owner sent from the island, and the

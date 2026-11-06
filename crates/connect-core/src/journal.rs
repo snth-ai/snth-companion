@@ -23,7 +23,8 @@ const RING_CAP: usize = 500;
 pub struct Entry {
     /// Unix seconds.
     pub time: i64,
-    /// "net", "cookies", "computer", "files", "apps", "shell", "link".
+    /// "net", "cookies", "computer", "files", "apps", "shell",
+    /// "phone_control", "link".
     pub capability: String,
     /// "dial", "cookies.get", "files.read", "mcp.open", "tools/call", ...
     pub action: String,
@@ -44,7 +45,8 @@ pub struct Entry {
     /// (stopped, timed out) or never started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
-    /// A command line: how long it ran, in milliseconds.
+    /// A command line (or a phone action): how long it ran, in
+    /// milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
     /// The synth the line is about (its display name), when it came over a

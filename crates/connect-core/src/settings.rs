@@ -473,6 +473,66 @@ pub struct ShellSettings {
     pub mode: ShellMode,
 }
 
+/// The iPhone plugged into this Mac (`phone_control`, phone/mod.rs):
+/// the synth sees its screen over the cable and works it through the
+/// SNTH Phone Bridge board (a Bluetooth keyboard and mouse). Off on a
+/// fresh install and in every preset; shown on macOS only.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PhoneSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    /// How the pointer moves on this phone. Not on any screen: the
+    /// defaults are the ones measured on the test iPhone XR.
+    #[serde(default)]
+    pub tuning: PhoneTuning,
+}
+
+/// The pointer's calibration and the board's port (phone/pointer.rs).
+/// iOS takes only relative mouse moves: pixels = corner + gain * units,
+/// one axis at a time, measured at `step` units per report every
+/// `delay_ms`. Integers only (the settings compare by value): the gain
+/// is in thousandths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PhoneTuning {
+    /// Where the pointer rests after homing in a corner, in frame pixels
+    /// from both edges.
+    pub corner_px: u32,
+    /// Frame pixels per mouse unit, times 1000.
+    pub gain_milli: u32,
+    /// Mouse units per report.
+    pub step: u32,
+    /// Between reports.
+    pub delay_ms: u32,
+    /// The pause before a click: iOS drops a click that lands while the
+    /// pointer still settles.
+    pub settle_ms: u32,
+    /// Max-size reports that slam the pointer into a corner.
+    pub corner_count: u32,
+    /// Relative moves before the pointer is homed in a corner again.
+    pub max_hops: u32,
+    /// How long a remembered pointer position is trusted.
+    pub max_age_s: u32,
+    /// The board's serial port. Empty = found by its USB id.
+    pub port: String,
+}
+
+impl Default for PhoneTuning {
+    fn default() -> Self {
+        PhoneTuning {
+            corner_px: 24,
+            gain_milli: 1790,
+            step: 20,
+            delay_ms: 8,
+            settle_ms: 250,
+            corner_count: 15,
+            max_hops: 15,
+            max_age_s: 300,
+            port: String::new(),
+        }
+    }
+}
+
 /// Which preset the settings came from, or `custom` after a hand edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -497,6 +557,10 @@ pub struct Settings {
     /// existed: off.
     #[serde(default)]
     pub shell: ShellSettings,
+    /// The iPhone on a cable. Absent in a settings file written before it
+    /// existed: off.
+    #[serde(default)]
+    pub phone_control: PhoneSettings,
     pub preset: Preset,
 }
 
@@ -536,6 +600,7 @@ impl Default for Settings {
             },
             apps: AppsSettings::default(),
             shell: ShellSettings::default(),
+            phone_control: PhoneSettings::default(),
             preset: Preset::Custom,
         }
     }
@@ -985,6 +1050,26 @@ mod tests {
         let s: Settings = serde_json::from_value(old).unwrap();
         assert!(!s.apps.enabled, "apps stay off until the owner turns them on");
         assert!(s.net.enabled);
+    }
+
+    #[test]
+    fn the_phone_is_off_in_every_preset_and_in_an_old_file() {
+        for p in [Preset::Careful, Preset::Balanced, Preset::Full, Preset::Custom] {
+            let s = Settings::from_preset(p, vec![]);
+            assert!(!s.phone_control.enabled, "{p:?} turns the phone on");
+        }
+        assert!(!Settings::default().phone_control.enabled);
+        // settings.json of app 0.1.35 has no "phone_control" key at all.
+        let mut old = serde_json::to_value(Settings::from_preset(Preset::Full, vec![])).unwrap();
+        old.as_object_mut().unwrap().remove("phone_control");
+        let s: Settings = serde_json::from_value(old).unwrap();
+        assert!(!s.phone_control.enabled);
+        assert_eq!(s.phone_control.tuning, PhoneTuning::default());
+        // A partial tuning keeps the other defaults.
+        let partial: PhoneSettings = serde_json::from_str(r#"{"enabled":true,"tuning":{"gain_milli":1500}}"#).unwrap();
+        assert!(partial.enabled);
+        assert_eq!(partial.tuning.gain_milli, 1500);
+        assert_eq!(partial.tuning.corner_px, 24);
     }
 
     #[test]

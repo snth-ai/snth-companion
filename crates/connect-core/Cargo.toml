@@ -34,5 +34,10 @@ sha2.workspace = true
 keyring.workspace = true
 ureq.workspace = true
 
+# The phone's board on its serial port (phone/hands.rs): termios and the
+# modem lines. Already in the build (connectd, tokio).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread", "time", "sync"] }
