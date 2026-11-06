@@ -366,7 +366,7 @@ pub mod posix {
     impl PosixPort {
         pub fn open(path: &str) -> Result<PosixPort, String> {
             let c = CString::new(path).map_err(|_| format!("bad port name {path:?}"))?;
-            let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK) };
+            let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK | libc::O_CLOEXEC) };
             if fd < 0 {
                 let e = err();
                 return Err(match e.raw_os_error() {
