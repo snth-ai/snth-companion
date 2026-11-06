@@ -1,5 +1,6 @@
-//! The phone's screen: frames from the capture helper (`snth-phonecap`,
-//! app/macos/phonecap/main.swift) behind the `Eyes` trait.
+//! The phone's screen behind the `Eyes` trait: frames from the capture
+//! helper over the cable (`snth-phonecap`, app/macos/phonecap/main.swift,
+//! here) or screenshots over Wi-Fi (`devicectl`, net.rs).
 //!
 //! The helper is a program inside the app bundle (Contents/MacOS, signed
 //! with the app, so the camera permission macOS asks for is the app's). It
@@ -46,9 +47,23 @@ pub struct ScreenStatus {
     pub height: u32,
     /// Unix ms of the newest frame (0 = none yet).
     pub last_frame_ms: i64,
+    /// Where the frames come from: `cable` (the capture helper) or
+    /// `network` (`devicectl` screenshots over Wi-Fi). Empty when there
+    /// are no eyes at all.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub source: String,
     /// Why there is no screen.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub error: String,
+}
+
+/// How fast the eyes see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pace {
+    /// A live stream: a new frame every 10-40 ms (the cable).
+    Live,
+    /// One screenshot at a time, about half a second each (Wi-Fi).
+    Shots,
 }
 
 /// A frame as JPEG.
@@ -81,6 +96,23 @@ pub trait Eyes: Send + Sync {
     fn jpeg(&self, after_ms: i64, max_edge: u32, quality: f64) -> Fut<'_, Result<Jpeg, String>>;
     /// The newest frame, gray, long edge `max_edge`.
     fn gray(&self, max_edge: u32) -> Fut<'_, Result<GrayFrame, String>>;
+    /// How fast these eyes see (the waits in mod.rs depend on it).
+    fn pace(&self) -> Pace {
+        Pace::Live
+    }
+    /// The last look, if nothing was done on the phone since it was
+    /// taken: slow eyes start a wait from it instead of a new screenshot.
+    fn seed(&self) -> Option<GrayFrame> {
+        None
+    }
+    /// The hands (or the phone itself) just did something: a look taken
+    /// before now no longer shows the screen.
+    fn touched(&self) {}
+    /// The screen's size from the last look, when slow eyes know it
+    /// (saves a screenshot only for the size).
+    fn known_size(&self) -> Option<(u32, u32)> {
+        None
+    }
 }
 
 /// No screen at all (a system without the helper).
@@ -334,6 +366,7 @@ impl Eyes for HelperEyes {
                         width: u32_of(&h, "width"),
                         height: u32_of(&h, "height"),
                         last_frame_ms: h.get("last_frame_ms").and_then(Value::as_i64).unwrap_or(0),
+                        source: "cable".into(),
                         error: h.get("error").and_then(Value::as_str).unwrap_or("").to_string(),
                     };
                     if s.ok && s.width == 0 {
@@ -342,7 +375,7 @@ impl Eyes for HelperEyes {
                     }
                     s
                 }
-                Err(why) => ScreenStatus { error: why, ..Default::default() },
+                Err(why) => ScreenStatus { source: "cable".into(), error: why, ..Default::default() },
             }
         })
     }

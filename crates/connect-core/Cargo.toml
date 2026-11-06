@@ -33,6 +33,10 @@ sha1.workspace = true
 sha2.workspace = true
 keyring.workspace = true
 ureq.workspace = true
+# The phone over Wi-Fi (phone/net.rs): devicectl screenshots are PNG, the
+# synth gets JPEG and the change check small gray frames. Pure Rust, the
+# same crate and features the app already builds.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 # The phone's board on its serial port (phone/hands.rs): termios and the
 # modem lines. Already in the build (connectd, tokio).

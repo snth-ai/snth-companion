@@ -1,11 +1,15 @@
-//! `phone_control`: the synth drives an iPhone plugged into this Mac
-//! (tz-phone-control.md section 2; connect.md "Phone").
+//! `phone_control`: the synth drives a test iPhone from this Mac
+//! (tz-phone-control.md section 2, tz-phone-wireless.md section 2;
+//! connect.md "Phone").
 //!
-//! Eyes: the phone's screen over the cable, from the capture helper
-//! (eyes.rs). Hands: the SNTH Phone Bridge board, a Bluetooth keyboard
-//! and mouse for the phone, on a USB serial port (hands.rs). The pointer,
-//! its calibration and the re-press of a tap that did nothing live here,
-//! next to the frames (0.01-0.04 s each) and the board.
+//! Eyes: the phone's screen, either over the cable from the capture helper
+//! (eyes.rs, frames every 0.01-0.04 s), or over Wi-Fi as `devicectl`
+//! screenshots of the ONE phone the owner chose on the Phone page (net.rs,
+//! about 0.5 s each; `PhoneSettings::device_udid`, never picked here).
+//! Hands: the SNTH Phone Bridge board, a Bluetooth keyboard and mouse for
+//! the phone, on a USB serial port (hands.rs). The pointer, its
+//! calibration and the re-press of a tap that did nothing live here, next
+//! to the frames and the board.
 //!
 //! RPC (`phone_control.status`, `.frame`, `.act`): every call goes through
 //! `handle`, the one gate: pause, the switch (off by default and in every
@@ -17,14 +21,44 @@
 //! or the keys, the length of typed text and never the text, whether the
 //! screen changed, the time it took).
 //!
+//! The wire (all additions are optional for an old synth: it ignores the
+//! new fields and never sends `launch`):
+//!
+//!   phone_control.status {} ->
+//!     {"screen": {"ok", "device", "width", "height", "last_frame_ms",
+//!                 "source": "cable"|"network", "error"?},
+//!      "hands": {"ok", "port", "ble_connected", "firmware", "error"?},
+//!      "lease": {"holder"},
+//!      "abilities": {"launch": bool, "paste": bool}}
+//!   `abilities` are both true only with the phone over Wi-Fi and the
+//!   phone reachable; absent (an old app) = both false.
+//!
+//!   phone_control.act {"action": "launch", "app": "<display name or
+//!   bundle id>"} -> {"ok": true, "changed", "repressed": false,
+//!   "verified", "pointer", "bundle_id": "<what was opened>"}
+//!   The app is found in the phone's app list: the exact bundle id, else
+//!   the display name in any case, else the one app whose name starts
+//!   with it. Not found: `bad request: no app named "<x>" on the phone`
+//!   (several fit: the same words plus "(it could be A, B; name one)").
+//!   Over the cable: `unsupported: launch needs the phone over Wi-Fi ...`.
+//!
+//!   phone_control.act {"action": "type", "text"}: over Wi-Fi, text that
+//!   is not ASCII or longer than `PASTE_OVER` characters goes through the
+//!   phone's pasteboard (`devicectl`) and the board presses cmd+v; shorter
+//!   ASCII is typed by the board as before. Over the cable non-ASCII stays
+//!   `unsupported: non_ascii text, paste is not configured`.
+//!
 //! Error classes beyond the usual `denied:` / `bad request:`:
-//! `no_screen:` (no capture), `no_hands:` (no board, or the phone is not
+//! `no_screen:` (no capture, or the phone over Wi-Fi does not answer;
+//! devicectl's reason, short), `no_hands:` (no board, or the phone is not
 //! on its Bluetooth), `busy:` (another synth holds the phone),
-//! `unsupported:` (text the keyboard cannot type).
+//! `unsupported:` (text the keyboard cannot type, launch over the cable),
+//! `failed:` (the board, or devicectl failed to launch or paste).
 
 pub mod diff;
 pub mod eyes;
 pub mod hands;
+pub mod net;
 pub mod pointer;
 
 use std::sync::{Arc, Mutex, RwLock};
@@ -41,7 +75,7 @@ use crate::journal::Entry;
 use crate::settings::{PhoneSettings, PhoneTuning};
 
 use diff::{GRAY_EDGE, MIN_CHANGED, STILL_LEVEL};
-use eyes::{Eyes, GrayFrame, ScreenStatus};
+use eyes::{Eyes, GrayFrame, Pace, ScreenStatus};
 use hands::{Hands, HandsError, HandsStatus};
 use pointer::{Calib, Pointer, BOARD_BASE};
 
@@ -59,6 +93,8 @@ const STABLE_POLL: Duration = Duration::from_millis(100);
 const AFTER_TAP_QUIET: Duration = Duration::from_millis(200);
 const AFTER_TAP_MAX: Duration = Duration::from_millis(1200);
 const AFTER_REPRESS_MAX: Duration = Duration::from_millis(1000);
+/// After an app was opened, until the screen settles.
+const AFTER_LAUNCH_MAX: Duration = Duration::from_millis(2500);
 /// Before the second press.
 const REPRESS_PAUSE: Duration = Duration::from_millis(300);
 /// A long press without `hold_ms`.
@@ -67,6 +103,10 @@ const LONG_PRESS: Duration = Duration::from_millis(900);
 const KEY_GAP: Duration = Duration::from_millis(150);
 /// The most text one `type` takes (the board reads lines of 4 KiB).
 const MAX_TEXT: usize = 1000;
+/// Over Wi-Fi, longer text is pasted rather than typed key by key.
+pub const PASTE_OVER: usize = 40;
+/// The longest app name or bundle id in a `launch`.
+const MAX_APP: usize = 200;
 const MAX_KEYS: usize = 10;
 /// The screen size used when no frame tells it (the iPhone XR).
 const DEFAULT_SIZE: (u32, u32) = (828, 1792);
@@ -90,28 +130,50 @@ pub fn wire_value(s: &PhoneSettings) -> Value {
 pub struct Rig {
     pub eyes: Arc<dyn Eyes>,
     pub hands: Arc<dyn Hands>,
+    /// The phone over Wi-Fi (the same object as `eyes` then): opening apps
+    /// and pasting. None = the cable.
+    pub net: Option<Arc<net::NetPhone>>,
 }
 
-/// Makes the eyes and hands (the helper and the board on a Mac; fakes in
-/// tests).
+/// Makes the eyes and hands (the helper or devicectl, and the board, on a
+/// Mac; fakes in tests).
 pub trait Factory: Send + Sync {
-    fn start(&self, tuning: &PhoneTuning) -> Rig;
+    fn start(&self, s: &PhoneSettings) -> Rig;
+    /// Where the Phone page's list of phones comes from.
+    fn devices(&self) -> Arc<dyn net::Device>;
 }
 
-/// The real thing: the capture helper and the board's serial port.
+/// The real thing: the capture helper or devicectl, and the board's serial
+/// port.
 pub struct SystemFactory {
     /// The helper program; None = next to this program (`eyes::helper_path`).
     pub helper: Option<std::path::PathBuf>,
 }
 
+/// The eyes for these settings: the cable helper when no phone is chosen,
+/// else devicectl for exactly the chosen UDID.
+fn system_eyes(helper: &Option<std::path::PathBuf>, s: &PhoneSettings) -> (Arc<dyn Eyes>, Option<Arc<net::NetPhone>>) {
+    let udid = s.device_udid.trim();
+    if udid.is_empty() {
+        let path = helper.clone().unwrap_or_else(eyes::helper_path);
+        return (Arc::new(eyes::HelperEyes::start(Arc::new(eyes::ProgramSpawn(path)))), None);
+    }
+    if !PhoneSettings::udid_ok(udid) {
+        // Never a guess: no other phone, no cable.
+        return (Arc::new(eyes::NoEyes("the chosen phone's id is not valid; choose the phone again on the Phone page".into())), None);
+    }
+    let phone = Arc::new(net::NetPhone::new(net::system(), udid.to_string()));
+    (phone.clone(), Some(phone))
+}
+
 impl Factory for SystemFactory {
-    fn start(&self, tuning: &PhoneTuning) -> Rig {
+    fn start(&self, s: &PhoneSettings) -> Rig {
         if !supported() {
             let why = "phone control works in SNTH Connect on a Mac only".to_string();
-            return Rig { eyes: Arc::new(eyes::NoEyes(why.clone())), hands: Arc::new(hands::NoHands(why)) };
+            return Rig { eyes: Arc::new(eyes::NoEyes(why.clone())), hands: Arc::new(hands::NoHands(why)), net: None };
         }
-        let path = self.helper.clone().unwrap_or_else(eyes::helper_path);
-        let eyes: Arc<dyn Eyes> = Arc::new(eyes::HelperEyes::start(Arc::new(eyes::ProgramSpawn(path))));
+        let tuning = &s.tuning;
+        let (eyes, net) = system_eyes(&self.helper, s);
         #[cfg(unix)]
         let hands: Arc<dyn Hands> = Arc::new(hands::Board::start(
             Arc::new(hands::posix::SystemOpener),
@@ -122,8 +184,20 @@ impl Factory for SystemFactory {
             let _ = tuning;
             Arc::new(hands::NoHands("no serial port support on this system".into()))
         };
-        Rig { eyes, hands }
+        Rig { eyes, hands, net }
     }
+
+    fn devices(&self) -> Arc<dyn net::Device> {
+        net::system()
+    }
+}
+
+/// What the rig is made from: a new calibration, board port or phone
+/// restarts it.
+type RigKey = (PhoneTuning, String);
+
+fn rig_key(s: &PhoneSettings) -> RigKey {
+    (s.tuning.clone(), s.device_udid.trim().to_string())
 }
 
 /// Who holds the phone.
@@ -138,7 +212,7 @@ struct Lease {
 /// and the pointer (its lock also makes acts run one at a time).
 pub struct State {
     factory: RwLock<Arc<dyn Factory>>,
-    rig: Mutex<Option<(PhoneTuning, Arc<Rig>)>>,
+    rig: Mutex<Option<(RigKey, Arc<Rig>)>>,
     lease: Mutex<Option<Lease>>,
     pointer: tokio::sync::Mutex<Pointer>,
 }
@@ -164,14 +238,22 @@ impl State {
     /// The running rig, started now if needed. Needs a tokio runtime.
     fn rig(&self, s: &PhoneSettings) -> Arc<Rig> {
         let mut rig = self.rig.lock().unwrap();
-        if let Some((tuning, r)) = rig.as_ref() {
-            if *tuning == s.tuning {
+        let key = rig_key(s);
+        if let Some((k, r)) = rig.as_ref() {
+            if *k == key {
                 return r.clone();
             }
         }
-        let started = Arc::new(self.factory.read().unwrap().start(&s.tuning));
-        *rig = Some((s.tuning.clone(), started.clone()));
+        // The old rig goes first (the helper killed, the port closed).
+        rig.take();
+        let started = Arc::new(self.factory.read().unwrap().start(s));
+        *rig = Some((key, started.clone()));
         started
+    }
+
+    /// The phones this Mac sees (the Phone page's picker).
+    fn device_list(&self) -> Arc<dyn net::Device> {
+        self.factory.read().unwrap().devices()
     }
 
     /// Switched off: the helper is killed, the board's port closed (RTS,
@@ -235,6 +317,20 @@ impl State {
     }
 }
 
+/// What the phone can do beyond the board (`phone_control.status`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct Abilities {
+    /// `act {"action":"launch"}` opens an app by name or bundle id.
+    pub launch: bool,
+    /// `act {"action":"type"}` takes any text (pasted).
+    pub paste: bool,
+}
+
+fn abilities(rig: &Rig, screen: &ScreenStatus) -> Abilities {
+    let on = rig.net.is_some() && screen.ok;
+    Abilities { launch: on, paste: on }
+}
+
 /// What the owner's Phone section shows.
 #[derive(Debug, Clone, Serialize)]
 pub struct PhoneView {
@@ -244,6 +340,7 @@ pub struct PhoneView {
     pub hands: HandsStatus,
     /// The synth that controls the phone right now, if any.
     pub holder: Option<String>,
+    pub abilities: Abilities,
 }
 
 /// The owner's look at the phone (no gate: the owner's own screen).
@@ -258,11 +355,34 @@ pub(crate) async fn view(shared: &Arc<Shared>) -> PhoneView {
             screen: ScreenStatus { error: off.into(), ..Default::default() },
             hands: HandsStatus { error: off.into(), ..Default::default() },
             holder,
+            abilities: Abilities::default(),
         };
     }
     let rig = shared.phone.rig(&s);
     let (screen, hands) = tokio::join!(rig.eyes.status(), rig.hands.status());
-    PhoneView { supported: true, enabled: true, screen, hands, holder }
+    let abilities = abilities(&rig, &screen);
+    PhoneView { supported: true, enabled: true, screen, hands, holder, abilities }
+}
+
+/// The physical iOS devices this Mac sees, for the owner's picker (no
+/// gate: listing is not using). Nothing here picks one.
+pub(crate) async fn devices(shared: &Arc<Shared>) -> Result<Vec<net::PhoneDevice>, String> {
+    if !supported() {
+        return Err("the phone works in SNTH Connect on a Mac only".into());
+    }
+    shared.phone.device_list().list().await
+}
+
+/// The chosen phone's apps (the self-test; read-only, no gate). Err with
+/// the cable.
+pub(crate) async fn apps(shared: &Arc<Shared>) -> Result<Vec<net::PhoneApp>, String> {
+    let s = shared.settings().phone_control;
+    if !(s.enabled && supported()) {
+        return Err("phone control is off".into());
+    }
+    let rig = shared.phone.rig(&s);
+    let phone = rig.net.as_ref().ok_or("the phone is on the cable (no phone over Wi-Fi is chosen)")?;
+    Ok(phone.apps(true).await?.0)
 }
 
 /// The newest frame for the owner's preview, as JPEG.
@@ -301,8 +421,12 @@ pub async fn handle(shared: &Arc<Shared>, method: &str, params: &Value) -> Resul
         Some(a @ ("status" | "frame" | "act")) => a,
         _ => return Err(format!("denied: unknown method {method:?}")),
     };
-    // A bad request is refused before the owner is asked anything.
+    // A bad request is refused before the owner is asked anything, and so
+    // is what this phone cannot do (launch, or pasting, over the cable).
     let act = if action == "act" { Some(ActRequest::parse(params)?) } else { None };
+    if let Some(req) = act.as_ref() {
+        req.fits(!shared.settings().phone_control.device_udid.trim().is_empty())?;
+    }
     admit(shared, params, action, act.as_ref()).await?;
     let s = shared.settings().phone_control;
     let rig = shared.phone.rig(&s);
@@ -375,13 +499,22 @@ fn take_lease(shared: &Arc<Shared>, act: Option<&ActRequest>) -> Result<(), Stri
 async fn status(shared: &Arc<Shared>, rig: &Rig) -> Value {
     let (screen, hands) = tokio::join!(rig.eyes.status(), rig.hands.status());
     let holder = shared.phone.holder().map(|(_, n)| n).unwrap_or_default();
-    json!({"screen": screen, "hands": hands, "lease": {"holder": holder}})
+    let abilities = abilities(rig, &screen);
+    json!({"screen": screen, "hands": hands, "lease": {"holder": holder}, "abilities": abilities})
 }
 
 /// Wait until the screen stops changing: `quiet` without a change (two
 /// looks whose mean difference is under `STILL_LEVEL`), at most `max`.
 /// (stable, the last look).
+///
+/// Slow eyes (screenshots over Wi-Fi, about 0.5 s each) cannot see
+/// `quiet` pass a few times: there, stable = two consecutive screenshots
+/// alike, whatever their spacing, starting from the last look when nothing
+/// was done on the phone since. The longest wait is the same.
 pub(crate) async fn wait_stable(eyes: &dyn Eyes, quiet: Duration, max: Duration) -> Result<(bool, GrayFrame), String> {
+    if eyes.pace() == Pace::Shots {
+        return wait_stable_shots(eyes, max).await;
+    }
     let start = Instant::now();
     let mut since = start;
     let mut prev: Option<GrayFrame> = None;
@@ -400,6 +533,62 @@ pub(crate) async fn wait_stable(eyes: &dyn Eyes, quiet: Duration, max: Duration)
         }
         prev = Some(g);
         tokio::time::sleep(STABLE_POLL).await;
+    }
+}
+
+async fn wait_stable_shots(eyes: &dyn Eyes, max: Duration) -> Result<(bool, GrayFrame), String> {
+    let start = Instant::now();
+    let mut prev = eyes.seed();
+    loop {
+        let g = eyes.gray(GRAY_EDGE).await?;
+        let compared = prev.is_some();
+        if prev.as_ref().is_some_and(|p| diff::mean_diff(&p.gray, &g.gray) < STILL_LEVEL) {
+            return Ok((true, g));
+        }
+        if compared && start.elapsed() >= max {
+            return Ok((false, g));
+        }
+        prev = Some(g);
+    }
+}
+
+/// After an act: how many pixels changed against `before` (outside the
+/// pointer's spot around `at`), and the last look.
+///
+/// The cable (unchanged): wait for the screen to settle (`AFTER_TAP_QUIET`
+/// quiet, at most `max`), then compare. Slow eyes: each screenshot is
+/// compared as it comes: the first that differs from `before` ends the
+/// wait (the synth's next frame waits for the screen to settle), and two
+/// alike that both match `before` mean nothing happened; at least two
+/// looks, at most about `max`.
+async fn settle_after(eyes: &dyn Eyes, before: &GrayFrame, at: Option<(f64, f64)>, size: (u32, u32), max: Duration) -> Result<(usize, GrayFrame), String> {
+    if eyes.pace() == Pace::Live {
+        let (_, after) = wait_stable(eyes, AFTER_TAP_QUIET, max).await?;
+        return Ok((diff::changed(&before.gray, &after.gray, at, size), after));
+    }
+    let start = Instant::now();
+    let mut prev: Option<GrayFrame> = None;
+    loop {
+        let g = eyes.gray(GRAY_EDGE).await?;
+        let n = diff::changed(&before.gray, &g.gray, at, size);
+        if n >= MIN_CHANGED {
+            return Ok((n, g));
+        }
+        let still = prev.as_ref().is_some_and(|p| diff::mean_diff(&p.gray, &g.gray) < STILL_LEVEL);
+        if still || (prev.is_some() && start.elapsed() >= max) {
+            return Ok((n, g));
+        }
+        prev = Some(g);
+    }
+}
+
+/// The look before an act: with slow eyes the last look when nothing was
+/// done on the phone since (no pointer moved, nothing pressed), else a new
+/// one.
+async fn look_before(eyes: &dyn Eyes) -> Result<GrayFrame, String> {
+    match eyes.seed() {
+        Some(g) => Ok(g),
+        None => eyes.gray(GRAY_EDGE).await.map_err(no_screen),
     }
 }
 
@@ -439,6 +628,7 @@ pub enum Action {
     Type,
     Home,
     ReleaseAll,
+    Launch,
 }
 
 impl Action {
@@ -453,6 +643,7 @@ impl Action {
             Action::Type => "type",
             Action::Home => "home",
             Action::ReleaseAll => "release_all",
+            Action::Launch => "launch",
         }
     }
 
@@ -472,11 +663,18 @@ pub struct ActRequest {
     pub text: String,
     pub amount: i64,
     pub verify: bool,
+    /// `launch`: the app's display name or bundle id.
+    pub app: String,
 }
 
 /// Printable ASCII, newline and tab: what the board's US keyboard types.
 fn typeable(text: &str) -> bool {
     text.chars().all(|c| (' '..='~').contains(&c) || c == '\n' || c == '\t')
+}
+
+/// Over Wi-Fi: this text goes through the phone's pasteboard.
+fn pasted(text: &str) -> bool {
+    !typeable(text) || text.chars().count() > PASTE_OVER
 }
 
 /// A key combination as the firmware takes it: words and `+`.
@@ -496,10 +694,11 @@ impl ActRequest {
             "type" => Action::Type,
             "home" => Action::Home,
             "release_all" => Action::ReleaseAll,
+            "launch" => Action::Launch,
             "" => return Err("bad request: params.action is required".into()),
             other => {
                 return Err(format!(
-                    "bad request: unknown action {other:?} (tap, double_tap, long_press, swipe, scroll, key, type, home, release_all)"
+                    "bad request: unknown action {other:?} (tap, double_tap, long_press, swipe, scroll, key, type, home, release_all, launch)"
                 ))
             }
         };
@@ -518,7 +717,9 @@ impl ActRequest {
             _ => Vec::new(),
         };
         let text = p.get("text").and_then(Value::as_str).unwrap_or("").to_string();
-        let verify = p.get("verify").and_then(Value::as_bool).unwrap_or(action.presses());
+        let app = p.get("app").and_then(Value::as_str).unwrap_or("").trim().to_string();
+        // A launch is checked too: the look before it is usually free.
+        let verify = p.get("verify").and_then(Value::as_bool).unwrap_or(action.presses() || action == Action::Launch);
         match action {
             Action::Tap | Action::DoubleTap | Action::LongPress if at.is_none() => {
                 return Err(format!("bad request: {} needs x and y (frame pixels of the native size)", action.name()))
@@ -542,16 +743,33 @@ impl ActRequest {
                 if text.is_empty() {
                     return Err("bad request: type needs text".into());
                 }
-                if !typeable(&text) {
-                    return Err("unsupported: non_ascii text, paste is not configured".into());
-                }
                 if text.chars().count() > MAX_TEXT {
                     return Err(format!("bad request: at most {MAX_TEXT} characters in one type"));
                 }
             }
+            Action::Launch => {
+                if app.is_empty() {
+                    return Err("bad request: launch needs app (its name on the phone, or its bundle id)".into());
+                }
+                if app.chars().count() > MAX_APP || app.chars().any(char::is_control) {
+                    return Err(format!("bad request: app is a name of at most {MAX_APP} characters"));
+                }
+            }
             _ => {}
         }
-        Ok(ActRequest { action, at, to, hold_ms, keys, text, amount, verify })
+        Ok(ActRequest { action, at, to, hold_ms, keys, text, amount, verify, app })
+    }
+
+    /// What this phone can do: over the cable (`net` false) the board types
+    /// ASCII only and nothing opens an app by name.
+    pub fn fits(&self, net: bool) -> Result<(), String> {
+        match self.action {
+            Action::Type if !net && !typeable(&self.text) => Err("unsupported: non_ascii text, paste is not configured".into()),
+            Action::Launch if !net => Err(
+                "unsupported: launch needs the phone over Wi-Fi (the owner chooses it on the Phone page of SNTH Connect); open the app with the keyboard instead".into(),
+            ),
+            _ => Ok(()),
+        }
     }
 
     /// What the journal says the action was: never the typed text.
@@ -565,6 +783,7 @@ impl ActRequest {
             Action::Type => format!("type ({} characters)", self.text.chars().count()),
             Action::Home => "home".into(),
             Action::ReleaseAll => "release_all".into(),
+            Action::Launch => format!("launch {}", self.app.chars().take(80).collect::<String>()),
         }
     }
 }
@@ -575,23 +794,35 @@ struct Outcome {
     changed: bool,
     verified: bool,
     repressed: bool,
+    /// `launch`: the app that was opened.
+    bundle_id: Option<String>,
 }
 
-/// The board, stopped by a pause or the switch between commands.
+/// The board, stopped by a pause or the switch between commands. Every
+/// command tells the eyes the screen may have changed.
 struct Driver<'a> {
     shared: &'a Arc<Shared>,
     hands: &'a dyn Hands,
+    eyes: &'a dyn Eyes,
 }
 
 impl Driver<'_> {
-    async fn send(&self, cmd: Value, timeout: Duration) -> Result<Value, String> {
+    /// Paused or switched off since the act began?
+    fn check(&self) -> Result<(), String> {
         if self.shared.paused() {
             return Err(paused());
         }
         if !self.shared.settings().phone_control.enabled {
             return Err(off());
         }
-        self.hands.call(cmd, timeout).await.map_err(hands_error)
+        Ok(())
+    }
+
+    async fn send(&self, cmd: Value, timeout: Duration) -> Result<Value, String> {
+        self.check()?;
+        let r = self.hands.call(cmd, timeout).await.map_err(hands_error);
+        self.eyes.touched();
+        r
     }
 
     async fn all(&self, cmds: Vec<(Value, Duration)>) -> Result<(), String> {
@@ -612,6 +843,11 @@ async fn run_act(shared: &Arc<Shared>, rig: &Rig, tuning: &PhoneTuning, req: Act
     // One act at a time; the pointer is the phone's, not a synth's.
     let mut ptr = shared.phone.pointer.lock().await;
     let result = act_inner(shared, rig, tuning, &req, &mut ptr).await;
+    // A launch says what was opened (the bundle id), not only what was asked.
+    let target = match &result {
+        Ok(Outcome { bundle_id: Some(b), .. }) => format!("launch {b}"),
+        _ => target,
+    };
     let mut entry = Entry::new(
         CAP,
         "phone_control.act",
@@ -629,25 +865,36 @@ async fn run_act(shared: &Arc<Shared>, rig: &Rig, tuning: &PhoneTuning, req: Act
     shared.journal().record(entry);
     let o = result?;
     let pointer = ptr.position().map(|(x, y)| json!({"x": x, "y": y})).unwrap_or(Value::Null);
-    Ok(json!({"ok": true, "changed": o.changed, "repressed": o.repressed, "verified": o.verified, "pointer": pointer}))
+    let mut answer = json!({"ok": true, "changed": o.changed, "repressed": o.repressed, "verified": o.verified, "pointer": pointer});
+    if let Some(b) = o.bundle_id {
+        answer["bundle_id"] = json!(b);
+    }
+    Ok(answer)
 }
 
 async fn act_inner(shared: &Arc<Shared>, rig: &Rig, tuning: &PhoneTuning, req: &ActRequest, ptr: &mut Pointer) -> Result<Outcome, String> {
     let c = Calib::from_tuning(tuning);
-    let board = Driver { shared, hands: rig.hands.as_ref() };
     let eyes = rig.eyes.as_ref();
+    let board = Driver { shared, hands: rig.hands.as_ref(), eyes };
     let look = || async { eyes.gray(GRAY_EDGE).await.map_err(no_screen) };
 
-    // The screen's size: from a frame when there is one. Checking the
-    // result needs frames; acting blind does not.
-    let size = match eyes.gray(GRAY_EDGE).await {
-        Ok(g) if g.native_width > 0 && g.native_height > 0 => (g.native_width, g.native_height),
-        Ok(_) => DEFAULT_SIZE,
-        Err(why) if req.verify => return Err(no_screen(why)),
-        Err(_) => DEFAULT_SIZE,
+    // The screen's size, for the acts that point: from a frame when there
+    // is one (slow eyes: from the last screenshot). Checking the result
+    // needs frames; acting blind does not.
+    let points = matches!(req.action, Action::Tap | Action::DoubleTap | Action::LongPress | Action::Swipe)
+        || (req.action == Action::Scroll && req.at.is_some());
+    let size = match eyes.known_size() {
+        _ if !points => DEFAULT_SIZE,
+        Some(sz) => sz,
+        None => match eyes.gray(GRAY_EDGE).await {
+            Ok(g) if g.native_width > 0 && g.native_height > 0 => (g.native_width, g.native_height),
+            Ok(_) => DEFAULT_SIZE,
+            Err(why) if req.verify => return Err(no_screen(why)),
+            Err(_) => DEFAULT_SIZE,
+        },
     };
     let (w, h) = size;
-    let mut out = Outcome { changed: true, verified: false, repressed: false };
+    let mut out = Outcome { changed: true, verified: false, repressed: false, bundle_id: None };
 
     match req.action {
         Action::Tap | Action::DoubleTap | Action::LongPress => {
@@ -660,8 +907,8 @@ async fn act_inner(shared: &Arc<Shared>, rig: &Rig, tuning: &PhoneTuning, req: &
             if let Some(before) = before {
                 out.verified = true;
                 let at = Some((x as f64, y as f64));
-                let (_, after) = wait_stable(eyes, AFTER_TAP_QUIET, AFTER_TAP_MAX).await.map_err(no_screen)?;
-                if diff::changed(&before.gray, &after.gray, at, size) < MIN_CHANGED {
+                let (n, _) = settle_after(eyes, &before, at, size, AFTER_TAP_MAX).await.map_err(no_screen)?;
+                if n < MIN_CHANGED {
                     // A click that lands while iOS still moves the pointer is
                     // sometimes dropped: home the pointer, come back, press once
                     // more.
@@ -671,8 +918,8 @@ async fn act_inner(shared: &Arc<Shared>, rig: &Rig, tuning: &PhoneTuning, req: &
                     board.all(route.cmds).await?;
                     tokio::time::sleep(c.settle).await;
                     press(&board, req).await?;
-                    let (_, again) = wait_stable(eyes, AFTER_TAP_QUIET, AFTER_REPRESS_MAX).await.map_err(no_screen)?;
-                    out.changed = diff::changed(&before.gray, &again.gray, at, size) >= MIN_CHANGED;
+                    let (n, _) = settle_after(eyes, &before, at, size, AFTER_REPRESS_MAX).await.map_err(no_screen)?;
+                    out.changed = n >= MIN_CHANGED;
                     if !out.changed {
                         ptr.forget();
                     }
@@ -701,9 +948,26 @@ async fn act_inner(shared: &Arc<Shared>, rig: &Rig, tuning: &PhoneTuning, req: &
             ptr.forget();
             if let Some(before) = before {
                 out.verified = true;
-                let (_, after) = wait_stable(eyes, AFTER_TAP_QUIET, AFTER_TAP_MAX).await.map_err(no_screen)?;
+                let (n, _) = settle_after(eyes, &before, None, size, AFTER_TAP_MAX).await.map_err(no_screen)?;
+                out.changed = n >= MIN_CHANGED;
+            }
+        }
+        Action::Launch => {
+            let Some(phone) = rig.net.as_ref() else {
+                return Err(req.fits(false).err().unwrap_or_default());
+            };
+            let bundle = phone.resolve(&req.app).await?;
+            let before = if req.verify { Some(look_before(eyes).await?) } else { None };
+            board.check()?;
+            phone.launch(&bundle).await.map_err(|e| format!("failed: launch {bundle}: {e}"))?;
+            // Wait for the app to come up, so the synth's next look shows it.
+            let settled = wait_stable(eyes, AFTER_TAP_QUIET, AFTER_LAUNCH_MAX).await;
+            if let Some(before) = before {
+                let (_, after) = settled.map_err(no_screen)?;
+                out.verified = true;
                 out.changed = diff::changed(&before.gray, &after.gray, None, size) >= MIN_CHANGED;
             }
+            out.bundle_id = Some(bundle);
         }
         Action::Scroll | Action::Key | Action::Type | Action::Home | Action::ReleaseAll => {
             if req.action == Action::Scroll {
@@ -713,7 +977,12 @@ async fn act_inner(shared: &Arc<Shared>, rig: &Rig, tuning: &PhoneTuning, req: &
                     tokio::time::sleep(c.settle).await;
                 }
             }
-            let before = if req.verify { Some(look().await?) } else { None };
+            // No pointer moved since the last look: slow eyes reuse it.
+            let before = match req.verify {
+                true if req.action == Action::Scroll && req.at.is_some() => Some(look().await?),
+                true => Some(look_before(eyes).await?),
+                false => None,
+            };
             match req.action {
                 // Positive = see content further down: the wheel turns down.
                 Action::Scroll => {
@@ -729,11 +998,20 @@ async fn act_inner(shared: &Arc<Shared>, rig: &Rig, tuning: &PhoneTuning, req: &
                         board.key(k).await?;
                     }
                 }
-                Action::Type => {
-                    let n = req.text.chars().count() as f64;
-                    let t = BOARD_BASE + Duration::from_secs_f64(n * 0.045);
-                    board.send(json!({"cmd": "type", "text": req.text, "delay_ms": 15}), t).await?;
-                }
+                Action::Type => match rig.net.as_ref().filter(|_| pasted(&req.text)) {
+                    // Over Wi-Fi: the phone's pasteboard, then cmd+v.
+                    Some(phone) => {
+                        board.check()?;
+                        phone.paste(&req.text).await.map_err(|e| format!("failed: paste: {e}"))?;
+                        board.key("cmd+v").await?;
+                    }
+                    None => {
+                        req.fits(false)?;
+                        let n = req.text.chars().count() as f64;
+                        let t = BOARD_BASE + Duration::from_secs_f64(n * 0.045);
+                        board.send(json!({"cmd": "type", "text": req.text, "delay_ms": 15}), t).await?;
+                    }
+                },
                 Action::Home => board.key("cmd+h").await?,
                 _ => {
                     board.send(json!({"cmd": "release_all"}), BOARD_BASE).await?;
@@ -741,8 +1019,8 @@ async fn act_inner(shared: &Arc<Shared>, rig: &Rig, tuning: &PhoneTuning, req: &
             }
             if let Some(before) = before {
                 out.verified = true;
-                let (_, after) = wait_stable(eyes, AFTER_TAP_QUIET, AFTER_TAP_MAX).await.map_err(no_screen)?;
-                out.changed = diff::changed(&before.gray, &after.gray, None, size) >= MIN_CHANGED;
+                let (n, _) = settle_after(eyes, &before, None, size, AFTER_TAP_MAX).await.map_err(no_screen)?;
+                out.changed = n >= MIN_CHANGED;
             }
         }
     }

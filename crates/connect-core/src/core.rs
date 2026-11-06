@@ -1513,6 +1513,17 @@ impl Core {
         crate::phone::preview(&self.shared, max_edge).await
     }
 
+    /// The physical iOS devices this Mac sees, for the Phone page's
+    /// picker. Only a list: the phone used is the one the owner picks.
+    pub async fn phone_devices(&self) -> Result<Vec<crate::phone::net::PhoneDevice>, String> {
+        crate::phone::devices(&self.shared).await
+    }
+
+    /// The chosen phone's apps over Wi-Fi (the self-test; read-only).
+    pub async fn phone_apps(&self) -> Result<Vec<crate::phone::net::PhoneApp>, String> {
+        crate::phone::apps(&self.shared).await
+    }
+
     /// Other eyes and hands for the phone (the self-test, tests).
     pub fn set_phone_factory(&self, f: Arc<dyn crate::phone::Factory>) {
         self.shared.phone.set_factory(f);
