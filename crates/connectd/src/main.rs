@@ -15,7 +15,7 @@
 //!   connectd selftest cua [--root <dir>] [--keep]   (see selftest.rs)
 //!   connectd selftest apps [--touch]                (see selftest.rs)
 //!   connectd selftest host [--helper <p>] [--system] (see selftest_host.rs)
-//!   connectd selftest phone [--phonecap <p>] [--fake-screen] [--touch] (see selftest_phone.rs)
+//!   connectd selftest phone [--phonecap <p>] [--fake-screen] [--touch] [--udid <UDID>] [--list] (see selftest_phone.rs)
 //!   connectd selftest safari --relay <p> [--group <id>] (macOS; see selftest_safari.rs)
 //!   connectd browser-manifest --dir <NativeMessagingHosts dir> --helper <p>
 //!
@@ -90,7 +90,7 @@ fn print_usage() {
          \u{20}  connectd selftest cua [--root <dir>] [--keep]\n\
          \u{20}  connectd selftest apps [--touch]\n\
          \u{20}  connectd selftest host [--helper <path>] [--system]\n\
-         \u{20}  connectd selftest phone [--phonecap <path>] [--fake-screen] [--touch]   (macOS)\n\
+         \u{20}  connectd selftest phone [--phonecap <path>] [--fake-screen] [--touch] [--udid <UDID>] [--list]   (macOS)\n\
          \u{20}  connectd selftest safari --relay <path> [--group <id>]   (macOS)\n\
          \u{20}  connectd browser-manifest --dir <NativeMessagingHosts dir> --helper <path>\n\
          \n\

@@ -151,7 +151,7 @@ pub async fn run(args: &[String]) -> i32 {
             0
         }
         _ => {
-            eprintln!("usage: connectd selftest cua [--root <dir>] [--keep] [--preview-window]\n       connectd selftest apps [--touch]\n       connectd selftest host [--helper <path>] [--system]\n       connectd selftest phone [--phonecap <path>] [--fake-screen] [--touch] (macOS)\n       connectd selftest safari --relay <path> [--group <id>] (macOS)");
+            eprintln!("usage: connectd selftest cua [--root <dir>] [--keep] [--preview-window]\n       connectd selftest apps [--touch]\n       connectd selftest host [--helper <path>] [--system]\n       connectd selftest phone [--phonecap <path>] [--fake-screen] [--touch] [--udid <UDID>] [--list] (macOS)\n       connectd selftest safari --relay <path> [--group <id>] (macOS)");
             2
         }
     }

@@ -2,6 +2,7 @@
 //! is there (tz-phone-control.md P0 items 1 and 2).
 //!
 //!   connectd selftest phone [--phonecap <path>] [--fake-screen] [--touch]
+//!                           [--udid <UDID>] [--list]
 //!
 //! The screen: the capture helper (`--phonecap`, else `SNTH_PHONECAP`, else
 //! `snth-phonecap` next to connectd) through the whole gate: status, a gray
@@ -17,6 +18,14 @@
 //!
 //! `--touch`: one harmless action on the phone (home, checked on the
 //! screen). Without it nothing is pressed on the phone.
+//!
+//! `--udid <UDID>`: the screen over Wi-Fi instead of the cable
+//! (tz-phone-wireless.md 2.8), for exactly that phone: its status and
+//! abilities, a frame at 768 px and at the native size, a frame that waits
+//! for the screen to be still, and the phone's app list. Read-only: no app
+//! is opened, nothing is pasted. Never a phone the UDID does not name.
+//! `--list`: the physical iOS devices this Mac sees (only a list; to pick
+//! one, pass its UDID).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,6 +33,7 @@ use std::time::{Duration, Instant};
 
 use connect_core::grant::{Approval, ApprovalFuture, ApprovalRequest, Approver};
 use connect_core::phone::{self, eyes, SystemFactory};
+use connect_core::settings::PhoneSettings;
 use connect_core::{cookies, Core, CoreConfig, CuaAttach, MemSecretStore, MultiReader};
 use serde_json::{json, Value};
 
@@ -38,7 +48,7 @@ fn step(text: &str) {
     println!("== {text}");
 }
 
-fn core_with(helper: PathBuf) -> Core {
+fn core_with(helper: PathBuf, udid: &str) -> Core {
     let core = Core::new(CoreConfig {
         settings_path: None,
         journal_path: None,
@@ -53,7 +63,11 @@ fn core_with(helper: PathBuf) -> Core {
         cua_attach: CuaAttach::User,
     });
     core.set_phone_factory(Arc::new(SystemFactory { helper: Some(helper) }));
-    core.mutate_settings(|s| s.phone_control.enabled = true);
+    let udid = udid.to_string();
+    core.mutate_settings(move |s| {
+        s.phone_control.enabled = true;
+        s.phone_control.device_udid = udid;
+    });
     core
 }
 
@@ -69,27 +83,52 @@ pub async fn phone(args: &[String]) -> Result<(), String> {
     let mut helper: Option<PathBuf> = None;
     let mut fake = false;
     let mut touch = false;
+    let mut udid = String::new();
+    let mut list = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--phonecap" => helper = Some(PathBuf::from(it.next().ok_or("--phonecap needs a path")?)),
             "--fake-screen" => fake = true,
             "--touch" => touch = true,
+            "--udid" => udid = it.next().ok_or("--udid needs the phone's UDID")?.trim().to_string(),
+            "--list" => list = true,
             other => return Err(format!("unknown option {other}")),
         }
     }
+    if !PhoneSettings::udid_ok(&udid) {
+        return Err(format!("{udid:?} is not a UDID"));
+    }
+    if fake && !udid.is_empty() {
+        return Err("--fake-screen is the cable helper's made-up screen; it does not go with --udid".into());
+    }
     let helper = helper.unwrap_or_else(eyes::helper_path);
-    if !helper.is_file() {
+    if udid.is_empty() && !helper.is_file() {
         return Err(format!("no screen helper at {} (pass --phonecap)", helper.display()));
     }
     if fake {
         // Inherited by the helper the core starts.
         std::env::set_var("SNTH_PHONECAP_FAKE", "1");
     }
-    println!("helper: {}", helper.display());
-
-    let core = core_with(helper.clone());
-    let screen = screen(&core, fake).await?;
+    let core = core_with(helper.clone(), &udid);
+    if list {
+        step("the phones this Mac sees (a list only)");
+        match core.phone_devices().await {
+            Ok(d) => {
+                for p in d {
+                    println!("{}  {} ({})  {}", p.udid, p.name, p.model, p.state);
+                }
+            }
+            Err(why) => println!("SKIP list: {why}"),
+        }
+    }
+    let screen = if udid.is_empty() {
+        println!("helper: {}", helper.display());
+        screen(&core, fake).await?
+    } else {
+        println!("the phone over Wi-Fi: {udid}");
+        screen_net(&core).await?
+    };
     let board = hands_check(&core, &helper).await?;
 
     if touch {
@@ -155,6 +194,60 @@ async fn screen(core: &Core, fake: bool) -> Result<bool, String> {
     Ok(true)
 }
 
+/// The screen over Wi-Fi through the gate. Ok(false) = skipped (Xcode
+/// missing, or the phone not reachable).
+async fn screen_net(core: &Core) -> Result<bool, String> {
+    step("the screen over Wi-Fi: the status");
+    let status = call(core, "phone_control.status", json!({})).await?;
+    println!("status: {}", status["screen"]);
+    println!("abilities: {}", status["abilities"]);
+    if status["screen"]["source"] != "network" {
+        return Err(format!("the screen's source is {} (expected network)", status["screen"]["source"]));
+    }
+    if status["screen"]["ok"] != true {
+        println!("SKIP screen: {}", status["screen"]["error"].as_str().unwrap_or(""));
+        return Ok(false);
+    }
+    if status["abilities"] != json!({"launch": true, "paste": true}) {
+        return Err(format!("a reachable phone over Wi-Fi has abilities {}", status["abilities"]));
+    }
+
+    let started = Instant::now();
+    let f = call(core, "phone_control.frame", json!({"max_edge": 768, "quality": 0.8})).await?;
+    let ms = started.elapsed().as_millis();
+    let (nw, nh) = (f["native_width"].as_u64().unwrap_or(0), f["native_height"].as_u64().unwrap_or(0));
+    check_frame(&f, 768, nw, nh)?;
+    println!("frame 768: {}x{} of {nw}x{nh}, {} KB, {ms} ms (one screenshot)", f["width"], f["height"], b64_len(&f) / 1024);
+
+    let started = Instant::now();
+    let f = call(core, "phone_control.frame", json!({})).await?;
+    check_frame(&f, 0, nw, nh)?;
+    println!("frame native: {}x{}, {} KB, {} ms", f["width"], f["height"], b64_len(&f) / 1024, started.elapsed().as_millis());
+
+    let started = Instant::now();
+    let f = call(core, "phone_control.frame", json!({"stable_ms": 600, "max_edge": 768})).await?;
+    let waited = started.elapsed();
+    println!("frame stable_ms 600: stable {} after {:.2} s", f["stable"], waited.as_secs_f64());
+    if waited > Duration::from_millis(5000) {
+        return Err(format!("the stable frame took {waited:?}"));
+    }
+
+    step("the phone's apps (read-only)");
+    let started = Instant::now();
+    let apps = core.phone_apps().await?;
+    println!("{} apps in {} ms", apps.len(), started.elapsed().as_millis());
+    for want in ["com.apple.calculator", "com.apple.Preferences"] {
+        match apps.iter().find(|a| a.bundle_id == want) {
+            Some(a) => println!("  {} = {}", a.name, a.bundle_id),
+            None => println!("  note: no {want} on this phone"),
+        }
+    }
+    if apps.is_empty() {
+        return Err("the phone listed no apps".into());
+    }
+    Ok(true)
+}
+
 fn b64_len(f: &Value) -> usize {
     f["data_b64"].as_str().map(|s| s.len() * 3 / 4).unwrap_or(0)
 }
@@ -211,6 +304,7 @@ async fn hands_check(core: &Core, helper: &std::path::Path) -> Result<bool, Stri
     core.mutate_settings(|s| s.phone_control.enabled = false);
     tokio::time::sleep(Duration::from_millis(500)).await;
     core.set_phone_factory(Arc::new(SystemFactory { helper: Some(helper.to_path_buf()) }));
+    // (The chosen phone, if any, stays in the settings: the same eyes come back.)
     core.mutate_settings(|s| s.phone_control.enabled = true);
     // A reset board reboots in about a second and the phone reconnects
     // only later: still connected two seconds after the reopen = no reset.
