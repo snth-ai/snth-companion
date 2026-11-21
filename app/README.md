@@ -456,7 +456,22 @@ talks to `<platform>/api/app/v1/*` only. There is no override in the UI.
   before keeps working until the new one is downloaded and verified (also
   when the download fails), a task that is running finishes on the old copy,
   the next one starts on the new copy, and the old copy is then removed. The
-  pin is 0.34.1 (0.33.1 before). What 0.34 changed for the owner: the
+  pin is 0.55.0 (0.34.1 before, 0.33.1 before that). What 0.55 changes:
+  the synth gets `run_steps` (several actions in one call; the driver points
+  it there after every second action), which the pipe decides step by step
+  (`connect-core/src/cua_batch.rs`: each step as the call it becomes, the
+  denylist, the never list, the cursor switch, the shared folders, the end
+  read's screenshot limit, foreground delivery; while the apps are limited
+  every window by pid and window_id, never by app name or title);
+  `run_actions`, its old name, is forwarded as `run_steps`; `run_script`
+  (JavaScript calling the driver's tools inside the driver) is off
+  (`CUA_DRIVER_DISABLE_RUN_SCRIPT=1` on every driver process) and on the
+  never list; `escalate_session` and `get_session_state` are gone; window
+  reads are compact by default and can be diffs (`since`); hover, drag
+  and drag-and-drop work in the background on macOS; refusals say what
+  will work instead. Checked with `connectd selftest cua` on macOS 26.6
+  (in a GUI session: over SSH the driver has no Window Server access and
+  runs without its cursor, the same as 0.34.1). What 0.34 changed for the owner: the
   pointer's default movement is one arc with a soft glow instead of the old
   glide, so "Normal" speed is now a move of a fifth of a second to a second
   and a half; "Fast" and "Relaxed" are fixed lengths as before. Its six
@@ -475,7 +490,7 @@ talks to `<platform>/api/app/v1/*` only. There is no override in the UI.
   `install_extension` (they install software), `check_for_update` (it writes
   into the home of a driver the owner may run themselves and answers with an
   installer command), `set_config` (the helper's own settings),
-  `replay_trajectory` (stored actions the app cannot check). A screenshot or
+  `replay_trajectory` and `run_script` (actions run inside the helper that the app cannot check one by one). A screenshot or
   a download the helper writes to disk goes only into a folder shared for
   writing in Files. Each refusal tells the synth what to say to the owner,
   and shows in Activity as "never allowed". The self-test fails when a new

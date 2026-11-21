@@ -462,6 +462,9 @@ pub async fn filter_scoped(
     if !msg.is_object() {
         return Gate::Drop("not a JSON object");
     }
+    // `run_actions` is the driver's old name of `run_steps`: one name to
+    // decide, one tool for the driver.
+    crate::cua_batch::rename_old_name(&mut msg);
     let Some(tool) = cua::tool_name(&msg).map(str::to_string) else {
         // Not a tools/call: forward the canonical re-serialization.
         return match serde_json::to_vec(&msg) {
@@ -548,6 +551,15 @@ pub async fn filter_scoped(
         crate::cua_apps::Verdict::Answer(result) => {
             shared.journal().record(Entry::new("computer", "tools/call", tool, "ok"));
             return Gate::Answer(json!({"jsonrpc": "2.0", "id": id, "result": result}));
+        }
+    }
+
+    // Several actions in one call: every step, check and the end read is
+    // decided as the call it stands for (`cua_batch`).
+    if tool == crate::cua_batch::RUN_STEPS {
+        if let Err(why) = crate::cua_batch::check(&mut msg, scope, shared.cua_directory(), &s).await {
+            shared.journal().record(Entry::new("computer", "tools/call", tool, why.journal));
+            return Gate::Refuse(jsonrpc_error(id, why.tell, why.kind));
         }
     }
 

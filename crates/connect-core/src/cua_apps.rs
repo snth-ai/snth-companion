@@ -1,10 +1,10 @@
 //! Which apps the synth may use through computer control.
 //!
 //! The owner has three choices (`settings::AppsPolicy`): every app, every
-//! app except some, only some. What Cua Driver 0.34.1 can do about it was
+//! app except some, only some. What Cua Driver 0.55.0 can do about it was
 //! read in its source at the pinned tag (`cua-driver-core`:
-//! `session_manifest.rs`, `authorization.rs`, `tool.rs`; none of the three
-//! changed between 0.33.1 and 0.34.1) and checked on our own daemon
+//! `session_manifest.rs`, `authorization.rs`, `tool.rs`, `batch_tools.rs`)
+//! and checked on our own daemon
 //! (`connectd selftest cua`):
 //!
 //!  - **Only these** is the driver's own business. Our daemon is started in
@@ -261,8 +261,8 @@ fn yaml_string(text: &str) -> String {
 /// Left out on purpose:
 ///  - what the synth may never call (`cua_guard::NEVER`) and the cursor
 ///    setters (`cua_look`);
-///  - `list_apps`, `get_desktop_state`, `get_accessibility_tree`,
-///    `escalate_session`: they are about the whole screen, which
+///  - `list_apps`, `get_desktop_state`, `get_accessibility_tree`: they
+///    are about the whole screen, which
 ///    `desktop.display: false` refuses anyway (the app answers `list_apps`
 ///    and a `list_windows` without a pid itself);
 ///  - `clipboard_read`, `clipboard_write`: the driver refuses the system
@@ -275,7 +275,6 @@ pub const MANIFEST_TOOLS: &[&str] = &[
     "end_session",
     "get_session",
     "list_sessions",
-    "get_session_state",
     "list_windows",
     "get_window_state",
     "verify_state",
@@ -305,6 +304,11 @@ pub const MANIFEST_TOOLS: &[&str] = &[
     "get_config",
     "get_recording_state",
     "stop_recording",
+    // 0.35+: the batch runs each step through the driver's own checks,
+    // the manifest included (`batch_tools.rs`, `registry.invoke`), and
+    // the pipe checks every step too (`cua_batch`).
+    "run_steps",
+    "get_guide",
 ];
 
 /// What a tool is about, for the decision below.
@@ -331,9 +335,15 @@ pub enum Kind {
     Browser,
     /// The system clipboard: no app's, and refused by a bounded driver.
     Clipboard,
+    /// `run_steps`: several actions in one call. Nothing is decided for
+    /// the call as a whole; `cua_batch::check` decides every step, every
+    /// check and the end observation as the call each of them stands for,
+    /// before the pipe goes on.
+    Batch,
 }
 
-/// Every tool of the pinned driver (58 on macOS, plus the ones only the
+/// Every tool of the pinned driver (60 on macOS with `run_script` off,
+/// plus `run_script` and the ones only the
 /// Windows and Linux drivers have). A tool that is not here is refused
 /// while the owner limits the apps, and fails `connectd selftest cua`.
 pub const TOOLS: &[(&str, Kind)] = &[
@@ -341,7 +351,6 @@ pub const TOOLS: &[(&str, Kind)] = &[
     ("list_windows", Kind::ListWindows),
     ("get_desktop_state", Kind::Screen),
     ("get_accessibility_tree", Kind::Screen),
-    ("escalate_session", Kind::Screen),
     ("launch_app", Kind::Launch),
     ("get_window_state", Kind::Window),
     ("verify_state", Kind::Window),
@@ -392,7 +401,6 @@ pub const TOOLS: &[(&str, Kind)] = &[
     ("end_session", Kind::Free),
     ("get_session", Kind::Free),
     ("list_sessions", Kind::Free),
-    ("get_session_state", Kind::Free),
     ("start_recording", Kind::Free),
     ("stop_recording", Kind::Free),
     ("get_recording_state", Kind::Free),
@@ -404,6 +412,13 @@ pub const TOOLS: &[(&str, Kind)] = &[
     ("history_status", Kind::Free),
     ("history_query", Kind::Free),
     ("probe", Kind::Free),
+    // 0.35-0.55.
+    ("get_guide", Kind::Free),
+    ("browser_select", Kind::Browser),
+    ("browser_motion_policy", Kind::Browser),
+    ("run_steps", Kind::Batch),
+    // Never allowed (`cua_guard::NEVER`), placed so the catalog is whole.
+    ("run_script", Kind::Free),
 ];
 
 /// The tools that only LOOK (read the screen, a window, the driver's own
@@ -436,13 +451,12 @@ pub const LOOK_ONLY_TOOLS: &[&str] = &[
     "end_session",
     "get_session",
     "list_sessions",
-    "get_session_state",
-    "escalate_session",
     "get_recording_state",
     "parse_visual_regions",
     "history_status",
     "history_query",
     "probe",
+    "get_guide",
 ];
 
 /// Does this tool act on the owner's computer (see `LOOK_ONLY_TOOLS`)?
@@ -596,6 +610,8 @@ pub async fn decide(scope: &Scope, tool: &str, msg: &Value, dir: &Directory) -> 
     let target = target_of(args);
     match kind {
         Kind::Free => Verdict::Pass,
+        // Decided step by step before the pipe gets here (`cua_batch`).
+        Kind::Batch => Verdict::Pass,
         Kind::Screen => whole_screen(),
         Kind::Clipboard => match scope.policy {
             // The bounded driver refuses the clipboard under any manifest.
@@ -1391,6 +1407,7 @@ mod tests {
                 "browser_pointer", "clipboard_write", "set_agent_cursor_enabled", "set_agent_cursor_motion",
                 "set_agent_cursor_theme", "set_config", "start_recording", "stop_recording",
                 "replay_trajectory", "install_ffmpeg", "install_extension", "check_for_update",
+                "browser_select", "browser_motion_policy", "run_steps", "run_script",
             ]
         );
         assert!(is_action("a_tool_from_a_newer_driver"));
@@ -1401,18 +1418,19 @@ mod tests {
         // `advertised_risk_for` of the pinned driver (cua-driver-core,
         // authorization.rs): a name outside it stops the daemon at start.
         const REVIEWED: &[&str] = &[
-            "get_screen_size", "get_cursor_position", "get_config", "get_session", "list_sessions", "get_session_state",
+            "get_screen_size", "get_cursor_position", "get_config", "get_session", "list_sessions",
             "get_agent_cursor_state", "get_recording_state", "check_for_update", "health_report", "probe", "click",
             "double_click", "right_click", "drag", "scroll", "move_cursor", "mouse_button_down", "mouse_button_up",
             "mouse_drag", "parallel_mouse_drag", "type_text", "type_text_chars", "press_key", "hotkey", "set_value",
             "invoke_menu", "launch_app", "bring_to_front", "set_window_frame", "start_session", "end_session",
             "set_agent_cursor_enabled", "set_agent_cursor_motion", "set_agent_cursor_theme", "clipboard_write", "zoom",
             "clipboard_read", "list_apps", "list_windows", "debug_window_info", "check_permissions",
-            "get_accessibility_tree", "verify_state", "set_config", "escalate_session", "start_recording",
+            "get_accessibility_tree", "verify_state", "set_config", "start_recording",
             "get_browser_state", "browser_prepare", "browser_navigate", "browser_click", "browser_type",
             "browser_pointer", "history_status", "history_query", "parse_visual_regions", "get_desktop_state",
             "get_window_state", "kill_app", "stop_recording", "replay_trajectory", "install_ffmpeg",
             "install_extension", "page", "browser_dialog", "browser_set_input_files", "browser_download",
+            "get_guide", "run_steps", "run_script", "browser_select", "browser_motion_policy",
         ];
         let mut seen = std::collections::BTreeSet::new();
         for tool in MANIFEST_TOOLS {
@@ -1530,7 +1548,6 @@ mod tests {
                 ("move_cursor", json!({"x": 5, "y": 5, "scope": "desktop"})),
                 ("get_desktop_state", json!({})),
                 ("get_accessibility_tree", json!({})),
-                ("escalate_session", json!({"session": "Mia: flights", "reason": "x"})),
             ] {
                 let v = verdict(&limited, tool, args).await;
                 assert!(told(&v).contains("window by window"), "{tool}: {}", told(&v));

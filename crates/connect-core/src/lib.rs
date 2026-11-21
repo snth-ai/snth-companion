@@ -36,6 +36,7 @@ pub mod cookies;
 pub mod core;
 pub mod cua;
 pub mod cua_apps;
+pub mod cua_batch;
 pub mod cua_guard;
 pub mod cua_health;
 pub mod cua_install;

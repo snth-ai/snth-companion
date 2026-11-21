@@ -2,7 +2,7 @@
 //! the owner's settings say, and the one rule for where the driver may
 //! write a file.
 //!
-//! Cua Driver's catalog (58 tools at the pinned 0.34.1) is built for an
+//! Cua Driver's catalog (60 tools at the pinned 0.55.0, `run_script` off) is built for an
 //! agent on its own machine. A few of its tools do things on the OWNER's
 //! computer that the owner has no switch for in this app: they install
 //! software, change the driver's own settings, keep pictures of the screen
@@ -128,8 +128,13 @@ pub const NEVER: &[Never] = &[
     },
     Never {
         tool: "set_config",
-        why: "changes the driver's own settings: its experimental_pip keys and (since 0.34) its cursor.motion defaults are written to ~/.cua-driver/config.json, which a driver the owner runs themselves reads too, and max_image_dimension would lift the owner's screenshot limit",
+        why: "changes the driver's own settings: its cursor.* defaults (motion, halo, float, rotate, badges, marks) and fast_path are written to ~/.cua-driver/config.json, which a driver the owner runs themselves reads too, and max_image_dimension would lift the owner's screenshot limit",
         tell: "the helper's settings on this computer are its owner's, in SNTH Connect under Computer control; for a smaller screenshot pass max_image_dimension on the call itself, and for anything else tell the owner where the setting is",
+    },
+    Never {
+        tool: "run_script",
+        why: "runs a JavaScript program inside the driver that calls the driver's own tools (launch, click, type, read) in a loop, where the app cannot check them one by one (blocked apps, the cursor switch, files written, foreground delivery); the app also starts the driver with it switched off (CUA_DRIVER_DISABLE_RUN_SCRIPT)",
+        tell: "scripts are not available through SNTH Connect; use run_steps for a known list of actions, or one tool call at a time when you need to look between them, and tell the owner a script cannot run here if they asked for one",
     },
     Never {
         tool: "replay_trajectory",
@@ -153,7 +158,6 @@ pub const REVIEWED_TOOLS: &[(&str, &str)] = &[
     ("get_recording_state", "read-only"),
     ("get_config", "read-only"),
     ("check_permissions", "read-only here: an embedded daemon never raises a system prompt, whatever `prompt` says (check_permissions.rs, should_prompt_permissions)"),
-    ("escalate_session", "deprecated; changes one session's capture scope in memory, which every call can already choose for itself; nothing is stored and nobody is asked"),
     ("browser_download", "saves a file into `destination_root`, which is held to the shared folders (WRITE_ARGS)"),
 ];
 
@@ -168,6 +172,8 @@ pub const REVIEWED_ARGS: &[(&str, &str, &str)] = &[
     ("launch_app", "launch_path", "the program to start, as list_apps gave it (Windows, Linux): started, not written"),
     ("launch_app", "path", "the program to start (Windows): started, not written"),
     ("drag", "path", "the points a drag passes through (Linux), not a place on disk"),
+    ("get_window_state", "full_output", "a switch for the full answer (0.35+), not a place on disk"),
+    ("set_config", "fast_path", "the tool itself is never allowed"),
     ("start_recording", "output_dir", "the tool itself is never allowed"),
     ("replay_trajectory", "dir", "the tool itself is never allowed"),
 ];
@@ -322,7 +328,7 @@ mod tests {
             // A tool is in one list only.
             assert!(!REVIEWED_TOOLS.iter().any(|(t, _)| *t == n.tool), "{}", n.tool);
         }
-        for must in ["start_recording", "install_ffmpeg", "install_extension", "check_for_update", "set_config", "replay_trajectory"] {
+        for must in ["start_recording", "install_ffmpeg", "install_extension", "check_for_update", "set_config", "replay_trajectory", "run_script"] {
             assert!(refusal(must).is_some(), "{must}");
         }
         for may in ["stop_recording", "get_recording_state", "click", "get_window_state", "get_config"] {
@@ -344,13 +350,15 @@ mod tests {
 
     #[test]
     fn the_pinned_catalog_is_fully_classified() {
-        // The tools of 0.34.1 whose names or arguments fall under the lists
-        // (0.34 added no tool; its new arguments, `display_only` on
-        // `get_window_state`, `cursor_motion` on `start_session` and the
-        // `cursor.motion.*` keys of `set_config`, name no place on disk).
+        // The tools of 0.55.0 whose names or arguments fall under the lists
+        // (0.35-0.55 added run_steps, run_script, get_guide, browser_select
+        // and browser_motion_policy, removed escalate_session and
+        // get_session_state; of their new arguments only `full_output` on
+        // `get_window_state` and `fast_path` on `set_config` look like a
+        // place on disk, and neither is one).
         let catalog = vec![
             tool("click", &["pid", "x", "y", "debug_image_out", "timeout_ms"]),
-            tool("get_window_state", &["pid", "screenshot_out_file", "max_image_dimension", "display_only"]),
+            tool("get_window_state", &["pid", "screenshot_out_file", "max_image_dimension", "display_only", "full_output", "since", "screenshot_format"]),
             tool("get_desktop_state", &["screenshot_out_file"]),
             tool("clipboard_write", &["text", "file_path", "image_path"]),
             tool("browser_set_input_files", &["files", "ref"]),
@@ -369,10 +377,12 @@ mod tests {
             tool("check_for_update", &[]),
             tool("check_permissions", &["prompt"]),
             tool("get_config", &[]),
-            tool("set_config", &["key", "value", "cursor.motion", "cursor.motion.style", "cursor.motion.effects.trail"]),
+            tool("set_config", &["key", "value", "cursor.motion", "cursor.motion.style", "cursor.motion.effects.trail", "fast_path", "cursor.halo"]),
             tool("start_session", &["session", "cursor_theme", "cursor_motion"]),
             tool("set_agent_cursor_motion", &["session", "style", "timing", "effects", "glide_duration_ms"]),
-            tool("escalate_session", &["reason"]),
+            tool("run_steps", &["steps", "observe", "foreground_fallback"]),
+            tool("run_script", &["script"]),
+            tool("get_guide", &["topic"]),
             tool("get_browser_state", &["snapshot_format"]),
         ];
         assert_eq!(unclassified(&catalog), Vec::<String>::new());

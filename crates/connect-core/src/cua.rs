@@ -21,7 +21,7 @@ use tokio::process::{Child, ChildStdin, Command};
 use crate::settings::{ComputerMode, Foreground, Settings};
 
 /// The Cua Driver version the app pins and installs.
-pub const PINNED_VERSION: &str = "0.34.1";
+pub const PINNED_VERSION: &str = "0.55.0";
 
 /// Our host bundle id, passed as the embedded-mode advisory label.
 pub const HOST_BUNDLE_ID: &str = "ai.snth.connect";
@@ -70,6 +70,12 @@ impl DriverEnv {
     pub fn apply(&self, cmd: &mut Command) {
         telemetry_off(cmd);
         cmd.env("CUA_DRIVER_RS_UPDATE_CHECK", "0");
+        // `run_script` (0.35+) runs a JavaScript program that calls the
+        // driver's tools from inside the driver, where the pipe cannot see
+        // or check them one by one. Off: the driver then leaves it out of
+        // tools/list and out of its own instructions (`cua_guard::NEVER`
+        // refuses it as well, should a driver ever ignore this variable).
+        cmd.env("CUA_DRIVER_DISABLE_RUN_SCRIPT", "1");
         if let Some(home) = &self.home {
             cmd.env("CUA_DRIVER_RS_HOME", home);
         }
@@ -487,6 +493,11 @@ pub fn wants_foreground(msg: &serde_json::Value) -> bool {
                 if m.get("delivery_mode").and_then(|x| x.as_str()) == Some("foreground") {
                     return true;
                 }
+                // run_steps (0.35+): retry a step the app ignored in the
+                // background once in the foreground.
+                if m.get("foreground_fallback").and_then(|x| x.as_bool()) == Some(true) {
+                    return true;
+                }
                 m.values().any(scan)
             }
             serde_json::Value::Array(a) => a.iter().any(scan),
@@ -544,6 +555,13 @@ mod tests {
         )
         .unwrap();
         assert!(!wants_foreground(&bg));
+        // run_steps: a step deep in the batch, and the batch-wide fallback.
+        let step = serde_json::json!({"method":"tools/call","params":{"name":"run_steps","arguments":{"steps":[{"click":{"pid":1,"delivery_mode":"foreground"}}]}}});
+        assert!(wants_foreground(&step));
+        let fallback = serde_json::json!({"method":"tools/call","params":{"name":"run_steps","arguments":{"foreground_fallback":true,"steps":[]}}});
+        assert!(wants_foreground(&fallback));
+        let no_fallback = serde_json::json!({"method":"tools/call","params":{"name":"run_steps","arguments":{"foreground_fallback":false,"steps":[]}}});
+        assert!(!wants_foreground(&no_fallback));
     }
 
     #[test]

@@ -65,31 +65,31 @@ const PINNED_ARCHIVES: &[(&str, &str, &str, &str)] = &[
         "macos",
         "*",
         "darwin-universal-binary.tar.gz",
-        "52de49b5046df19245ad02ff9aa89ce9caf69e84988e1d0fac677611dd83e48c",
+        "e6246d3da20abe019e2660e8b5f77e0c12cf9b386597a76393116994a36db6ce",
     ),
     (
         "linux",
         "x86_64",
         "linux-x86_64-binary.tar.gz",
-        "a41fe2bdcbeea4501dc594c074f16b0975728e0cc7b08b90acea8564d48fafee",
+        "1cb8aa6d30e5cdf5bf4d222cb3693a50af2c178073a49dc59e88737c5f7807e6",
     ),
     (
         "linux",
         "aarch64",
         "linux-arm64-binary.tar.gz",
-        "1c839d35401bbdea20f3e1cf50ace926ef17be6f32cea7e821b02b263c4933dc",
+        "401f7f4a9ad276dbcdb324f1b00e152987a46985b68c9e625ac01101f5e6af77",
     ),
     (
         "windows",
         "x86_64",
         "windows-x86_64-binary.zip",
-        "021bc2e5330c80a6c5e2c347c305fafbd4defe195d6282e0d20436f2f13c19bb",
+        "357b93254183c0e24a501eb9ad3a6e0f3738a67bfed55c0c292959b540d9b4a7",
     ),
     (
         "windows",
         "aarch64",
         "windows-arm64-binary.zip",
-        "21820a2ae20cb4bb998a340ff87c11007b9eb5cec8d1b8338c7b0d6dc88b01a6",
+        "ab1515f8893fb8b1acda5a4ffe1d2e97d19a938460d0f5ac7b6e9ed88f37f020",
     ),
 ];
 

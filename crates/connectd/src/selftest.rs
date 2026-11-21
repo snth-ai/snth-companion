@@ -401,6 +401,14 @@ async fn guard(core: &Core, root: &std::path::Path) -> Result<(), String> {
             unknown.join(", ")
         ));
     }
+    // The app starts the driver with run_script off (CUA_DRIVER_DISABLE_RUN_SCRIPT):
+    // its programs would call the driver's tools where the pipe cannot see them.
+    if names.contains(&"run_script") {
+        return Err("run_script is in the catalog: the driver did not take CUA_DRIVER_DISABLE_RUN_SCRIPT".into());
+    }
+    if !names.contains(&"run_steps") {
+        println!("run_steps: not in this driver's catalog");
+    }
     println!(
         "{} tools: {} never allowed, {} read and allowed, {} write arguments held to the shared folders, nothing unclassified",
         names.len(),
@@ -421,7 +429,7 @@ async fn guard(core: &Core, root: &std::path::Path) -> Result<(), String> {
             "start_recording" => json!({"session": "task-guard", "output_dir": recording_s, "record_video": true}),
             "install_ffmpeg" => json!({"confirm": true}),
             "install_extension" => json!({"name": "perception", "confirm": true}),
-            "set_config" => json!({"experimental_pip": true}),
+            "set_config" => json!({"key": "cursor.halo", "value": true}),
             "replay_trajectory" => json!({"dir": recording_s}),
             _ => json!({}),
         };
@@ -507,6 +515,35 @@ async fn guard(core: &Core, root: &std::path::Path) -> Result<(), String> {
                 (Filtered::Refused(why), false) => return Err(format!("{what}: refused without words for the owner: {why:?}")),
                 (Filtered::Refused(why), true) => return Err(format!("{what} was refused: {why}")),
                 (Filtered::Forwarded(message), false) => return Err(format!("{what} was let through: {message}")),
+            }
+        }
+        // The same rule for a step of run_steps, by its old name too, and
+        // for its end read.
+        for (what, arguments, at, allowed) in [
+            ("a step's marked screenshot outside the shared folders", json!({"pid": 1, "window_id": 1, "steps": [{"click": {"x": 1, "y": 1, "debug_image_out": path(&outside, "mark.png")}}]}), "/params/arguments/steps/0/click/debug_image_out", false),
+            ("a step's marked screenshot into the shared folder", json!({"pid": 1, "window_id": 1, "steps": [{"tool": "click", "args": {"x": 1, "y": 1, "debug_image_out": path(&rw, "mark.png")}}]}), "/params/arguments/steps/0/args/debug_image_out", true),
+            ("the end read's screenshot outside the shared folders", json!({"pid": 1, "window_id": 1, "steps": [{"click": {"x": 1, "y": 1}}], "observe": {"screenshot_out_file": path(&outside, "shot.png")}}), "/params/arguments/observe/screenshot_out_file", false),
+        ] {
+            for name in ["run_steps", "run_actions"] {
+                let line = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments.clone()}});
+                match (filtered(&shared, &line).await?, allowed) {
+                    (Filtered::Forwarded(message), true) => {
+                        if message.pointer("/params/name").and_then(Value::as_str) != Some("run_steps") {
+                            return Err(format!("{what} ({name}): forwarded under another name: {message}"));
+                        }
+                        let got = message.pointer(at).and_then(Value::as_str).unwrap_or("");
+                        if !std::path::Path::new(got).starts_with(&inside) {
+                            return Err(format!("{what} ({name}): forwarded as {got:?}, which is not inside {}", inside.display()));
+                        }
+                        println!("{what} ({name}): passes");
+                    }
+                    (Filtered::Refused(why), false) if why.starts_with("denied: ") && why.contains("owner") => {
+                        println!("{what} ({name}): refused");
+                    }
+                    (Filtered::Refused(why), false) => return Err(format!("{what} ({name}): refused without words for the owner: {why:?}")),
+                    (Filtered::Refused(why), true) => return Err(format!("{what} ({name}) was refused: {why}")),
+                    (Filtered::Forwarded(message), false) => return Err(format!("{what} ({name}) was let through: {message}")),
+                }
             }
         }
         // Files switched off: nothing may be written at all.
